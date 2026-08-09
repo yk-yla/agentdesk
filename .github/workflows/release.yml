@@ -1,0 +1,58 @@
+name: Release Windows installer
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Build installer
+        run: npm run package
+
+      - name: Verify installer files
+        shell: pwsh
+        run: |
+          $version = (Get-Content package.json -Raw | ConvertFrom-Json).version
+          $files = @(
+            "build/release/AgentDesk-Setup-$version.exe",
+            "build/release/AgentDesk-Setup-$version.exe.blockmap",
+            "build/release/latest.yml"
+          )
+          foreach ($file in $files) {
+            if (-not (Test-Path -LiteralPath $file -PathType Leaf)) {
+              throw "Missing release file: $file"
+            }
+          }
+
+      - name: Verify release version
+        shell: pwsh
+        run: |
+          $version = (Get-Content package.json -Raw | ConvertFrom-Json).version
+          if ($env:GITHUB_REF_NAME -ne "v$version") {
+            throw "Tag $env:GITHUB_REF_NAME does not match package version $version"
+          }
+
+      - name: Publish GitHub Release
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $version = (Get-Content package.json -Raw | ConvertFrom-Json).version
+          $installer = "build/release/AgentDesk-Setup-$version.exe"
+          gh release create $env:GITHUB_REF_NAME $installer "$installer.blockmap" "build/release/latest.yml" --verify-tag --generate-notes --title "AgentDesk $version"

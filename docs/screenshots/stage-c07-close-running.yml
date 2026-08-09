@@ -1,0 +1,141 @@
+- generic [ref=e3]:
+  - banner [ref=e4]:
+    - generic [ref=e5]: AgentDesk
+    - generic [ref=e7]:
+      - button "还原窗口" [ref=e8] [cursor=pointer]
+      - button "最小化到任务栏" [ref=e13] [cursor=pointer]
+  - generic [ref=e17]:
+    - complementary [ref=e18]:
+      - generic [ref=e19]:
+        - generic [ref=e20]:
+          - button "新建 Codex 会话" [ref=e21] [cursor=pointer]:
+            - generic "Codex" [ref=e22]
+            - generic [ref=e23]: Codex
+          - button "新建 Claude Code 会话" [ref=e24] [cursor=pointer]:
+            - generic "Claude Code" [ref=e25]
+            - generic [ref=e26]: Claude
+        - button "选择目录" [ref=e27] [cursor=pointer]
+        - button "刷新历史" [ref=e30] [cursor=pointer]
+        - button "外观和展示设置" [ref=e41] [cursor=pointer]
+        - button "收起左侧面板" [expanded] [ref=e45] [cursor=pointer]
+      - generic "D:\\me\\project\\tools\\agentdesk" [ref=e49]:
+        - generic [ref=e52]:
+          - generic [ref=e53]:
+            - generic [ref=e54]: 当前目录
+            - generic [ref=e55]: "11"
+          - strong [ref=e56]: agentdesk
+        - button "固定当前目录" [ref=e57] [cursor=pointer]
+      - generic [ref=e60]:
+        - textbox "搜索当前目录会话标题" [ref=e61]:
+          - /placeholder: 搜索当前目录标题
+        - button "搜索所有会话正文" [disabled] [ref=e62]
+      - group "筛选会话 Provider" [ref=e68]:
+        - button "全部" [ref=e69] [cursor=pointer]
+        - button "Codex Codex" [ref=e70] [cursor=pointer]:
+          - generic "Codex" [ref=e71]
+          - text: Codex
+        - button "Claude Code Claude" [ref=e72] [cursor=pointer]:
+          - generic "Claude Code" [ref=e73]
+          - text: Claude
+      - navigation "当前目录会话列表" [ref=e74]:
+        - button "Claude Code C07 close while running 刚刚" [ref=e493] [cursor=pointer]:
+          - generic "Claude Code" [ref=e467]
+          - generic [ref=e470]: C07 close while running
+          - generic [ref=e472]: 刚刚
+        - button "Claude Code C07 long running fixture 刚刚" [ref=e375] [cursor=pointer]:
+          - generic "Claude Code" [ref=e336]
+          - generic [ref=e339]: C07 long running fixture
+          - generic [ref=e341]: 刚刚
+        - button "Claude Code C22 offline 15分钟前" [ref=e494] [cursor=pointer]:
+          - generic "Claude Code" [ref=e77]
+          - generic [ref=e78]: C22 offline
+          - generic [ref=e80]: 15分钟前
+        - button "Claude Code C22 timeout 15分钟前" [ref=e473] [cursor=pointer]:
+          - generic "Claude Code" [ref=e83]
+          - generic [ref=e84]: C22 timeout
+          - generic [ref=e86]: 15分钟前
+        - button "Claude Code C22 truncatedSse 15分钟前" [ref=e376] [cursor=pointer]:
+          - generic "Claude Code" [ref=e89]
+          - generic [ref=e90]: C22 truncatedSse
+          - generic [ref=e92]: 15分钟前
+        - button "Claude Code C22 serverError 15分钟前" [ref=e377] [cursor=pointer]:
+          - generic "Claude Code" [ref=e95]
+          - generic [ref=e96]: C22 serverError
+          - generic [ref=e98]: 15分钟前
+        - button "Claude Code C22 rateLimited 15分钟前" [ref=e378] [cursor=pointer]:
+          - generic "Claude Code" [ref=e101]
+          - generic [ref=e102]: C22 rateLimited
+          - generic [ref=e104]: 15分钟前
+        - button "Claude Code C22 unauthorized 15分钟前" [ref=e379] [cursor=pointer]:
+          - generic "Claude Code" [ref=e107]
+          - generic [ref=e108]: C22 unauthorized
+          - generic [ref=e110]: 15分钟前
+        - button "Claude Code C22 rateLimited 15分钟前" [ref=e244] [cursor=pointer]:
+          - generic "Claude Code" [ref=e113]
+          - generic [ref=e114]: C22 rateLimited
+          - generic [ref=e116]: 15分钟前
+        - button "Claude Code C22 unauthorized 26分钟前" [ref=e495] [cursor=pointer]:
+          - generic "Claude Code" [ref=e119]
+          - generic [ref=e120]: C22 unauthorized
+          - generic [ref=e122]: 26分钟前
+        - button "Claude Code fixture unauthorized 28分钟前" [ref=e380] [cursor=pointer]:
+          - generic "Claude Code" [ref=e125]
+          - generic [ref=e126]: fixture unauthorized
+          - generic [ref=e128]: 28分钟前
+      - separator "调整会话列表宽度" [ref=e129]
+    - generic [ref=e130]:
+      - generic [ref=e131]:
+        - generic [ref=e134]:
+          - button "Codex agentdesk · 新会话 关闭 新会话" [ref=e245] [cursor=pointer]:
+            - generic "Codex" [ref=e136]
+            - generic [ref=e138]:
+              - generic [ref=e139]: agentdesk
+              - generic [ref=e140]: ·
+              - generic [ref=e141]: 新会话
+            - button "关闭 新会话" [ref=e246]
+          - button "Claude Code agentdesk · C07 long running fixture 关闭 C07 long running fixture" [ref=e342] [cursor=pointer]:
+            - generic "Claude Code" [ref=e251]
+            - generic [ref=e253]:
+              - generic [ref=e254]: agentdesk
+              - generic [ref=e255]: ·
+              - generic [ref=e256]: C07 long running fixture
+            - button "关闭 C07 long running fixture" [ref=e343]
+        - generic [ref=e142]:
+          - button "新建 Codex 会话" [ref=e143] [cursor=pointer]:
+            - generic "Codex" [ref=e144]
+          - button "新建 Claude Code 会话" [ref=e145] [cursor=pointer]:
+            - generic "Claude Code" [ref=e146]
+          - button "分成两列" [ref=e147] [cursor=pointer]
+      - generic [ref=e151]:
+        - generic [ref=e496]:
+          - article "你的消息" [ref=e497]:
+            - generic [ref=e498]:
+              - paragraph [ref=e501]: C07 long running fixture
+              - button "复制消息"
+          - article "Claude Code 消息" [ref=e502]:
+            - generic [ref=e503]:
+              - paragraph [ref=e506]: Request timed out
+              - button "复制消息"
+        - generic [ref=e201]:
+          - alert [ref=e507]:
+            - generic [ref=e511]: 连接 Claude 网关超时，当前回合已结束，请检查网络后重试。
+            - button "关闭错误提示" [ref=e512] [cursor=pointer]
+          - generic [ref=e516]:
+            - generic [ref=e517]:
+              - generic "D:\\me\\project\\tools\\agentdesk" [ref=e518]
+              - generic [ref=e522]:
+                - combobox "选择模型" [ref=e523]:
+                  - option "Default (recommended)" [selected]
+                  - option "Opus (1M context)"
+                  - option "Sonnet"
+                  - option "Sonnet 5 (1M context)"
+                  - option "Haiku"
+                - combobox "选择思考等级" [ref=e524]:
+                  - option "medium" [selected]
+                - generic "发送首条消息后查询上下文用量" [ref=e525]: 0/?
+                - button "压缩 0" [ref=e526] [cursor=pointer]
+                - button "详情" [ref=e527] [cursor=pointer]
+                - group [ref=e531]:
+                  - generic "更多会话操作" [ref=e532] [cursor=pointer]
+            - textbox "消息输入" [ref=e538]:
+              - /placeholder: 描述你要完成的事情

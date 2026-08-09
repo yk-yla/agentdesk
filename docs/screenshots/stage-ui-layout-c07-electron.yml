@@ -1,0 +1,30 @@
+stage: UI-C07
+date: 2026-08-09
+viewport: 1920x1080
+checks:
+  sidebar_min_width: 184
+  provider_buttons:
+    - label: 新建 Codex 会话
+      width: 79.17
+      text: Codex
+      right_edge: 173.33
+    - label: 新建 Claude Code 会话
+      width: 79.17
+      text: Claude
+      right_edge: 173.33
+  utility_buttons_right_edge: 173.33
+  tab_actions:
+    - label: 新建 Codex 会话
+      width: 30
+      right_edge: 1847.33
+    - label: 新建 Claude Code 会话
+      width: 30
+      right_edge: 1881.33
+    - label: 分成两列
+      width: 30
+      right_edge: 1915.33
+  screenshot: docs/screenshots/stage-ui-layout-fixed-184.png
+  running_tab_close:
+    confirmation: 1 个正在工作的会话即将关闭。确认后会停止任务并释放会话资源，确定关闭吗？
+    intermediate_state: 正在关闭
+    terminal: Tab removed; no 关闭失败 or 正在关闭 text remained

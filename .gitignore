@@ -1,0 +1,58 @@
+# Dependencies
+node_modules/
+
+# Build and packaging output
+build/
+dist/
+out/
+coverage/
+*.tsbuildinfo
+
+# Playwright and other local test output
+.playwright-cli/
+docs/playwright/
+test-results/
+playwright-report/
+.cache/
+.nyc_output/
+.eslintcache
+.stylelintcache
+*.trace
+*.har
+
+# Local environment and secrets
+.env
+.env.*
+!.env.example
+
+# Logs and crash dumps
+*.log
+*.log.*
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+*.dmp
+
+# IDE and operating-system files
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+desktop.ini
+*.suo
+*.user
+*.userosscache
+*.sln.docstates
+
+# Temporary and editor swap files
+*.tmp
+*.temp
+*.swp
+*.swo
+*.orig
+*.rej
+*~
+
+# Electron-generated update metadata
+dev-app-update.yml

@@ -1,0 +1,63 @@
+stage: C-23
+date: 2026-08-09
+kind: real-electron-process-tree
+viewport: 1920x1080
+workspace: D:\\me\\project\\tools\\agentdesk
+identity:
+  ownership_key: provider + sessionId + queryGeneration
+  termination_policy: only tracked process trees; never kill by image name
+cases:
+  - path: /clear
+    provider: claude
+    root_pid: 59816
+    query_generation: 1
+    replacement_query_generation: 1
+    result: root and descendants absent; old query replaced by a new query
+  - path: delete-running-session
+    provider: claude
+    root_pid: 53456
+    descendants_before: [51912, 59860]
+    query_generation: 1
+    result: root and descendants absent; history deletion completed
+  - path: worker-fatal
+    provider: claude
+    root_pid: 60760
+    descendants_before: [48460, 59760]
+    query_generation: 1
+    result: root and descendants absent; backendExited delivered; next Worker rebuilt
+  - path: claude-update-dry-run
+    provider: claude
+    root_pid: 61416
+    query_generation: 1
+    result: root absent; claude/queryClosed delivered
+  - path: desktop-update-cancel
+    provider: claude
+    query_generation: 1
+    result: confirmation cancelled; update state remained downloaded and query kept running
+  - path: desktop-update-confirm
+    provider: claude
+    query_generation: 1
+    result: close coordinator completed; Claude tree and Codex app-server absent before install handoff
+  - path: application-quit
+    provider: claude
+    session_label: hook-lifecycle-fixture
+    root_pid: 57600
+    query_generation: 1
+    descendants_before: [7884, 54752]
+    result: root and descendants absent after quitForTesting
+  - path: tab-close
+    provider: claude
+    fixtures: [longBash, approval, stream]
+    query_generation: 1
+    result: confirmed -> interrupted -> closed; tracked root and descendants absent
+checks:
+  stale_query_events_ignored: true
+  pending_approval_cancelled: true
+  codex_other_session_not_killed: true
+  repeated_close_is_idempotent: true
+evidence:
+  - docs/screenshots/stage-c07-close-running.yml
+  - docs/screenshots/stage-c07-approval-electron.png
+  - docs/screenshots/stage-c07-stream-electron.png
+  - docs/screenshots/stage-c03-shutdown-electron.yml
+  - src/main/providers/claude/claudeWorkerHost.test.ts

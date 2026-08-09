@@ -1,0 +1,68 @@
+import { FolderOpen, GripVertical, Pin, X } from "lucide-react";
+import { memo, useState, type DragEvent as ReactDragEvent } from "react";
+import type { AgentProvider } from "../shared/agentProtocol";
+import type { DesktopPreferences } from "../shared/protocol";
+import { basename, sameDirectory } from "./domain";
+import ProviderIcon from "./ProviderIcon";
+import { reorderFavoriteWorkspaceList } from "./sidebarViewModel";
+
+export interface WorkspaceNavigationViewModel {
+  currentCwd: string;
+  activeCwd: string;
+  currentDirectoryHistoryCount: number;
+  favoriteWorkspaces: string[];
+}
+
+export interface WorkspaceNavigationActions {
+  onNewSession: (cwd: string, provider?: AgentProvider) => void;
+  onSelectWorkspace: (directory: string) => void;
+  onToggleFavorite: (directory: string) => void;
+  onSavePreference: (patch: Partial<DesktopPreferences>) => void;
+}
+
+export interface WorkspaceNavigationProps {
+  viewModel: WorkspaceNavigationViewModel;
+  actions: WorkspaceNavigationActions;
+}
+
+function WorkspaceNavigationBase({ viewModel, actions }: WorkspaceNavigationProps) {
+  const { currentCwd, activeCwd, currentDirectoryHistoryCount, favoriteWorkspaces } = viewModel;
+  const { onNewSession, onSelectWorkspace, onToggleFavorite, onSavePreference } = actions;
+  const [draggingWorkspace, setDraggingWorkspace] = useState<string | null>(null);
+  const [dragOverWorkspace, setDragOverWorkspace] = useState<string | null>(null);
+  const currentWorkspaceFavorite = favoriteWorkspaces.some((directory) => sameDirectory(directory, currentCwd));
+
+  const clearDrag = () => {
+    setDraggingWorkspace(null);
+    setDragOverWorkspace(null);
+  };
+
+  const reorder = (targetDirectory: string) => {
+    const next = reorderFavoriteWorkspaceList(favoriteWorkspaces, draggingWorkspace, targetDirectory);
+    if (next !== favoriteWorkspaces) onSavePreference({ favoriteWorkspaces: next });
+  };
+
+  return <>
+    <div className="current-workspace" title={currentCwd}>
+      <FolderOpen size={16} />
+      <div>
+        <span className="current-workspace-label"><span>当前目录</span><span>{currentDirectoryHistoryCount}</span></span>
+        <strong>{basename(currentCwd)}</strong>
+      </div>
+      <button className={`current-workspace-pin ${currentWorkspaceFavorite ? "active" : ""}`} onClick={() => onToggleFavorite(currentCwd)} title={currentWorkspaceFavorite ? "取消固定当前目录" : "固定当前目录"} aria-label={currentWorkspaceFavorite ? "取消固定当前目录" : "固定当前目录"} aria-pressed={currentWorkspaceFavorite}>
+        <Pin size={13} fill={currentWorkspaceFavorite ? "currentColor" : "none"} />
+      </button>
+    </div>
+    {favoriteWorkspaces.length ? <div className="favorites-section">
+      <div className="workspace-shortcuts">{favoriteWorkspaces.map((directory) => <div className={`shortcut-row ${dragOverWorkspace === directory ? "drag-over" : ""}`} key={directory} onDragOver={(event) => { event.preventDefault(); event.dataTransfer.dropEffect = "move"; setDragOverWorkspace(directory); }} onDrop={(event) => { event.preventDefault(); reorder(directory); clearDrag(); }}>
+        <button type="button" className="shortcut-drag-handle" draggable onDragStart={(event: ReactDragEvent<HTMLButtonElement>) => { event.dataTransfer.effectAllowed = "move"; event.dataTransfer.setData("text/plain", directory); setDraggingWorkspace(directory); }} onDragEnd={clearDrag} title="拖动调整固定目录顺序" aria-label={`拖动 ${basename(directory)} 调整固定目录顺序`}><GripVertical size={13} /></button>
+        <button className={`workspace-shortcut ${sameDirectory(directory, activeCwd) ? "active" : ""}`} onClick={() => onSelectWorkspace(directory)} title={directory}><Pin size={12} /><span>{basename(directory)}</span></button>
+        <button className="shortcut-new provider-codex" onClick={() => onNewSession(directory, "codex")} title="新建 Codex 会话" aria-label="新建 Codex 会话"><ProviderIcon provider="codex" size={14} /></button>
+        <button className="shortcut-new provider-claude" onClick={() => onNewSession(directory, "claude")} title="新建 Claude Code 会话" aria-label="新建 Claude Code 会话"><ProviderIcon provider="claude" size={14} /></button>
+        <button className="shortcut-pin active" onClick={() => onToggleFavorite(directory)} title="取消固定" aria-label="取消固定"><X size={11} /></button>
+      </div>)}</div>
+    </div> : null}
+  </>;
+}
+
+export default memo(WorkspaceNavigationBase);

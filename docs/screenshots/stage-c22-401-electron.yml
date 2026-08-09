@@ -1,0 +1,106 @@
+- generic [ref=e3]:
+  - banner [ref=e4]:
+    - generic [ref=e5]: AgentDesk
+    - generic [ref=e7]:
+      - button "还原窗口" [ref=e8] [cursor=pointer]
+      - button "最小化到任务栏" [ref=e13] [cursor=pointer]
+  - generic [ref=e17]:
+    - complementary [ref=e18]:
+      - generic [ref=e19]:
+        - generic [ref=e20]:
+          - button "新建 Codex 会话" [ref=e21] [cursor=pointer]:
+            - generic "Codex" [ref=e22]
+            - generic [ref=e23]: Codex
+          - button "新建 Claude Code 会话" [ref=e24] [cursor=pointer]:
+            - generic "Claude Code" [ref=e25]
+            - generic [ref=e26]: Claude
+        - button "选择目录" [ref=e27] [cursor=pointer]
+        - button "刷新历史" [ref=e30] [cursor=pointer]
+        - button "外观和展示设置" [ref=e41] [cursor=pointer]
+        - button "收起左侧面板" [expanded] [ref=e45] [cursor=pointer]
+      - generic "D:\\me\\project\\tools\\agentdesk" [ref=e49]:
+        - generic [ref=e52]:
+          - generic [ref=e53]:
+            - generic [ref=e54]: 当前目录
+            - generic [ref=e55]: "2"
+          - strong [ref=e56]: agentdesk
+        - button "固定当前目录" [ref=e57] [cursor=pointer]
+      - generic [ref=e60]:
+        - textbox "搜索当前目录会话标题" [ref=e61]:
+          - /placeholder: 搜索当前目录标题
+        - button "搜索所有会话正文" [disabled] [ref=e62]
+      - group "筛选会话 Provider" [ref=e68]:
+        - button "全部" [ref=e69] [cursor=pointer]
+        - button "Codex Codex" [ref=e70] [cursor=pointer]:
+          - generic "Codex" [ref=e71]
+          - text: Codex
+        - button "Claude Code Claude" [ref=e72] [cursor=pointer]:
+          - generic "Claude Code" [ref=e73]
+          - text: Claude
+      - navigation "当前目录会话列表" [ref=e74]:
+        - button "Claude Code 工作中 C22 unauthorized 刚刚" [ref=e271] [cursor=pointer]:
+          - generic "Claude Code" [ref=e272]
+          - generic "工作中" [ref=e274]
+          - generic [ref=e275]: C22 unauthorized
+          - generic [ref=e277]: 刚刚
+        - button "Claude Code fixture unauthorized 2分钟前" [ref=e180] [cursor=pointer]:
+          - generic "Claude Code" [ref=e176]
+          - generic [ref=e177]: fixture unauthorized
+          - generic [ref=e179]: 2分钟前
+      - separator "调整会话列表宽度" [ref=e76]
+    - generic [ref=e77]:
+      - generic [ref=e78]:
+        - generic [ref=e81]:
+          - button "Codex agentdesk · 新会话 关闭 新会话" [ref=e181] [cursor=pointer]:
+            - generic "Codex" [ref=e83]
+            - generic [ref=e85]:
+              - generic [ref=e86]: agentdesk
+              - generic [ref=e87]: ·
+              - generic [ref=e88]: 新会话
+            - button "关闭 新会话" [ref=e182]
+          - button "Claude Code agentdesk · C22 unauthorized 关闭 C22 unauthorized" [ref=e278] [cursor=pointer]:
+            - generic "Claude Code" [ref=e187]
+            - generic [ref=e189]:
+              - generic [ref=e190]: agentdesk
+              - generic [ref=e191]: ·
+              - generic [ref=e192]: C22 unauthorized
+            - button "关闭 C22 unauthorized" [ref=e279]
+        - generic [ref=e89]:
+          - button "新建 Codex 会话" [ref=e90] [cursor=pointer]:
+            - generic "Codex" [ref=e91]
+          - button "新建 Claude Code 会话" [ref=e92] [cursor=pointer]:
+            - generic "Claude Code" [ref=e93]
+          - button "分成两列" [ref=e94] [cursor=pointer]
+      - generic [ref=e98]:
+        - generic [ref=e197]:
+          - article "你的消息" [ref=e280]:
+            - generic [ref=e281]:
+              - paragraph [ref=e284]: C22 unauthorized
+              - button "复制消息"
+          - article "Claude Code 消息" [ref=e285]:
+            - generic [ref=e286]:
+              - paragraph [ref=e289]: "Failed to authenticate. API Error: 401 C22 fixture unauthorized"
+              - button "复制消息"
+        - generic [ref=e148]:
+          - alert [ref=e290]:
+            - generic [ref=e294]: Claude 网关认证失败（401），请检查认证配置后重试。
+            - button "关闭错误提示" [ref=e295] [cursor=pointer]
+          - generic [ref=e245]:
+            - generic [ref=e246]:
+              - generic "D:\\me\\project\\tools\\agentdesk" [ref=e299]
+              - generic [ref=e253]:
+                - combobox "选择模型" [ref=e254]:
+                  - option "Default (recommended)" [selected]
+                  - option "Opus (1M context)"
+                  - option "Sonnet"
+                  - option "Sonnet 5 (1M context)"
+                  - option "Haiku"
+                - combobox "选择思考等级" [ref=e255]:
+                  - option "medium" [selected]
+                - generic "发送首条消息后查询上下文用量" [ref=e256]: 0/?
+                - button "压缩 0" [ref=e257] [cursor=pointer]
+                - button "详情" [ref=e258] [cursor=pointer]
+                - group [ref=e262]:
+                  - generic "更多会话操作" [ref=e263] [cursor=pointer]
+            - textbox "消息输入" [ref=e269]:
+              - /placeholder: 描述你要完成的事情

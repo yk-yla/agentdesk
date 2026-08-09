@@ -1,0 +1,117 @@
+import assert from "node:assert/strict";
+import { describe, it } from "node:test";
+import { emptySession, type LayoutState, type SessionState } from "./domain";
+import { LayoutController } from "./layoutController";
+
+function createHarness(initialLayout: LayoutState = { panes: [{ id: "pane-1", tabIds: ["s1"], activeTabId: "s1" }], activePaneId: "pane-1" }) {
+  let layout = initialLayout;
+  const sessions: Record<string, SessionState> = {
+    s1: emptySession("s1", "D:\\one"),
+    s2: emptySession("s2", "D:\\two"),
+    s3: emptySession("s3", "D:\\three"),
+  };
+  const released: string[] = [];
+  const closeFailures = new Set<string>();
+  let created = 0;
+  let contextClosed = 0;
+  const controller = new LayoutController({
+    getLayout: () => layout,
+    updateLayout: (updater) => { layout = updater(layout); },
+    getSession: (sessionId) => sessions[sessionId],
+  }, {
+    createSession: (cwd) => {
+      created += 1;
+      const id = `created-${created}`;
+      sessions[id] = emptySession(id, cwd);
+      return id;
+    },
+    confirmClose: () => true,
+    closeSession: async (sessionId) => { if (closeFailures.has(sessionId)) throw new Error("close failed"); },
+    releaseSession: (sessionId) => { released.push(sessionId); delete sessions[sessionId]; },
+    closeContextMenu: () => { contextClosed += 1; },
+    now: () => 100,
+  });
+  return {
+    controller,
+    sessions,
+    released,
+    closeFailures,
+    get layout() { return layout; },
+    get contextClosed() { return contextClosed; },
+  };
+}
+
+describe("LayoutController", () => {
+  it("adds and activates tabs only inside their owning pane", () => {
+    const harness = createHarness({
+      panes: [
+        { id: "pane-1", tabIds: ["s1", "s2"], activeTabId: "s1" },
+        { id: "pane-2", tabIds: ["s3"], activeTabId: "s3" },
+      ],
+      activePaneId: "pane-1",
+    });
+
+    const created = harness.controller.addSession("D:\\new");
+    harness.controller.activateSession("s3");
+    harness.controller.setActiveTab("pane-1", "missing");
+
+    assert.equal(harness.layout.panes[0].tabIds.at(-1), created);
+    assert.equal(harness.layout.activePaneId, "pane-2");
+    assert.equal(harness.layout.panes[0].activeTabId, created);
+  });
+
+  it("reorders a tab and moves it across panes without duplication", () => {
+    const harness = createHarness({
+      panes: [
+        { id: "pane-1", tabIds: ["s1", "s2"], activeTabId: "s2" },
+        { id: "pane-2", tabIds: ["s3"], activeTabId: "s3" },
+      ],
+      activePaneId: "pane-1",
+    });
+
+    harness.controller.moveTab("s2", "pane-1", { paneId: "pane-1", sessionId: "s1", position: "before" });
+    assert.deepEqual(harness.layout.panes[0].tabIds, ["s2", "s1"]);
+
+    harness.controller.moveTab("s2", "pane-2", { paneId: "pane-2", sessionId: "s3", position: "after" });
+    assert.deepEqual(harness.layout.panes.find((pane) => pane.id === "pane-1")?.tabIds, ["s1"]);
+    assert.deepEqual(harness.layout.panes.find((pane) => pane.id === "pane-2")?.tabIds, ["s3", "s2"]);
+    assert.equal(harness.layout.activePaneId, "pane-2");
+  });
+
+  it("creates bounded split panes and merges a closed pane into its neighbor", () => {
+    const harness = createHarness();
+
+    harness.controller.splitPane("pane-1", 3);
+    assert.equal(harness.layout.panes.length, 3);
+    harness.controller.splitPane("pane-1", 3);
+    assert.equal(harness.layout.panes.length, 3);
+
+    const closingPane = harness.layout.panes[2];
+    harness.controller.closePane(closingPane.id);
+    assert.equal(harness.layout.panes.length, 2);
+    assert.ok(harness.layout.panes.some((pane) => pane.tabIds.includes(closingPane.activeTabId)));
+  });
+
+  it("keeps a tab whose backend close failed during a batch close", async () => {
+    const harness = createHarness({ panes: [{ id: "pane-1", tabIds: ["s1", "s2", "s3"], activeTabId: "s2" }], activePaneId: "pane-1" });
+    harness.closeFailures.add("s2");
+
+    const closed = await harness.controller.closeTabIds("pane-1", ["s2", "s3"]);
+
+    assert.deepEqual(closed, ["s3"]);
+    assert.deepEqual(harness.layout.panes[0].tabIds, ["s1", "s2"]);
+    assert.deepEqual(harness.released, ["s3"]);
+    assert.equal(harness.contextClosed, 1);
+  });
+
+  it("replaces the final active tab so the window never has an empty layout", async () => {
+    const harness = createHarness();
+
+    assert.equal(await harness.controller.closeActiveTab(), true);
+
+    assert.equal(harness.layout.panes.length, 1);
+    assert.deepEqual(harness.layout.panes[0].tabIds, ["created-1"]);
+    assert.deepEqual(harness.released, ["s1"]);
+    assert.equal(harness.sessions["created-1"].cwd, "D:\\one");
+  });
+});

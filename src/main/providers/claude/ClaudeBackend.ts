@@ -1,0 +1,704 @@
+import { existsSync } from "node:fs";
+import { randomUUID } from "node:crypto";
+import { homedir } from "node:os";
+import path from "node:path";
+import type { AgentBackend } from "../../agent/AgentBackend";
+import type { AgentCapabilities, AgentEventEnvelope, AgentOperation, AgentRequestContext, InteractionRef, PendingInteractionKind, PendingInteractionStatus } from "../../../shared/agentProtocol";
+import type { JsonObject } from "../../../shared/protocol";
+import { credentialEnv, readClaudeCredentials } from "./claudeCredentials";
+import { canonicalWorkspace, isTrustedWorkspace, trustedWorkspaces, trustWorkspace } from "./claudeWorkspaceTrust";
+import type { ClaudeGatewayFixtureKind, ClaudeLifecycleFixtureKind, ClaudeWorkerEvent } from "./claudeWorkerProtocol";
+import { resolveExecutableFromPath } from "../../executablePath";
+
+export const CLAUDE_TRUST_REQUIRED_PREFIX = "__CLAUDE_WORKSPACE_TRUST_REQUIRED__";
+
+const CAPABILITIES: AgentCapabilities = {
+  models: "supported", effort: "supported", images: "supported", history: "supported",
+  historySearch: "supported", rename: "supported", pin: "unsupported", favorite: "supported", fork: "supported",
+  delete: "supported", interrupt: "supported", steer: "unsupported", compact: "temporarilyUnavailable", review: "unsupported",
+  skills: "temporarilyUnavailable", commands: "temporarilyUnavailable", mcp: "temporarilyUnavailable", pluginsLoad: "temporarilyUnavailable",
+  pluginMarketplace: "unsupported", goals: "unsupported", plans: "unsupported", subagents: "temporarilyUnavailable", contextUsage: "temporarilyUnavailable",
+};
+
+interface ClaudeSession {
+  clientSessionId: string;
+  nativeSessionId: string;
+  cwd: string;
+  queryGeneration: number;
+  queryActive: boolean;
+  turnId: string | null;
+  model: string;
+  effort: string;
+  resumeNativeSessionId?: string;
+  mode: "new" | "resume";
+  pendingStart?: { queryGeneration: number; resumeNativeSessionId?: string; mode: "new" | "resume" };
+}
+
+interface ClaudePendingInteraction {
+  sessionId: string;
+  queryGeneration: number;
+  interactionId: string;
+  requestId?: string;
+  toolUseId?: string;
+  kind: PendingInteractionKind;
+  status: PendingInteractionStatus;
+  expiresAt: number;
+  suggestions: unknown[];
+  input: JsonObject;
+  timer: ReturnType<typeof setTimeout>;
+}
+
+const DEFAULT_INTERACTION_TIMEOUT_MS = 5 * 60_000;
+
+export interface ClaudeGatewayFixtureConfig {
+  kind: ClaudeGatewayFixtureKind;
+  timeoutMs?: number;
+  lifecycle?: ClaudeLifecycleFixtureKind;
+}
+
+export interface ClaudeWorkerRuntime {
+  send(command: import("./claudeWorkerProtocol").ClaudeWorkerCommand): void;
+  request(command: Exclude<import("./claudeWorkerProtocol").ClaudeWorkerCommand, { type: "start" | "send" | "interrupt" | "closeSession" | "testHoldRequests" | "testFatal" | "close" }>): Promise<unknown>;
+  closeSession?(sessionId: string, queryGeneration?: number): Promise<void>;
+  subscribe(listener: (event: ClaudeWorkerEvent) => void): () => void;
+  close(): Promise<void>;
+}
+
+function textFromInput(input: unknown) {
+  if (!Array.isArray(input)) return "";
+  return input.map((item) => {
+    if (!item || typeof item !== "object" || Array.isArray(item)) return "";
+    const record = item as Record<string, unknown>;
+    return record.type === "text" && typeof record.text === "string" ? record.text : "";
+  }).filter(Boolean).join("\n");
+}
+
+function blocksFromInput(input: unknown) {
+  if (!Array.isArray(input)) return [];
+  return input.filter((item): item is JsonObject => Boolean(item) && typeof item === "object" && !Array.isArray(item));
+}
+
+function managedClaudePath() {
+  const configured = process.env.CLAUDE_CODE_EXECUTABLE?.trim();
+  if (configured && existsSync(configured)) return configured;
+  const fromPath = resolveExecutableFromPath("claude.exe");
+  if (fromPath) return fromPath;
+  const value = path.join(homedir(), ".local", "bin", "claude.exe");
+  return existsSync(value) ? value : undefined;
+}
+
+export class ClaudeBackend implements AgentBackend {
+  readonly provider = "claude" as const;
+  private readonly listeners = new Set<(event: AgentEventEnvelope) => void>();
+  private readonly sessions = new Map<string, ClaudeSession>();
+  private readonly interactions = new Map<string, ClaudePendingInteraction>();
+  private readonly unsubscribe: () => void;
+
+  constructor(
+    private readonly runtime: ClaudeWorkerRuntime,
+    private readonly interactionTimeoutMs = DEFAULT_INTERACTION_TIMEOUT_MS,
+    private readonly onTrustChanged?: (workspaces: string[]) => void,
+    private readonly credentialsReader: typeof readClaudeCredentials = readClaudeCredentials,
+    private readonly gatewayFixtureReader?: () => ClaudeGatewayFixtureConfig | undefined,
+  ) {
+    this.unsubscribe = runtime.subscribe((event) => this.handleWorkerEvent(event));
+  }
+
+  async request(operation: AgentOperation, params: JsonObject, context: AgentRequestContext) {
+    if (operation === "getCapabilities") return this.getCapabilities();
+    if (operation === "closeSession") return this.closeSession(context);
+    if (operation === "startSession") return this.startSession(params, context);
+    if (operation === "resumeSession") return this.resumeSession(params, context);
+    if (operation === "listSessions") return this.listSessions(params, context);
+    if (operation === "searchSessions") return this.searchSessions(params, context);
+    if (operation === "readSession") return this.readSession(params, context);
+    if (operation === "forkSession") return this.forkSession(params, context);
+    if (operation === "renameSession") return this.renameSession(params, context);
+    if (operation === "deleteSession") return this.deleteSession(params, context);
+    if (operation === "listModels") return this.listModels(context);
+    if (operation === "listSkills") return this.listSkills(params, context);
+    if (operation === "updateSessionSettings") return this.updateSessionSettings(params, context);
+    if (operation === "compactSession") return this.compactSession(context);
+    if (operation === "listMcpServers") return this.listMcpServers(context);
+    if (operation === "startTurn") return this.startTurn(params, context);
+    if (operation === "interruptTurn") return this.interruptTurn(context);
+    throw new Error(`Claude Code 暂不支持该操作：${operation}`);
+  }
+
+  async respondToInteraction(ref: InteractionRef, result: JsonObject) {
+    if (ref.provider !== this.provider) throw new Error("Claude 交互 Provider 无效。");
+    const session = this.sessions.get(ref.sessionId);
+    if (!session || session.queryGeneration !== ref.queryGeneration || !session.queryActive) throw new Error("Claude Query 已失效。");
+    const interaction = this.interactions.get(this.interactionKey(ref.sessionId, ref.queryGeneration, ref.interactionId));
+    if (!interaction) throw new Error("Claude 交互不存在或已过期。");
+    if (interaction.status !== "pending") throw new Error("Claude 交互已处理，不能重复响应。");
+    if (ref.requestId !== undefined && String(ref.requestId) !== interaction.requestId) throw new Error("Claude 交互请求 ID 不匹配。");
+    if (ref.toolUseId !== undefined && ref.toolUseId !== interaction.toolUseId) throw new Error("Claude 工具调用 ID 不匹配。");
+    interaction.status = "resolving";
+    clearTimeout(interaction.timer);
+    const workerResult = this.normalizeInteractionResult(interaction, result);
+    try {
+      this.runtime.send({
+        type: "interactionResponse",
+        sessionId: interaction.sessionId,
+        queryGeneration: interaction.queryGeneration,
+        interactionId: interaction.interactionId,
+        result: workerResult,
+      });
+      const terminal = this.interactionTerminalStatus(interaction, workerResult);
+      this.finishInteraction(session, interaction, terminal);
+    } catch (error) {
+      this.finishInteraction(session, interaction, "failed");
+      throw error;
+    }
+  }
+
+  subscribeEvents(listener: (event: AgentEventEnvelope) => void) {
+    this.listeners.add(listener);
+    return () => this.listeners.delete(listener);
+  }
+
+  async getCapabilities() {
+    return { ...CAPABILITIES };
+  }
+
+  async closeSession(context: AgentRequestContext) {
+    const session = this.sessionFor(context);
+    if (!session) return;
+    this.cancelSessionInteractions(session, "cancelled");
+    const queryGeneration = session.queryGeneration;
+    session.queryGeneration += 1;
+    session.queryActive = false;
+    session.turnId = null;
+    if (this.runtime.closeSession) await this.runtime.closeSession(session.clientSessionId, queryGeneration);
+    else this.runtime.send({ type: "closeSession", sessionId: session.clientSessionId, queryGeneration });
+    this.sessions.delete(session.clientSessionId);
+  }
+
+  async close() {
+    for (const session of this.sessions.values()) this.cancelSessionInteractions(session, "cancelled");
+    this.sessions.clear();
+    await this.runtime.close();
+    this.unsubscribe();
+  }
+
+  async shutdownQueries() {
+    for (const session of this.sessions.values()) {
+      this.cancelSessionInteractions(session, "cancelled");
+      this.emit(session, "claude/queryClosed", { nativeSessionId: session.nativeSessionId, reason: "backendRestart" });
+    }
+    this.sessions.clear();
+    await this.runtime.close();
+  }
+
+  private startSession(params: JsonObject, context: AgentRequestContext) {
+    const clientSessionId = context.sessionId;
+    const cwdValue = typeof params.cwd === "string" ? params.cwd : context.canonicalCwd;
+    if (!clientSessionId || !cwdValue) throw new Error("Claude 会话缺少客户端会话或工作区。");
+    const cwd = canonicalWorkspace(cwdValue);
+    if (!isTrustedWorkspace(cwd)) {
+      if (params.trustWorkspace === true) {
+        trustWorkspace(cwd);
+        this.onTrustChanged?.(trustedWorkspaces());
+      }
+      else throw new Error(`${CLAUDE_TRUST_REQUIRED_PREFIX}${cwd}`);
+    }
+    const nativeSessionId = randomUUID();
+    const session: ClaudeSession = {
+      clientSessionId,
+      nativeSessionId,
+      cwd,
+      queryGeneration: 0,
+      queryActive: false,
+      turnId: null,
+      model: typeof params.model === "string" ? params.model : "",
+      effort: "",
+      mode: "new",
+    };
+    this.sessions.set(clientSessionId, session);
+    this.rememberNativeSession(cwd, nativeSessionId);
+    this.emit(session, "claude/sessionStarted", { nativeSessionId, cwd, title: "新会话" });
+    return { thread: { id: nativeSessionId, cwd, name: "新会话" }, model: session.model, reasoningEffort: session.effort };
+  }
+
+  private async listSessions(params: JsonObject, context: AgentRequestContext) {
+    const cwd = canonicalWorkspace(typeof params.cwd === "string" ? params.cwd : context.canonicalCwd || "");
+    if (!cwd) throw new Error("Claude 历史缺少工作区。");
+    const limit = Math.min(Math.max(Number(params.limit) || 100, 1), 100);
+    const cursor = typeof params.cursor === "string" && params.cursor ? Number(params.cursor) : 0;
+    const result = await this.runtime.request({ type: "listSessions", cwd, limit, offset: Number.isSafeInteger(cursor) && cursor >= 0 ? cursor : 0, includeWorktrees: false });
+    const value = result && typeof result === "object" ? result as Record<string, unknown> : {};
+    const data = Array.isArray(value.data) ? value.data : [];
+    for (const item of data) {
+      const record = item && typeof item === "object" ? item as Record<string, unknown> : {};
+      if (typeof record.id === "string") this.rememberNativeSession(cwd, record.id);
+    }
+    return { data, nextCursor: value.hasMore === true ? String((Number.isSafeInteger(cursor) && cursor >= 0 ? cursor : 0) + data.length) : null };
+  }
+
+  private async searchSessions(params: JsonObject, context: AgentRequestContext) {
+    const cwd = canonicalWorkspace(typeof params.cwd === "string" ? params.cwd : context.canonicalCwd || "");
+    const searchTerm = typeof params.searchTerm === "string" ? params.searchTerm.trim() : "";
+    if (!cwd || !searchTerm) return { data: [], nextCursor: null };
+    const limit = Math.min(Math.max(Number(params.limit) || 100, 1), 100);
+    const cursor = typeof params.cursor === "string" && params.cursor ? Number(params.cursor) : 0;
+    const result = await this.runtime.request({ type: "searchSessions", cwd, searchTerm, limit, offset: Number.isSafeInteger(cursor) && cursor >= 0 ? cursor : 0, includeWorktrees: false });
+    const value = result && typeof result === "object" ? result as Record<string, unknown> : {};
+    const data = Array.isArray(value.data) ? value.data : [];
+    const scannedCount = typeof value.scannedCount === "number" && Number.isSafeInteger(value.scannedCount) && value.scannedCount >= 0
+      ? value.scannedCount
+      : data.length;
+    return { data, nextCursor: value.hasMore === true ? String((Number.isSafeInteger(cursor) && cursor >= 0 ? cursor : 0) + scannedCount) : null };
+  }
+
+  private async readSession(params: JsonObject, context: AgentRequestContext) {
+    const { cwd, nativeSessionId } = this.sessionIdentity(params, context);
+    await this.assertKnownNativeSession(cwd, nativeSessionId);
+    const result = await this.runtime.request({ type: "readSession", cwd, nativeSessionId });
+    const value = result && typeof result === "object" ? result as Record<string, unknown> : {};
+    const info = value.info && typeof value.info === "object" ? value.info as Record<string, unknown> : {};
+    return { thread: { ...info, id: nativeSessionId, cwd, messages: Array.isArray(value.messages) ? value.messages : [] } };
+  }
+
+  private async resumeSession(params: JsonObject, context: AgentRequestContext) {
+    const clientSessionId = context.sessionId;
+    const { cwd, nativeSessionId } = this.sessionIdentity(params, context);
+    if (!clientSessionId) throw new Error("Claude 恢复缺少客户端会话。");
+    if (!isTrustedWorkspace(cwd)) {
+      if (params.trustWorkspace === true) {
+        trustWorkspace(cwd);
+        this.onTrustChanged?.(trustedWorkspaces());
+      }
+      else throw new Error(`${CLAUDE_TRUST_REQUIRED_PREFIX}${cwd}`);
+    }
+    await this.assertKnownNativeSession(cwd, nativeSessionId);
+    const existing = this.sessions.get(clientSessionId);
+    const session: ClaudeSession = existing || {
+      clientSessionId,
+      nativeSessionId,
+      cwd,
+      queryGeneration: 0,
+      queryActive: false,
+      turnId: null,
+      model: "",
+      effort: "",
+      resumeNativeSessionId: nativeSessionId,
+      mode: "resume",
+    };
+    session.nativeSessionId = nativeSessionId;
+    session.cwd = cwd;
+    session.resumeNativeSessionId = nativeSessionId;
+    session.mode = "resume";
+    this.sessions.set(clientSessionId, session);
+    return { thread: { id: nativeSessionId, cwd }, model: session.model, reasoningEffort: session.effort };
+  }
+
+  private async forkSession(params: JsonObject, context: AgentRequestContext) {
+    const { cwd, nativeSessionId } = this.sessionIdentity(params, context);
+    await this.assertKnownNativeSession(cwd, nativeSessionId);
+    const result = await this.runtime.request({ type: "forkSession", cwd, nativeSessionId, ...(typeof params.title === "string" ? { title: params.title } : {}) });
+    const value = result && typeof result === "object" ? result as Record<string, unknown> : {};
+    const forkedId = typeof value.sessionId === "string" ? value.sessionId : "";
+    if (!forkedId) throw new Error("Claude 分支没有返回会话 ID。");
+    this.rememberNativeSession(cwd, forkedId);
+    return { thread: { id: forkedId, cwd, name: typeof params.title === "string" ? params.title : "分支会话" } };
+  }
+
+  private async renameSession(params: JsonObject, context: AgentRequestContext) {
+    const { cwd, nativeSessionId } = this.sessionIdentity(params, context);
+    await this.assertKnownNativeSession(cwd, nativeSessionId);
+    const title = typeof params.name === "string" ? params.name.trim() : "";
+    if (!title) throw new Error("Claude 会话名称不能为空。");
+    await this.runtime.request({ type: "renameSession", cwd, nativeSessionId, title });
+    return { ok: true };
+  }
+
+  private async deleteSession(params: JsonObject, context: AgentRequestContext) {
+    const { cwd, nativeSessionId } = this.sessionIdentity(params, context);
+    await this.assertKnownNativeSession(cwd, nativeSessionId);
+    await this.runtime.request({ type: "deleteSession", cwd, nativeSessionId });
+    return { ok: true };
+  }
+
+  private startTurn(params: JsonObject, context: AgentRequestContext) {
+    const session = this.requireSession(context);
+    const text = textFromInput(params.input);
+    const inputBlocks = blocksFromInput(params.input);
+    if (!text && !inputBlocks.some((item) => item.type === "localImage")) throw new Error("Claude Code 输入不能为空。");
+    const turnId = randomUUID();
+    session.turnId = turnId;
+    if (!session.queryActive) {
+      let credential: ReturnType<typeof readClaudeCredentials>;
+      try {
+        credential = this.credentialsReader();
+      } catch (error) {
+        session.turnId = null;
+        throw error;
+      }
+      this.cancelSessionInteractions(session, "cancelled");
+      session.queryGeneration += 1;
+      session.queryActive = true;
+      const env = credential.source === "process" ? credentialEnv(credential) : undefined;
+      const pendingStart = { queryGeneration: session.queryGeneration, resumeNativeSessionId: session.resumeNativeSessionId, mode: session.mode };
+      session.pendingStart = pendingStart;
+      try {
+        const gatewayFixture = this.gatewayFixtureReader?.();
+        this.runtime.send({
+          type: "start",
+          sessionId: session.clientSessionId,
+          nativeSessionId: session.nativeSessionId,
+          ...(session.resumeNativeSessionId ? { resumeSessionId: session.resumeNativeSessionId } : {}),
+          queryGeneration: session.queryGeneration,
+          cwd: session.cwd,
+          prompt: text,
+          input: inputBlocks,
+          model: typeof params.model === "string" ? params.model : session.model,
+          effort: typeof params.effort === "string" ? params.effort : session.effort,
+          executablePath: managedClaudePath(),
+          ...(env ? { env } : {}),
+          settingSources: credential.source === "settings" ? ["user", "project", "local"] : [],
+          ...(gatewayFixture ? { gatewayFixture } : {}),
+        });
+      } catch (error) {
+        session.queryActive = false;
+        session.pendingStart = undefined;
+        session.turnId = null;
+        throw error;
+      } finally {
+        if (env) for (const key of Object.keys(env)) delete env[key];
+      }
+    } else {
+      this.runtime.send({ type: "send", sessionId: session.clientSessionId, queryGeneration: session.queryGeneration, text, input: inputBlocks });
+    }
+    this.emit(session, "claude/turnStarted", { nativeSessionId: session.nativeSessionId, turnId });
+    return { turn: { id: turnId, status: "inProgress" } };
+  }
+
+  private async listModels(context: AgentRequestContext) {
+    const session = this.requireSession(context);
+    const models = await this.control(session, "models");
+    return { data: Array.isArray(models) ? models : [] };
+  }
+
+  private async listSkills(params: JsonObject, context: AgentRequestContext) {
+    const session = this.requireSession(context);
+    const commands = await this.control(session, "commands");
+    const cwd = typeof params.cwd === "string" ? params.cwd : session.cwd;
+    return { data: [{ cwd, skills: Array.isArray(commands) ? commands : [] }] };
+  }
+
+  private async updateSessionSettings(params: JsonObject, context: AgentRequestContext) {
+    const session = this.requireSession(context);
+    if (typeof params.model === "string" && params.model) {
+      if (session.queryActive) await this.control(session, "setModel", params.model);
+      session.model = params.model;
+    }
+    if (typeof params.effort === "string" && params.effort) {
+      if (session.queryActive) await this.control(session, "setEffort", params.effort);
+      session.effort = params.effort;
+    }
+    this.emit(session, "claude/sessionSettingsUpdated", { nativeSessionId: session.nativeSessionId, model: session.model, effort: session.effort });
+    return { ok: true, model: session.model, effort: session.effort };
+  }
+
+  private compactSession(context: AgentRequestContext) {
+    return this.control(this.requireSession(context), "compact");
+  }
+
+  private listMcpServers(context: AgentRequestContext) {
+    return this.control(this.requireSession(context), "mcp");
+  }
+
+  private async contextUsage(session: ClaudeSession) {
+    const result = await this.control(session, "contextUsage");
+    const value = result && typeof result === "object" ? result as Record<string, unknown> : {};
+    return {
+      used: typeof value.totalTokens === "number" && Number.isFinite(value.totalTokens) ? value.totalTokens : 0,
+      total: typeof value.maxTokens === "number" && Number.isFinite(value.maxTokens) ? value.maxTokens : null,
+    };
+  }
+
+  private control(session: ClaudeSession, action: Extract<import("./claudeWorkerProtocol").ClaudeWorkerCommand, { type: "control" }>["action"], value?: string) {
+    if (!session.queryActive) throw new Error("Claude Query 尚未启动，当前能力暂不可用。");
+    return this.runtime.request({ type: "control", sessionId: session.clientSessionId, queryGeneration: session.queryGeneration, action, ...(value ? { value } : {}) });
+  }
+
+  private interruptTurn(context: AgentRequestContext) {
+    const session = this.requireSession(context);
+    if (!session.queryActive) throw new Error("Claude Code 当前没有运行中的任务。");
+    this.runtime.send({ type: "interrupt", sessionId: session.clientSessionId, queryGeneration: session.queryGeneration });
+    return { turnId: session.turnId };
+  }
+
+  private handleWorkerEvent(event: ClaudeWorkerEvent) {
+    if (event.type === "response") return;
+    if (event.type === "fatal") {
+      for (const session of this.sessions.values()) {
+        this.cancelSessionInteractions(session, "failed");
+        session.queryActive = false;
+        session.pendingStart = undefined;
+        this.emit(session, "claude/backendExited", { message: event.message });
+      }
+      return;
+    }
+    const session = event.sessionId ? this.sessions.get(event.sessionId) : undefined;
+    if (!session) return;
+    if (event.queryGeneration !== session.queryGeneration) {
+      this.emit(session, "claude/staleEvent", { eventType: event.type });
+      return;
+    }
+    if (event.type === "ready") {
+      if (session.pendingStart && session.pendingStart.queryGeneration === session.queryGeneration) {
+        session.resumeNativeSessionId = undefined;
+        session.mode = "new";
+        session.pendingStart = undefined;
+      }
+      if (event.nativeSessionId) {
+        session.nativeSessionId = event.nativeSessionId;
+        this.rememberNativeSession(session.cwd, event.nativeSessionId);
+      }
+      this.emit(session, "claude/ready", { nativeSessionId: event.nativeSessionId || session.nativeSessionId });
+      const emitCapability = (capabilities: Partial<AgentCapabilities>, extra: JsonObject = {}) => this.emit(session, "claude/capabilitiesUpdated", { nativeSessionId: session.nativeSessionId, capabilities, ...extra });
+      const unsupported = (error: unknown) => /不受支持|not supported|not a function|不存在/i.test(error instanceof Error ? error.message : String(error));
+      void this.control(session, "models").then((models) => {
+        const modelList = Array.isArray(models) ? models : [];
+        const hasEffort = modelList.some((entry) => entry && typeof entry === "object" && Array.isArray((entry as Record<string, unknown>).supportedEffortLevels) && ((entry as Record<string, unknown>).supportedEffortLevels as unknown[]).length > 0);
+        emitCapability({ models: "supported", effort: hasEffort ? "supported" : "unsupported" }, { models: modelList });
+      }).catch((error) => emitCapability({ models: unsupported(error) ? "unsupported" : "temporarilyUnavailable", effort: unsupported(error) ? "unsupported" : "temporarilyUnavailable" }));
+      void this.control(session, "commands").then((commands) => {
+        const commandList = Array.isArray(commands) ? commands : [];
+        const hasCompact = commandList.some((entry) => entry && typeof entry === "object" && (entry as Record<string, unknown>).name === "compact");
+        emitCapability({ commands: "supported", compact: hasCompact ? "supported" : "unsupported" }, { commands: commandList });
+      }).catch((error) => {
+        const state = unsupported(error) ? "unsupported" : "temporarilyUnavailable";
+        emitCapability({ commands: state, compact: state });
+      });
+      void this.control(session, "reloadSkills").then(() => emitCapability({ skills: "supported" })).catch((error) => emitCapability({ skills: unsupported(error) ? "unsupported" : "temporarilyUnavailable" }));
+      void this.control(session, "mcp").then(() => emitCapability({ mcp: "supported" })).catch((error) => emitCapability({ mcp: unsupported(error) ? "unsupported" : "temporarilyUnavailable" }));
+      void this.control(session, "reloadPlugins").then(() => emitCapability({ pluginsLoad: "supported" })).catch((error) => emitCapability({ pluginsLoad: unsupported(error) ? "unsupported" : "temporarilyUnavailable" }));
+      void this.control(session, "agents").then(() => emitCapability({ subagents: "supported" })).catch((error) => emitCapability({ subagents: unsupported(error) ? "unsupported" : "temporarilyUnavailable" }));
+      void this.contextUsage(session).then((usage) => { emitCapability({ contextUsage: "supported" }); this.emit(session, "claude/contextUsage", { nativeSessionId: session.nativeSessionId, ...usage }); }).catch((error) => emitCapability({ contextUsage: unsupported(error) ? "unsupported" : "temporarilyUnavailable" }));
+      return;
+    }
+    if (event.type === "processStarted") {
+      this.emit(session, "claude/processStarted", { nativeSessionId: session.nativeSessionId, rootPid: event.rootPid });
+      return;
+    }
+    if (event.type === "message") {
+      this.emit(session, "claude/sdkMessage", event.payload);
+      const payload = event.payload && typeof event.payload === "object" ? event.payload as Record<string, unknown> : {};
+      if (payload.type === "result" && payload.gatewayError) {
+        this.cancelSessionInteractions(session, "failed");
+        session.queryActive = false;
+        session.pendingStart = undefined;
+        session.turnId = null;
+      }
+      if (payload.type === "result") void this.contextUsage(session).then((usage) => this.emit(session, "claude/contextUsage", { nativeSessionId: session.nativeSessionId, ...usage })).catch(() => undefined);
+      return;
+    }
+    if (event.type === "interactionPending") {
+      this.registerInteraction(session, event);
+      return;
+    }
+    if (event.type === "interactionFinished") {
+      const interaction = this.interactions.get(this.interactionKey(session.clientSessionId, event.queryGeneration, event.interactionId));
+      if (interaction?.status === "pending" || interaction?.status === "resolving") {
+        this.finishInteraction(session, interaction, event.status === "cancelled" ? "cancelled" : "resolved");
+      }
+      return;
+    }
+    if (event.type === "interrupted") {
+      session.turnId = null;
+      if (session.pendingStart) {
+        session.queryActive = false;
+        session.pendingStart = undefined;
+      }
+      this.emit(session, "claude/turnCompleted", { nativeSessionId: session.nativeSessionId, status: "interrupted" });
+      return;
+    }
+    if (event.type === "closed") {
+      this.cancelSessionInteractions(session, "cancelled");
+      session.queryActive = false;
+      session.turnId = null;
+      session.pendingStart = undefined;
+      this.emit(session, "claude/queryClosed", { nativeSessionId: session.nativeSessionId });
+      return;
+    }
+    if (event.type === "error") {
+      this.cancelSessionInteractions(session, "failed");
+      session.queryActive = false;
+      session.pendingStart = undefined;
+      session.turnId = null;
+      this.emit(session, "claude/error", { nativeSessionId: session.nativeSessionId, message: event.message, ...(event.payload ? { gatewayError: event.payload } : {}) });
+    }
+  }
+
+  private sessionFor(context: AgentRequestContext) {
+    if (context.sessionId) return this.sessions.get(context.sessionId);
+    if (context.nativeSessionId) return [...this.sessions.values()].find((session) => session.nativeSessionId === context.nativeSessionId);
+    return undefined;
+  }
+
+  private sessionIdentity(params: JsonObject, context: AgentRequestContext) {
+    const cwdValue = typeof params.cwd === "string" ? params.cwd : context.canonicalCwd;
+    const nativeSessionId = typeof params.threadId === "string" ? params.threadId : context.nativeSessionId;
+    if (!cwdValue || !nativeSessionId) throw new Error("Claude 会话缺少完整的工作区和原生会话 ID。");
+    const cwd = canonicalWorkspace(cwdValue);
+    if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(nativeSessionId)) throw new Error("Claude 原生会话 ID 无效。");
+    return { cwd, nativeSessionId };
+  }
+
+  private readonly knownNativeSessions = new Set<string>();
+
+  private rememberNativeSession(cwd: string, nativeSessionId: string) {
+    this.knownNativeSessions.add(`${cwd}\u0000${nativeSessionId}`);
+  }
+
+  private async assertKnownNativeSession(cwd: string, nativeSessionId: string) {
+    if (this.knownNativeSessions.has(`${cwd}\u0000${nativeSessionId}`)) return;
+    const info = await this.runtime.request({ type: "getSessionInfo", cwd, nativeSessionId });
+    if (!info || typeof info !== "object") throw new Error("Claude 会话不存在或不属于当前工作区。");
+    this.rememberNativeSession(cwd, nativeSessionId);
+  }
+
+  private requireSession(context: AgentRequestContext) {
+    const session = this.sessionFor(context);
+    if (!session) throw new Error("Claude 会话不存在或已关闭。");
+    return session;
+  }
+
+  private interactionKey(sessionId: string, queryGeneration: number, interactionId: string) {
+    return `${sessionId}\u0000${queryGeneration}\u0000${interactionId}`;
+  }
+
+  private registerInteraction(session: ClaudeSession, event: Extract<ClaudeWorkerEvent, { type: "interactionPending" }>) {
+    if (!event.interactionId || event.interactionId.length > 512) return;
+    const payload = event.payload && typeof event.payload === "object" && !Array.isArray(event.payload) ? event.payload : {};
+    const key = this.interactionKey(session.clientSessionId, event.queryGeneration, event.interactionId);
+    const existing = this.interactions.get(key);
+    if (existing) {
+      if (existing.status === "pending" || existing.status === "resolving") return;
+      this.emit(session, "claude/staleInteraction", { interactionId: event.interactionId, status: existing.status });
+      return;
+    }
+    const requestId = typeof payload.requestId === "string" ? payload.requestId : undefined;
+    const toolUseId = typeof payload.toolUseId === "string" ? payload.toolUseId : undefined;
+    const input = payload.input && typeof payload.input === "object" && !Array.isArray(payload.input) ? payload.input as JsonObject : {};
+    const suggestions = Array.isArray(payload.suggestions) ? payload.suggestions : [];
+    const expiresAt = Date.now() + this.interactionTimeoutMs;
+    const interaction: ClaudePendingInteraction = {
+      sessionId: session.clientSessionId,
+      queryGeneration: event.queryGeneration,
+      interactionId: event.interactionId,
+      ...(requestId ? { requestId } : {}),
+      ...(toolUseId ? { toolUseId } : {}),
+      kind: event.kind,
+      status: "pending",
+      expiresAt,
+      suggestions,
+      input,
+      timer: setTimeout(() => this.expireInteraction(key), this.interactionTimeoutMs),
+    };
+    this.interactions.set(key, interaction);
+    this.emit(session, "claude/interactionPending", {
+      ...payload,
+      interactionId: event.interactionId,
+      queryGeneration: event.queryGeneration,
+      kind: event.kind,
+      expiresAt,
+    });
+  }
+
+  private expireInteraction(key: string) {
+    const interaction = this.interactions.get(key);
+    const session = interaction ? this.sessions.get(interaction.sessionId) : undefined;
+    if (!interaction || !session || interaction.status !== "pending") return;
+    interaction.status = "resolving";
+    try {
+      this.runtime.send({
+        type: "interactionResponse",
+        sessionId: interaction.sessionId,
+        queryGeneration: interaction.queryGeneration,
+        interactionId: interaction.interactionId,
+        result: interaction.kind === "mcpElicitation"
+          ? { action: "cancel" }
+          : { behavior: "deny", message: "Claude 交互等待超时。", interrupt: false, ...(interaction.toolUseId ? { toolUseID: interaction.toolUseId } : {}) },
+      });
+    } catch {
+      // Worker 可能已退出，主进程仍需将交互结算为过期。
+    }
+    this.finishInteraction(session, interaction, "expired");
+  }
+
+  private cancelSessionInteractions(session: ClaudeSession, status: "cancelled" | "failed") {
+    for (const interaction of this.interactions.values()) {
+      if (interaction.sessionId !== session.clientSessionId || interaction.status !== "pending") continue;
+      this.finishInteraction(session, interaction, status);
+    }
+  }
+
+  private finishInteraction(session: ClaudeSession, interaction: ClaudePendingInteraction, status: Exclude<PendingInteractionStatus, "pending" | "resolving">) {
+    if (interaction.status !== "pending" && interaction.status !== "resolving") return;
+    clearTimeout(interaction.timer);
+    interaction.status = status;
+    this.emit(session, "claude/interactionFinished", { interactionId: interaction.interactionId, status });
+  }
+
+  private normalizeInteractionResult(interaction: ClaudePendingInteraction, result: JsonObject): JsonObject {
+    if (interaction.kind === "mcpElicitation") {
+      const action = result.action === "accept" || result.action === "decline" || result.action === "cancel" ? result.action : "cancel";
+      const content = result.content && typeof result.content === "object" && !Array.isArray(result.content) ? result.content : undefined;
+      return action === "accept" ? { action, ...(content ? { content } : {}) } : { action };
+    }
+    if (interaction.kind === "userQuestion") {
+      const submitted = result.answers && typeof result.answers === "object" && !Array.isArray(result.answers) ? result.answers as JsonObject : {};
+      if (!Object.keys(submitted).length) return { behavior: "deny", message: "用户取消了问题。", interrupt: false, ...(interaction.toolUseId ? { toolUseID: interaction.toolUseId } : {}) };
+      const questions = Array.isArray(interaction.input.questions) ? interaction.input.questions : [];
+      const answers: JsonObject = {};
+      questions.forEach((value, index) => {
+        const question = value && typeof value === "object" && !Array.isArray(value) ? value as JsonObject : {};
+        const title = typeof question.question === "string" ? question.question : String(index);
+        const answer = submitted[String(index)] && typeof submitted[String(index)] === "object" && !Array.isArray(submitted[String(index)]) ? submitted[String(index)] as JsonObject : {};
+        const values = Array.isArray(answer.answers) ? answer.answers.filter((entry): entry is string => typeof entry === "string") : [];
+        if (values.length) answers[title] = values.join(", ");
+      });
+      return {
+        behavior: "allow",
+        updatedInput: { ...interaction.input, answers },
+        ...(interaction.toolUseId ? { toolUseID: interaction.toolUseId } : {}),
+      };
+    }
+    const decision = typeof result.decision === "string" ? result.decision : typeof result.behavior === "string" ? result.behavior : "deny";
+    if (decision === "accept" || decision === "acceptForSession" || decision === "allow") {
+      return {
+        behavior: "allow",
+        ...(decision === "acceptForSession" && interaction.suggestions.length ? { updatedPermissions: interaction.suggestions } : {}),
+        ...(interaction.toolUseId ? { toolUseID: interaction.toolUseId } : {}),
+      };
+    }
+    return {
+      behavior: "deny",
+      message: decision === "cancel" ? "用户取消了权限请求。" : "用户拒绝了权限请求。",
+      interrupt: false,
+      ...(interaction.toolUseId ? { toolUseID: interaction.toolUseId } : {}),
+    };
+  }
+
+  private interactionTerminalStatus(interaction: ClaudePendingInteraction, result: JsonObject): Exclude<PendingInteractionStatus, "pending" | "resolving"> {
+    if (interaction.kind === "mcpElicitation") return result.action === "accept" ? "resolved" : result.action === "decline" ? "rejected" : "cancelled";
+    if (result.behavior === "allow") return "resolved";
+    return result.message === "用户取消了权限请求。" || result.message === "用户取消了问题。" ? "cancelled" : "rejected";
+  }
+
+  private emit(session: ClaudeSession, type: string, payload: unknown) {
+    const event: AgentEventEnvelope = {
+      provider: this.provider,
+      sessionId: session.clientSessionId,
+      queryGeneration: session.queryGeneration,
+      receivedAt: Date.now(),
+      type,
+      payload,
+    };
+    this.listeners.forEach((listener) => listener(event));
+  }
+}

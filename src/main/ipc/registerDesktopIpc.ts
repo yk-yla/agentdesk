@@ -1,0 +1,195 @@
+import type { AgentOperation, AgentProvider, AgentRequestContext, InteractionRef } from "../../shared/agentProtocol";
+import type { DesktopPreferences, JsonObject } from "../../shared/protocol";
+import { normalizeFavoriteSessionSummaries } from "../../shared/favoriteSessions";
+import { normalizeBaseFontSize, normalizeClaudeModelCache, normalizeDisplayMode, normalizeModelContextWindows, normalizeSidebarWidth, normalizeTheme } from "../preferencesStore";
+
+const AGENT_PROVIDERS = new Set<AgentProvider>(["codex", "claude"]);
+const AGENT_OPERATIONS = new Set<AgentOperation>([
+  "listModels", "listSkills", "listSessions", "searchSessions", "readSession", "startSession", "resumeSession", "forkSession",
+  "renameSession", "deleteSession", "updateSessionMetadata", "updateSessionSettings", "startTurn", "startReview", "steerTurn",
+  "interruptTurn", "compactSession", "readRateLimits", "listMcpServers", "getGoal", "setGoal", "clearGoal", "listPlugins",
+  "readPlugin", "installPlugin", "uninstallPlugin", "getCapabilities", "closeSession",
+  "addMarketplace", "updateMarketplace", "removeMarketplace",
+]);
+
+interface IpcRegistrar {
+  handle(channel: string, listener: (event: unknown, ...args: any[]) => unknown): void;
+}
+
+interface PreferenceService {
+  read(): DesktopPreferences;
+  write(patch: Partial<DesktopPreferences>): DesktopPreferences;
+}
+
+interface DesktopIpcServices {
+  workspace: {
+    current(): string;
+    choose(defaultPath?: string): Promise<string | null>;
+  };
+  preferences: PreferenceService;
+  bossKey: {
+    status(): unknown;
+    change(accelerator: unknown): unknown;
+  };
+  codexDefaults(): unknown;
+  files: {
+    saveClipboardImage(input: unknown): unknown;
+    saveTextFile(input: unknown): unknown;
+    createHandoff(input: unknown): unknown;
+    openTerminal(cwd: unknown): unknown;
+    readLocalImage(filePath: unknown): unknown;
+    openLocalPath(filePath: unknown): unknown;
+    openExternal(url: unknown): unknown;
+  };
+  showNotification(input: unknown): unknown;
+  window: {
+    state(): unknown;
+    minimize(): unknown;
+    toggleMaximize(): unknown;
+  };
+  desktopUpdate: {
+    status(): unknown;
+    saveToken(token: string): unknown;
+    clearToken(): unknown;
+    check(): unknown;
+    download(): unknown;
+    install(): unknown;
+  };
+  codexUpdate: {
+    status(): unknown;
+    check(): unknown;
+    install(): unknown;
+  };
+  claude: {
+    status(): unknown;
+    checkUpdate(): unknown;
+    installUpdate(allowUnverified: boolean): unknown;
+    revokeWorkspace(cwd: unknown): unknown;
+  };
+  agent: {
+    request(request: ValidatedAgentRequest): unknown;
+    respond(response: { ref: InteractionRef; result: JsonObject }): unknown;
+  };
+  development?: {
+    holdClaudeWorkerRequests(): unknown;
+    injectClaudeWorkerFatal(): unknown;
+    setClaudeGatewayFixture(kind: unknown): unknown;
+    setClaudeLifecycleFixture(kind: unknown): unknown;
+    setDesktopUpdateFixture(): unknown;
+    shutdownDryRun(): unknown;
+    quitApp(): unknown;
+    setClaudeSignatureFixture(kind: unknown): unknown;
+  };
+}
+
+export interface ValidatedAgentRequest {
+  provider: AgentProvider;
+  operation: AgentOperation;
+  params: JsonObject;
+  context: AgentRequestContext;
+}
+
+function objectRecord(value: unknown): Record<string, unknown> | null {
+  return value && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : null;
+}
+
+export function sanitizePreferencesPatch(value: unknown): Partial<DesktopPreferences> {
+  const patch = objectRecord(value);
+  if (!patch) return {};
+  return {
+    ...(typeof patch.theme === "string" && normalizeTheme(patch.theme) === patch.theme ? { theme: normalizeTheme(patch.theme) } : {}),
+    ...(typeof patch.displayMode === "string" && (patch.displayMode === "simple" || patch.displayMode === "full") ? { displayMode: normalizeDisplayMode(patch.displayMode) } : {}),
+    ...(typeof patch.lastWorkspace === "string" ? { lastWorkspace: patch.lastWorkspace } : {}),
+    ...(Array.isArray(patch.recentWorkspaces) ? { recentWorkspaces: patch.recentWorkspaces.filter((item): item is string => typeof item === "string").slice(0, 32) } : {}),
+    ...(Array.isArray(patch.favoriteWorkspaces) ? { favoriteWorkspaces: patch.favoriteWorkspaces.filter((item): item is string => typeof item === "string").slice(0, 32) } : {}),
+    ...(typeof patch.sidebarWidth === "number" && Number.isFinite(patch.sidebarWidth) ? { sidebarWidth: normalizeSidebarWidth(patch.sidebarWidth) } : {}),
+    ...(typeof patch.baseFontSize === "number" && Number.isFinite(patch.baseFontSize) ? { baseFontSize: normalizeBaseFontSize(patch.baseFontSize) } : {}),
+    ...(objectRecord(patch.sessionAliases)
+      ? { sessionAliases: Object.fromEntries(Object.entries(patch.sessionAliases as Record<string, unknown>).filter((entry): entry is [string, string] => typeof entry[1] === "string" && entry[1].trim().length > 0).slice(0, 2_000)) }
+      : {}),
+    ...(Array.isArray(patch.favoriteSessions) ? { favoriteSessions: patch.favoriteSessions.filter((item): item is string => typeof item === "string").slice(0, 2_000) } : {}),
+    ...(objectRecord(patch.favoriteSessionSummaries) ? { favoriteSessionSummaries: normalizeFavoriteSessionSummaries(patch.favoriteSessionSummaries) } : {}),
+    ...(objectRecord(patch.modelContextWindows) ? { modelContextWindows: normalizeModelContextWindows(patch.modelContextWindows) } : {}),
+    ...(objectRecord(patch.claudeModelCache) ? (() => {
+      const cache = normalizeClaudeModelCache(patch.claudeModelCache);
+      return cache ? { claudeModelCache: cache } : {};
+    })() : {}),
+    ...(objectRecord(patch.workspaceState) ? { workspaceState: patch.workspaceState as JsonObject } : {}),
+  };
+}
+
+export function validateAgentRequest(value: unknown): ValidatedAgentRequest {
+  const request = objectRecord(value);
+  if (!request || !AGENT_PROVIDERS.has(request.provider as AgentProvider) || !AGENT_OPERATIONS.has(request.operation as AgentOperation)) {
+    throw new Error("Agent 请求无效或未获授权。");
+  }
+  const params = request.params === undefined ? {} : objectRecord(request.params);
+  if (!params) throw new Error("Agent 请求参数无效。");
+  const rawContext = objectRecord(request.context) || {};
+  const context: AgentRequestContext = {
+    ...(typeof rawContext.sessionId === "string" && rawContext.sessionId.length <= 160 ? { sessionId: rawContext.sessionId } : {}),
+    ...(typeof rawContext.canonicalCwd === "string" && rawContext.canonicalCwd.length <= 32_768 ? { canonicalCwd: rawContext.canonicalCwd } : {}),
+    ...(typeof rawContext.nativeSessionId === "string" && rawContext.nativeSessionId.length <= 256 ? { nativeSessionId: rawContext.nativeSessionId } : {}),
+    ...(Number.isSafeInteger(rawContext.queryGeneration) ? { queryGeneration: rawContext.queryGeneration as number } : {}),
+  };
+  return { provider: request.provider as AgentProvider, operation: request.operation as AgentOperation, params, context };
+}
+
+export function validateAgentResponse(value: unknown) {
+  const response = objectRecord(value);
+  const ref = objectRecord(response?.ref);
+  const result = objectRecord(response?.result);
+  if (!response || !ref || !AGENT_PROVIDERS.has(ref.provider as AgentProvider) || !result) {
+    throw new Error("Agent 交互响应无效。");
+  }
+  return { ref: response.ref as InteractionRef, result };
+}
+
+export function registerDesktopIpc(ipc: IpcRegistrar, services: DesktopIpcServices) {
+  ipc.handle("agentdesk:get-workspace", () => services.workspace.current());
+  ipc.handle("agentdesk:choose-workspace", (_event, defaultPath: unknown) => services.workspace.choose(typeof defaultPath === "string" ? defaultPath : undefined));
+  ipc.handle("agentdesk:get-preferences", () => services.preferences.read());
+  ipc.handle("agentdesk:save-preferences", (_event, patch: unknown) => services.preferences.write(sanitizePreferencesPatch(patch)));
+  ipc.handle("agentdesk:boss-key-status", () => services.bossKey.status());
+  ipc.handle("agentdesk:boss-key-set", (_event, accelerator: unknown) => services.bossKey.change(accelerator));
+  ipc.handle("agentdesk:get-codex-defaults", () => services.codexDefaults());
+  ipc.handle("agentdesk:save-clipboard-image", (_event, input: unknown) => services.files.saveClipboardImage(input));
+  ipc.handle("agentdesk:save-text-file", (_event, input: unknown) => services.files.saveTextFile(input));
+  ipc.handle("agentdesk:create-handoff", (_event, input: unknown) => services.files.createHandoff(input));
+  ipc.handle("agentdesk:open-windows-terminal", (_event, cwd: unknown) => services.files.openTerminal(cwd));
+  ipc.handle("agentdesk:read-local-image", (_event, filePath: unknown) => services.files.readLocalImage(filePath));
+  ipc.handle("agentdesk:open-local-path", (_event, filePath: unknown) => services.files.openLocalPath(filePath));
+  ipc.handle("agentdesk:open-external", (_event, url: unknown) => services.files.openExternal(url));
+  ipc.handle("agentdesk:show-notification", (_event, input: unknown) => services.showNotification(input));
+  ipc.handle("agentdesk:window-state", () => services.window.state());
+  ipc.handle("agentdesk:window-minimize", () => services.window.minimize());
+  ipc.handle("agentdesk:window-toggle-maximize", () => services.window.toggleMaximize());
+  ipc.handle("agentdesk:update-status", () => services.desktopUpdate.status());
+  ipc.handle("agentdesk:update-save-token", (_event, token: unknown) => {
+    if (typeof token !== "string") throw new Error("GitHub 授权码无效。");
+    return services.desktopUpdate.saveToken(token);
+  });
+  ipc.handle("agentdesk:update-clear-token", () => services.desktopUpdate.clearToken());
+  ipc.handle("agentdesk:update-check", () => services.desktopUpdate.check());
+  ipc.handle("agentdesk:update-download", () => services.desktopUpdate.download());
+  ipc.handle("agentdesk:update-install", () => services.desktopUpdate.install());
+  ipc.handle("agentdesk:cli-update-status", () => services.codexUpdate.status());
+  ipc.handle("agentdesk:cli-update-check", () => services.codexUpdate.check());
+  ipc.handle("agentdesk:cli-update-install", () => services.codexUpdate.install());
+  ipc.handle("claude:runtime-status", () => services.claude.status());
+  ipc.handle("claude:update-check", () => services.claude.checkUpdate());
+  ipc.handle("claude:update-install", (_event, allowUnverified: unknown) => services.claude.installUpdate(allowUnverified === true));
+  ipc.handle("claude:workspace-revoke", (_event, cwd: unknown) => services.claude.revokeWorkspace(cwd));
+  ipc.handle("agent:request", (_event, request: unknown) => services.agent.request(validateAgentRequest(request)));
+  ipc.handle("agent:respond", (_event, response: unknown) => services.agent.respond(validateAgentResponse(response)));
+
+  if (!services.development) return;
+  ipc.handle("agentdesk:dev-claude-worker-hold-requests", () => services.development?.holdClaudeWorkerRequests());
+  ipc.handle("agentdesk:dev-claude-worker-fatal", () => services.development?.injectClaudeWorkerFatal());
+  ipc.handle("agentdesk:dev-claude-gateway-fixture", (_event, kind: unknown) => services.development?.setClaudeGatewayFixture(kind));
+  ipc.handle("agentdesk:dev-claude-lifecycle-fixture", (_event, kind: unknown) => services.development?.setClaudeLifecycleFixture(kind));
+  ipc.handle("agentdesk:dev-desktop-update-fixture", () => services.development?.setDesktopUpdateFixture());
+  ipc.handle("agentdesk:dev-shutdown-dry-run", () => services.development?.shutdownDryRun());
+  ipc.handle("agentdesk:dev-app-quit", () => services.development?.quitApp());
+  ipc.handle("agentdesk:dev-claude-signature-fixture", (_event, kind: unknown) => services.development?.setClaudeSignatureFixture(kind));
+}
