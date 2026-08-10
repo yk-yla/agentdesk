@@ -270,6 +270,7 @@ describe("ClaudeBackend", () => {
   it("probes query capabilities independently", async () => {
     const runtime = new FakeRuntime();
     runtime.failControl.add("mcp");
+    runtime.failControl.add("contextUsage");
     runtime.unsupportedControl.add("reloadPlugins");
     const backend = testBackend(runtime);
     const events: AgentEventEnvelope[] = [];
@@ -289,6 +290,8 @@ describe("ClaudeBackend", () => {
     assert.ok(updates.some((value) => value.pluginsLoad === "unsupported"));
     assert.ok(updates.some((value) => value.subagents === "supported"));
     assert.ok(updates.some((value) => value.compact === "supported"));
+    assert.ok(updates.some((value) => value.contextUsage === "temporarilyUnavailable"));
+    assert.ok(events.some((event) => event.type === "claude/contextUsageFailed" && (event.payload as { phase?: string }).phase === "ready"));
     await backend.close();
   });
 

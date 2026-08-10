@@ -1,10 +1,13 @@
 import { contextBridge, ipcRenderer } from "electron";
 import type { AgentEventEnvelope, AgentInteractionResponse, AgentOperation, AgentProvider, AgentRequestContext } from "../shared/agentProtocol";
-import type { AgentBridge, ClaudeRuntimeStatus, CodexBridge, CodexCliUpdateStatus, DesktopPreferences, DesktopUpdateStatus, DesktopWindowState, JsonObject } from "../shared/protocol";
+import type { AgentBridge, ClaudeRuntimeStatus, CodexBridge, CodexCliUpdateStatus, DesktopPreferences, DesktopUpdateStatus, DesktopWindowState, JsonObject, ClientLogEntry } from "../shared/protocol";
 
 const bridge: Omit<CodexBridge, "request" | "respond" | "onMessage"> = {
   getWorkspace() {
     return ipcRenderer.invoke("agentdesk:get-workspace");
+  },
+  getLaunchProvider() {
+    return ipcRenderer.invoke("agentdesk:get-launch-provider");
   },
   chooseWorkspace(defaultPath?: string) {
     return ipcRenderer.invoke("agentdesk:choose-workspace", defaultPath);
@@ -17,6 +20,9 @@ const bridge: Omit<CodexBridge, "request" | "respond" | "onMessage"> = {
   },
   savePreferences(preferences: Partial<DesktopPreferences>) {
     return ipcRenderer.invoke("agentdesk:save-preferences", preferences);
+  },
+  writeLog(entry: ClientLogEntry) {
+    return ipcRenderer.invoke("agentdesk:write-log", entry);
   },
   getBossKeyStatus() {
     return ipcRenderer.invoke("agentdesk:boss-key-status");
@@ -131,10 +137,12 @@ const agentBridge: AgentBridge = {
     return () => ipcRenderer.removeListener("agent:event", wrapped);
   },
   getWorkspace: bridge.getWorkspace,
+  getLaunchProvider: bridge.getLaunchProvider,
   chooseWorkspace: bridge.chooseWorkspace,
   getPreferences: bridge.getPreferences,
   getCodexDefaults: bridge.getCodexDefaults,
   savePreferences: bridge.savePreferences,
+  writeLog: bridge.writeLog,
   getBossKeyStatus: bridge.getBossKeyStatus,
   setBossKey: bridge.setBossKey,
   saveClipboardImage: bridge.saveClipboardImage,

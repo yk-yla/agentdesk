@@ -220,10 +220,12 @@ export function createMockBridge(): CodexBridge {
     },
     respond: () => Promise.resolve(),
     getWorkspace: () => Promise.resolve(mockWorkspace),
+    getLaunchProvider: () => Promise.resolve(null),
     chooseWorkspace: (defaultPath?: string) => Promise.resolve(defaultPath || mockWorkspace),
     getPreferences: () => Promise.resolve(mockPreferences),
     getCodexDefaults: () => Promise.resolve(mockDefaults),
     savePreferences: (preferences) => { mockPreferences = { ...mockPreferences, ...preferences }; return Promise.resolve(mockPreferences); },
+    writeLog: () => Promise.resolve(),
     getBossKeyStatus: () => Promise.resolve(mockBossKeyStatus),
     setBossKey: (accelerator) => {
       mockBossKeyStatus = { accelerator, registered: true, message: `老板键 ${accelerator} 已启用。` };

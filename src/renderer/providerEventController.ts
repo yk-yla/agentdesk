@@ -51,7 +51,7 @@ export interface ProviderEventServices {
   closeActiveTab(): void;
   reloadSkills(): void;
   activateSession(sessionId: string): void;
-  openWorkspace(workspace: string): void;
+  openWorkspace(workspace: string, provider?: AgentProvider): void;
   adoptStartedThread(sessionId: string, value: unknown): string;
   loadSkills(sessionId: string, cwd: string, forceReload: boolean): void;
   updateProviderModels(provider: AgentProvider, models: ModelOption[]): void;
@@ -226,7 +226,7 @@ export class ProviderEventController {
       return;
     }
     if (event.kind === "openWorkspace") {
-      if (event.workspace) services.openWorkspace(event.workspace);
+      if (event.workspace) services.openWorkspace(event.workspace, event.launchProvider);
       return;
     }
     if (event.kind === "sessionStarted") {

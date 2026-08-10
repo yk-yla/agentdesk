@@ -1,5 +1,8 @@
 import type { AgentOperation, AgentProvider, AgentRequestContext, InteractionRef } from "../../shared/agentProtocol";
 import type { DesktopPreferences, JsonObject } from "../../shared/protocol";
+import type { AppLogger } from "../logger";
+import { logErrorDetails } from "../logger";
+import { randomUUID } from "node:crypto";
 import { normalizeFavoriteSessionSummaries } from "../../shared/favoriteSessions";
 import { normalizeBaseFontSize, normalizeClaudeModelCache, normalizeDisplayMode, normalizeModelContextWindows, normalizeSidebarWidth, normalizeTheme } from "../preferencesStore";
 
@@ -22,8 +25,10 @@ interface PreferenceService {
 }
 
 interface DesktopIpcServices {
+  logger?: AppLogger;
   workspace: {
     current(): string;
+    launchProvider(): AgentProvider | null;
     choose(defaultPath?: string): Promise<string | null>;
   };
   preferences: PreferenceService;
@@ -127,6 +132,7 @@ export function validateAgentRequest(value: unknown): ValidatedAgentRequest {
   if (!params) throw new Error("Agent 请求参数无效。");
   const rawContext = objectRecord(request.context) || {};
   const context: AgentRequestContext = {
+    ...(typeof rawContext.requestId === "string" && /^[A-Za-z0-9._:-]{1,160}$/.test(rawContext.requestId) ? { requestId: rawContext.requestId } : {}),
     ...(typeof rawContext.sessionId === "string" && rawContext.sessionId.length <= 160 ? { sessionId: rawContext.sessionId } : {}),
     ...(typeof rawContext.canonicalCwd === "string" && rawContext.canonicalCwd.length <= 32_768 ? { canonicalCwd: rawContext.canonicalCwd } : {}),
     ...(typeof rawContext.nativeSessionId === "string" && rawContext.nativeSessionId.length <= 256 ? { nativeSessionId: rawContext.nativeSessionId } : {}),
@@ -145,8 +151,47 @@ export function validateAgentResponse(value: unknown) {
   return { ref: response.ref as InteractionRef, result };
 }
 
+export function validateClientLog(value: unknown) {
+  const entry = objectRecord(value);
+  const level = entry?.level;
+  const event = entry?.event;
+  const details = entry?.details;
+  if (!entry || typeof event !== "string" || !event.trim() || event.length > 160 || (level !== undefined && level !== "debug" && level !== "info" && level !== "warn" && level !== "error")) {
+    throw new Error("客户端日志无效。");
+  }
+  return {
+    level: (level || "info") as "debug" | "info" | "warn" | "error",
+    event: event.trim(),
+    details: details && typeof details === "object" && !Array.isArray(details) ? details as JsonObject : {},
+  };
+}
+
 export function registerDesktopIpc(ipc: IpcRegistrar, services: DesktopIpcServices) {
+  const rawHandle = ipc.handle.bind(ipc);
+  ipc = {
+    handle(channel, listener) {
+      rawHandle(channel, async (event, ...args) => {
+        const suppliedRequestId = channel === "agent:request" && args[0] && typeof args[0] === "object" && "context" in args[0] && args[0].context && typeof args[0].context === "object" && "requestId" in args[0].context && typeof args[0].context.requestId === "string" ? args[0].context.requestId : undefined;
+        const requestId = suppliedRequestId || randomUUID();
+        const startedAt = Date.now();
+        services.logger?.log("info", "ipc.request.started", { requestId, channel, args });
+        try {
+          const result = await listener(event, ...args);
+          services.logger?.log("info", "ipc.request.completed", { requestId, channel, durationMs: Date.now() - startedAt, result });
+          return result;
+        } catch (error) {
+          services.logger?.log("error", "ipc.request.failed", { requestId, channel, durationMs: Date.now() - startedAt, error: logErrorDetails(error) });
+          throw error;
+        }
+      });
+    },
+  };
+  ipc.handle("agentdesk:write-log", (_event, entry: unknown) => {
+    const value = validateClientLog(entry);
+    services.logger?.log(value.level, value.event, value.details);
+  });
   ipc.handle("agentdesk:get-workspace", () => services.workspace.current());
+  ipc.handle("agentdesk:get-launch-provider", () => services.workspace.launchProvider());
   ipc.handle("agentdesk:choose-workspace", (_event, defaultPath: unknown) => services.workspace.choose(typeof defaultPath === "string" ? defaultPath : undefined));
   ipc.handle("agentdesk:get-preferences", () => services.preferences.read());
   ipc.handle("agentdesk:save-preferences", (_event, patch: unknown) => services.preferences.write(sanitizePreferencesPatch(patch)));

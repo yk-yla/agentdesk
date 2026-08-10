@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
-import { sanitizePreferencesPatch, validateAgentRequest, validateAgentResponse } from "./registerDesktopIpc";
+import { sanitizePreferencesPatch, validateAgentRequest, validateAgentResponse, validateClientLog } from "./registerDesktopIpc";
 
 describe("desktop IPC validation", () => {
   it("sanitizes preference patches without trusting renderer types", () => {
@@ -28,9 +28,9 @@ describe("desktop IPC validation", () => {
       provider: "claude",
       operation: "startTurn",
       params: { prompt: "hello" },
-      context: { sessionId: "session", queryGeneration: 2, nativeSessionId: "x".repeat(300) },
+      context: { requestId: "req-123", sessionId: "session", queryGeneration: 2, nativeSessionId: "x".repeat(300) },
     });
-    assert.deepEqual(request.context, { sessionId: "session", queryGeneration: 2 });
+    assert.deepEqual(request.context, { requestId: "req-123", sessionId: "session", queryGeneration: 2 });
     assert.throws(() => validateAgentRequest({ provider: "claude", operation: "unknown", params: {} }), /未获授权/);
     assert.throws(() => validateAgentRequest({ provider: "codex", operation: "startTurn", params: [] }), /参数无效/);
   });
@@ -38,5 +38,11 @@ describe("desktop IPC validation", () => {
   it("rejects interaction responses without a valid Provider and object result", () => {
     assert.throws(() => validateAgentResponse({ ref: { provider: "other" }, result: {} }), /响应无效/);
     assert.throws(() => validateAgentResponse({ ref: { provider: "codex" }, result: [] }), /响应无效/);
+  });
+
+  it("accepts bounded client diagnostics and rejects malformed entries", () => {
+    assert.deepEqual(validateClientLog({ level: "error", event: "ui.click", details: { tag: "button" } }), { level: "error", event: "ui.click", details: { tag: "button" } });
+    assert.throws(() => validateClientLog({ level: "trace", event: "bad" }), /客户端日志无效/);
+    assert.throws(() => validateClientLog({ event: "" }), /客户端日志无效/);
   });
 });

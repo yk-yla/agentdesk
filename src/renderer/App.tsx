@@ -36,6 +36,7 @@ import { LayoutController, type TabDropPosition, type TabDropTarget } from "./la
 import WindowTitleBar from "./WindowTitleBar";
 import ProviderIcon from "./ProviderIcon";
 import { closeSessionResources } from "./sessionLifecycle";
+import { installRendererDiagnostics } from "./rendererDiagnostics";
 
 const PluginPanel = lazy(() => import("./PluginPanel"));
 
@@ -141,6 +142,7 @@ function subagentThreadSource(threadValue: unknown) {
 
 export default function App() {
   const bridge = useAgentBridge();
+  useEffect(() => installRendererDiagnostics(bridge), [bridge]);
   const agentClient = useMemo(() => new AgentClient(bridge), [bridge]);
   const [workspace, setWorkspace] = useState("正在连接工作区");
   const [sessions, setSessions] = useState<Record<string, SessionState>>({});
@@ -281,8 +283,9 @@ export default function App() {
   }, []);
 
   const setError = useCallback((sessionId: string, error: unknown, fallback: string) => {
+    void bridge.writeLog({ level: "error", event: "renderer.session_error", details: { sessionId, fallback, error: error instanceof Error ? { name: error.name, message: error.message, stack: error.stack } : { message: String(error) } } }).catch(() => undefined);
     updateSession(sessionId, (current) => ({ ...current, errorText: error instanceof Error ? error.message : fallback }));
-  }, [updateSession]);
+  }, [bridge, updateSession]);
 
   /**
    * 会话相关请求都走这里：响应和错误直接记入原始事件存储。
@@ -542,7 +545,9 @@ export default function App() {
 
   const rememberModelContextWindow = useCallback((sessionId: string, event: RoutedAgentEvent) => {
     const payload = agentEventPayload(event);
-    const tokens = asRecord(payload.tokenUsage).modelContextWindow;
+    const tokens = event.provider === "claude" && event.envelope.type === "claude/contextUsage"
+      ? payload.total
+      : asRecord(payload.tokenUsage).modelContextWindow;
     if (!Number.isSafeInteger(tokens)) return;
     const model = sessionsRef.current[sessionId]?.model || "";
     if (!model || !Number.isSafeInteger(tokens) || Number(tokens) <= 0) return;
@@ -741,7 +746,13 @@ export default function App() {
       : field === "effort" ? value : currentTarget.effort || selectedModel?.defaultEffort || "medium";
     const requested = { model: field === "model" ? value : selectedModel?.id || currentTarget.model, effort: nextEffort };
     updateSession(sessionId, (current) => {
-      return { ...current, model: requested.model, effort: requested.effort, tokenUsage: tokenUsageForModel(current, requested.model, preferencesRef.current) };
+      return {
+        ...current,
+        model: requested.model,
+        ...(field === "model" ? { resolvedModel: undefined } : {}),
+        effort: requested.effort,
+        tokenUsage: tokenUsageForModel(current, requested.model, preferencesRef.current),
+      };
     });
     if (!session.threadId) {
       settingsCoordinatorRef.current.setConfirmed(sessionId, requested);
@@ -866,6 +877,7 @@ export default function App() {
       `- 目录：${session.cwd}`,
       `- Thread：${session.threadId || "尚未创建"}`,
       `- 模型：${session.model || "加载中"}`,
+      ...(session.provider === "claude" ? [`- 实际模型：${session.resolvedModel || "等待 Claude 返回"}`] : []),
       `- 思考等级：${session.effort || "未设置"}`,
       `- 上下文：${session.tokenUsage.used}/${session.tokenUsage.total ?? "?"}`,
     ];
@@ -1225,6 +1237,7 @@ export default function App() {
       request: (provider, operation, params) => agentClient.request(provider, operation, params),
       getPreferences: () => preferencesRef.current,
       isVisible: () => document.visibilityState !== "hidden",
+      log: (level, event, details) => { void bridge.writeLog({ level, event, details }).catch(() => undefined); },
     });
   }
   const historyController = historyControllerRef.current;
@@ -1418,7 +1431,7 @@ export default function App() {
         closeActiveTab: () => { void closeActiveTab(); },
         reloadSkills: reloadProviderSkills,
         activateSession,
-        openWorkspace: (nextWorkspace) => { setWorkspace(nextWorkspace); addSession(nextWorkspace); },
+        openWorkspace: (nextWorkspace, provider = "codex") => { createSessionInDirectory(nextWorkspace, provider); },
         adoptStartedThread,
         loadSkills: (sessionId, cwd, forceReload) => { void loadSkills(sessionId, cwd, forceReload); },
         updateProviderModels: (provider, models) => {
@@ -1438,7 +1451,7 @@ export default function App() {
 
   useEffect(() => {
     let active = true;
-    void Promise.allSettled([bridge.getWorkspace(), bridge.getPreferences()]).then(async ([workspaceResult, preferencesResult]) => {
+    void Promise.allSettled([bridge.getWorkspace(), bridge.getPreferences(), bridge.getLaunchProvider()]).then(async ([workspaceResult, preferencesResult, launchProviderResult]) => {
       if (!active) return;
       if (workspaceResult.status === "rejected") {
         const initial = emptySession("session-1", "");
@@ -1452,6 +1465,7 @@ export default function App() {
         return;
       }
       const currentWorkspace = workspaceResult.value;
+      const launchProvider = launchProviderResult.status === "fulfilled" ? launchProviderResult.value : null;
       const value = preferencesResult.status === "fulfilled" ? preferencesResult.value : preferencesRef.current;
       setWorkspace(currentWorkspace);
       setPreferences((current) => ({ ...current, ...value }));
@@ -1460,7 +1474,7 @@ export default function App() {
       setHistory((current) => applyLocalSessionMetadata(current, value));
       const restored = parseUpdateWorkspaceState(value.workspaceState, currentWorkspace);
       if (!restored) {
-        const initial = emptySession("session-1", currentWorkspace);
+        const initial = emptySession("session-1", currentWorkspace, "", "", launchProvider || "codex");
         sessionsRef.current = { "session-1": initial };
         setSessions({ "session-1": initial });
         if (preferencesResult.status === "rejected") {
@@ -1479,6 +1493,7 @@ export default function App() {
       workspaceRestoreIdsRef.current = new Set(restored.threadSessionIds);
       setSessions(restoredSessions);
       setLayout(restored.layout);
+      if (launchProvider) addSession(currentWorkspace, { provider: launchProvider });
       setSidebarCollapsed(restored.sidebarCollapsed);
       if (restored.drafts.size) setDraftRevisions(Object.fromEntries([...restored.drafts.keys()].map((sessionId) => [sessionId, 1])));
       workspaceRestoreInProgressRef.current = true;
@@ -1552,7 +1567,7 @@ export default function App() {
       }])));
     });
     return () => { active = false; };
-  }, [agentClient, bridge, updateSession]);
+  }, [addSession, agentClient, bridge, updateSession]);
 
   useEffect(() => {
     if (serverState !== "ready" || !workspaceRestoreIdsRef.current.size) return;
@@ -1740,8 +1755,9 @@ export default function App() {
       onSelectWorkspace: selectWorkspace,
       onToggleFavorite: toggleFavorite,
       onSavePreference: savePreference,
+      onOpenTerminal: openWindowsTerminal,
     },
-  }), [createSessionInDirectory, preferences.favoriteWorkspaces, savePreference, selectWorkspace, sidebarCurrentCwd, sidebarDirectoryHistory.length, toggleFavorite]);
+  }), [createSessionInDirectory, openWindowsTerminal, preferences.favoriteWorkspaces, savePreference, selectWorkspace, sidebarCurrentCwd, sidebarDirectoryHistory.length, toggleFavorite]);
   const sidebarHistory = useMemo<SidebarProps["history"]>(() => ({
     viewModel: {
       activeCwd: sidebarCurrentCwd,
@@ -1831,7 +1847,6 @@ export default function App() {
         onRemoveImage={removeImage}
         onRemoveQueuedMessage={removeQueuedMessage}
         onChooseDirectory={chooseDirectoryForSession}
-        onOpenTerminal={openWindowsTerminal}
       />
     );
   };

@@ -19,8 +19,8 @@ export default class ErrorBoundary extends Component<Props, State> {
     };
   }
 
-  componentDidCatch(_error: Error, _info: ErrorInfo) {
-    // 错误详情不进入界面，避免意外暴露本机路径或会话内容。
+  componentDidCatch(error: Error, info: ErrorInfo) {
+    void window.agentDesk?.writeLog({ level: "error", event: "renderer.react_error", details: { error: { name: error.name, message: error.message, stack: error.stack }, componentStack: info.componentStack } }).catch(() => undefined);
   }
 
   render() {

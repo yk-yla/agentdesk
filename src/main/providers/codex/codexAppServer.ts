@@ -3,6 +3,7 @@ import type { AgentRequestContext } from "../../../shared/agentProtocol";
 import { encodeCodexRpcError, type JsonObject, type JsonRpcMessage } from "../../../shared/protocol";
 import { RpcRequestRegistry } from "../../rpcRequestRegistry";
 import type { CodexBackendRuntime } from "./CodexBackend";
+import type { AppLogger } from "../../logger";
 
 const DEFAULT_REQUEST_TIMEOUT_MS = 60_000;
 const APP_SERVER_SHUTDOWN_GRACE_MS = 2_000;
@@ -52,6 +53,7 @@ export interface CodexAppServerOptions {
   isExitNotificationSuppressed(): boolean;
   terminateTree(child: ChildProcessWithoutNullStreams): Promise<void>;
   inspectMessage(message: JsonRpcMessage, requestMethod?: string): void;
+  logger?: AppLogger;
 }
 
 function spawnSpec(command: string) {
@@ -166,11 +168,12 @@ export class CodexAppServer implements CodexBackendRuntime {
     const id = this.requestId++;
     return new Promise((resolve, reject) => {
       const timeoutMs = REQUEST_TIMEOUTS_MS[method] ?? DEFAULT_REQUEST_TIMEOUT_MS;
-      this.requests.add(id, { child, resolve, reject, method, sessionId: context.sessionId }, timeoutMs, () => new Error(encodeCodexRpcError({
+      this.requests.add(id, { child, resolve, reject, method, requestId: context.requestId, sessionId: context.sessionId }, timeoutMs, () => new Error(encodeCodexRpcError({
         method,
         message: `${method} 请求在 ${Math.round(timeoutMs / 1000)} 秒内未响应。`,
         data: { kind: "requestTimeout", backgroundMayContinue: true },
       })));
+      this.options.logger?.log("debug", "codex.rpc.sent", { requestId: context.requestId, rpcId: id, method, params, sessionId: context.sessionId });
       try {
         this.write({ id, method, params }, child);
       } catch (error) {
@@ -190,16 +193,19 @@ export class CodexAppServer implements CodexBackendRuntime {
     if (!tracked) return;
     this.options.inspectMessage(message, tracked.request.method);
     if (tracked.kind === "late") {
+      this.options.logger?.log("warn", "codex.rpc.late_response", { requestId: tracked.request.requestId, rpcId: message.id, method: tracked.request.method, response: message });
       if (tracked.request.sessionId) {
         this.publish({ method: "client/late-response", params: { sessionId: tracked.request.sessionId, requestMethod: tracked.request.method, response: message } });
       }
       return;
     }
     if (message.error) {
+      this.options.logger?.log("error", "codex.rpc.failed", { requestId: tracked.request.requestId, rpcId: message.id, method: tracked.request.method, error: message.error });
       tracked.request.reject(new Error(encodeCodexRpcError({
         method: tracked.request.method, code: message.error.code, message: message.error.message, data: message.error.data,
       })));
     } else {
+      this.options.logger?.log("debug", "codex.rpc.completed", { requestId: tracked.request.requestId, rpcId: message.id, method: tracked.request.method, result: message.result });
       tracked.request.resolve(message.result);
     }
   }

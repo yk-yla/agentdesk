@@ -1,4 +1,4 @@
-import { CircleDot, CornerDownRight, ListChecks, MoreHorizontal, PanelRight, Play, RefreshCw, Square, Target, Terminal, X } from "lucide-react";
+import { CircleDot, CornerDownRight, ListChecks, MoreHorizontal, PanelRight, Play, RefreshCw, Square, Target, X } from "lucide-react";
 import { lazy, memo, Suspense, useCallback, useEffect, useLayoutEffect, useMemo, useRef, type DragEvent } from "react";
 import type { AgentBridge, DisplayMode, JsonObject } from "../shared/protocol";
 import Composer from "./Composer";
@@ -43,7 +43,6 @@ export interface PaneViewProps {
   onRemoveImage: (sessionId: string, index: number) => void;
   onRemoveQueuedMessage: (sessionId: string, queuedId: string) => void;
   onChooseDirectory: (sessionId: string) => void;
-  onOpenTerminal: (cwd: string) => void;
 }
 
 /**
@@ -129,7 +128,7 @@ function PaneView(props: PaneViewProps) {
       onChange={(event) => props.onSetSessionSetting(session.id, "model", event.target.value)}
       aria-label="选择模型"
       className="select-control model-select"
-      title={model?.displayName || session.model}
+      title={model ? `${model.displayName}${session.resolvedModel ? ` · 实际 ${session.resolvedModel}` : ""}` : session.model}
       disabled={!supports("models")}
     >
       {models.length ? models.map((entry) => <option value={entry.id} key={entry.id}>{entry.displayName}</option>) : <option value="">加载模型</option>}
@@ -156,7 +155,6 @@ function PaneView(props: PaneViewProps) {
         {session.capabilities.compact !== "unsupported" ? <button type="button" disabled={!supports("compact")} onClick={(event) => { props.onCompact(session.id); event.currentTarget.closest("details")?.removeAttribute("open"); }}><RefreshCw size={14} /><span>压缩上下文 ({session.compactionCount})</span></button> : null}
         <button type="button" className={session.detailsOpen ? "selected" : ""} onClick={(event) => { props.onToggleDetails(session.id); event.currentTarget.closest("details")?.removeAttribute("open"); }}><PanelRight size={14} /><span>详情</span></button>
         {supports("goals") ? <button type="button" className={session.detailsOpen && session.detailView === "goal" ? "selected" : ""} onClick={(event) => { if (!session.detailsOpen) props.onToggleDetails(session.id); props.onSetDetailView(session.id, "goal"); event.currentTarget.closest("details")?.removeAttribute("open"); }}><Target size={14} /><span>目标</span></button> : null}
-        <button type="button" onClick={(event) => { props.onOpenTerminal(session.cwd); event.currentTarget.closest("details")?.removeAttribute("open"); }}><Terminal size={14} /><span>在 WT 打开当前目录</span></button>
       </div>
     </details>
   </div>, [

@@ -106,8 +106,8 @@ body.resizing-sidebar, body.resizing-sidebar * { cursor: col-resize !important; 
 .current-workspace span { color: var(--muted); font-size: var(--font-size-sm); }
 .current-workspace .current-workspace-label { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
 .current-workspace strong { overflow: hidden; color: var(--text); font-size: var(--font-size-input); text-overflow: ellipsis; white-space: nowrap; }
-.current-workspace-pin { width: 26px; height: 26px; flex: none; display: grid; place-items: center; color: var(--muted); background: transparent; border-radius: 5px; }
-.current-workspace-pin:hover, .current-workspace-pin:focus-visible { color: var(--accent-strong); background: var(--surface-hover); }
+.current-workspace-terminal, .current-workspace-pin { width: 26px; height: 26px; flex: none; display: grid; place-items: center; color: var(--muted); background: transparent; border-radius: 5px; }
+.current-workspace-terminal:hover, .current-workspace-terminal:focus-visible, .current-workspace-pin:hover, .current-workspace-pin:focus-visible { color: var(--accent-strong); background: var(--surface-hover); }
 .current-workspace-pin.active { color: var(--accent-strong); background: color-mix(in srgb, var(--accent) 14%, transparent); }
 .workspace-shortcuts { display: flex; flex-direction: column; gap: 3px; }
 .shortcut-row { display: flex; align-items: center; gap: 2px; }
@@ -118,8 +118,8 @@ body.resizing-sidebar, body.resizing-sidebar * { cursor: col-resize !important; 
 .workspace-shortcut { min-width: 0; flex: 1; padding: 6px 8px; font-size: var(--font-size-base); }
 .workspace-shortcut.active { color: var(--text); background: var(--surface-raised); }
 .workspace-shortcut span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.shortcut-new { width: 24px; height: 24px; flex: none; display: grid; place-items: center; color: var(--muted); background: transparent; border-radius: 5px; }
-.shortcut-new:hover { color: var(--accent); background: var(--surface-hover); }
+.shortcut-new, .shortcut-terminal { width: 24px; height: 24px; flex: none; display: grid; place-items: center; color: var(--muted); background: transparent; border-radius: 5px; }
+.shortcut-new:hover, .shortcut-terminal:hover { color: var(--accent); background: var(--surface-hover); }
 .shortcut-pin { width: 24px; height: 24px; flex: none; display: grid; place-items: center; color: var(--muted); background: transparent; border-radius: 5px; }
 .shortcut-pin:hover, .shortcut-pin.active { color: var(--accent); background: var(--surface-hover); }
 .history-search { display: flex; align-items: center; gap: 7px; margin: 2px 0; padding: 7px 8px; color: var(--muted); background: var(--surface); border: 1px solid var(--border); border-radius: 6px; }

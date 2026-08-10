@@ -150,7 +150,7 @@ export interface ModelOption {
 }
 
 export function findModelOption(models: ModelOption[], id: string) {
-  return models.find((model) => model.id === id || model.resolvedId === id);
+  return models.find((model) => model.id === id) || models.find((model) => model.resolvedId === id);
 }
 
 export interface RetryState {
@@ -174,6 +174,7 @@ export interface SessionState {
   messages: Message[];
   activities: Activity[];
   model: string;
+  resolvedModel?: string;
   effort: string;
   collaborationMode: CollaborationMode;
   resumed?: boolean;

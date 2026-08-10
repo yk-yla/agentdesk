@@ -41,6 +41,7 @@ export interface RoutedAgentEvent {
   childNativeSessionId?: string;
   clientSessionId?: string;
   workspace?: string;
+  launchProvider?: AgentProvider;
   turnStatus?: string;
   committedClientId?: string;
   settings?: { model?: string; effort?: string };

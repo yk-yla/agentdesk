@@ -92,6 +92,7 @@ export interface RoutedCodexEvent {
   childNativeSessionId?: string;
   clientSessionId?: string;
   workspace?: string;
+  launchProvider?: AgentProvider;
   turnStatus?: string;
   committedClientId?: string;
   settings?: { model?: string; effort?: string };
@@ -140,6 +141,7 @@ export function adaptCodexEvent(envelope: AgentEventEnvelope): RoutedCodexEvent 
     childNativeSessionId,
     clientSessionId: stringValue(params.sessionId) || undefined,
     workspace: stringValue(params.workspace) || undefined,
+    launchProvider: params.provider === "codex" || params.provider === "claude" ? params.provider : undefined,
     turnStatus: kind === "turnCompleted" ? stringValue(asRecord(params.turn).status, "completed") : undefined,
     committedClientId: (method === "item/started" || method === "item/completed") && item.type === "userMessage"
       ? stringValue(item.clientId, stringValue(item.client_id)) || undefined

@@ -31,7 +31,7 @@ export function adaptClaudeEvent(envelope: AgentEventEnvelope): RoutedClaudeEven
       ? "backendExited"
       : envelope.type === "claude/turnCompleted" || envelope.type === "claude/error" || isResult
         ? "turnCompleted"
-        : envelope.type === "claude/sessionSettingsUpdated" || envelope.type === "claude/sdkMessage" && type === "system" && subtype === "init"
+        : envelope.type === "claude/sessionSettingsUpdated"
           ? "sessionSettingsUpdated"
           : "state";
   const event = {
@@ -86,7 +86,7 @@ function settleRunningActivities(session: SessionState, status: "completed" | "f
     : activity);
 }
 
-function usageFromResult(payload: ReturnType<typeof asRecord>) {
+function usageFromResult(payload: ReturnType<typeof asRecord>, previous: SessionState["tokenUsage"]) {
   const models = asRecord(payload.modelUsage);
   let used = 0;
   let total: number | null = null;
@@ -100,7 +100,10 @@ function usageFromResult(payload: ReturnType<typeof asRecord>) {
     const usage = asRecord(payload.usage);
     used = numberValue(usage.input_tokens) + numberValue(usage.output_tokens) + numberValue(usage.cache_read_input_tokens) + numberValue(usage.cache_creation_input_tokens);
   }
-  return { used, total };
+  return {
+    used: used > 0 ? used : previous.used,
+    total: total && total > 0 ? total : previous.total,
+  };
 }
 
 function interactionApproval(routed: RoutedClaudeEvent, payload: ReturnType<typeof asRecord>): PendingApproval | null {
@@ -193,15 +196,21 @@ export function applyClaudeEvent(source: SessionState, routed: RoutedClaudeEvent
     session.capabilities = { ...session.capabilities, models: "temporarilyUnavailable", effort: "temporarilyUnavailable", compact: "temporarilyUnavailable", skills: "temporarilyUnavailable", commands: "temporarilyUnavailable", mcp: "temporarilyUnavailable", pluginsLoad: "temporarilyUnavailable", subagents: "temporarilyUnavailable", contextUsage: "temporarilyUnavailable" };
     settleRunningActivities(session, "failed", "Claude Query 已关闭。");
   } else if (routed.envelope.type === "claude/sessionSettingsUpdated") {
-    session.model = stringValue(payload.model, session.model);
+    const model = stringValue(payload.model);
+    if (model) {
+      session.model = model;
+      session.resolvedModel = undefined;
+    }
     session.effort = stringValue(payload.effort, session.effort);
   } else if (routed.envelope.type === "claude/capabilitiesUpdated") {
     const capabilities = asRecord(payload.capabilities);
     session.capabilities = { ...session.capabilities, ...capabilities } as SessionState["capabilities"];
   } else if (routed.envelope.type === "claude/contextUsage") {
+    const usedValue = payload.used;
+    const totalValue = payload.total;
     session.tokenUsage = {
-      used: numberValue(payload.used),
-      total: numberValue(payload.total) > 0 ? numberValue(payload.total) : null,
+      used: typeof usedValue === "number" && Number.isFinite(usedValue) ? usedValue : session.tokenUsage.used,
+      total: typeof totalValue === "number" && Number.isFinite(totalValue) && totalValue > 0 ? totalValue : session.tokenUsage.total,
     };
   } else if (routed.envelope.type === "claude/interactionPending") {
     approval = interactionApproval(routed, payload);
@@ -275,11 +284,15 @@ export function applyClaudeEvent(source: SessionState, routed: RoutedClaudeEvent
       session.errorText = failed ? (Array.isArray(payload.errors) ? payload.errors.map(String).join("\n") : "Claude Code 执行失败。") : "";
       session.activeTurnId = null;
       session.startedAt = null;
-      session.tokenUsage = usageFromResult(payload);
+      session.tokenUsage = usageFromResult(payload, session.tokenUsage);
       session.messages = session.messages.map((message) => message.streaming ? { ...message, streaming: false } : message);
       settleRunningActivities(session, failed ? "failed" : "completed", failed ? "随失败回合结束。" : "随回合结束。");
     } else if (type === "system" && subtype === "init") {
-      session.model = stringValue(payload.model, session.model);
+      const resolvedModel = stringValue(payload.model);
+      if (resolvedModel) {
+        session.resolvedModel = resolvedModel;
+        if (!session.model) session.model = resolvedModel;
+      }
       session.resumed = true;
     }
   }

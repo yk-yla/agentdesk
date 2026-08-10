@@ -1,5 +1,5 @@
 import type { AgentOperation, AgentProvider } from "../shared/agentProtocol";
-import type { DesktopPreferences, FavoriteSessionSummary, JsonObject } from "../shared/protocol";
+import type { DesktopPreferences, FavoriteSessionSummary, JsonObject, LogLevel } from "../shared/protocol";
 import { asRecord, historyThread, threadFromList, threadFromSearch, type HistoryThread } from "./domain";
 import { providerHistoryParams } from "./agent/providerRegistry";
 
@@ -83,6 +83,7 @@ export interface HistoryControllerServices {
   request(provider: AgentProvider, operation: AgentOperation, params: JsonObject): Promise<unknown>;
   getPreferences(): DesktopPreferences;
   isVisible(): boolean;
+  log?(level: LogLevel, event: string, details?: JsonObject): void;
 }
 
 export class HistoryController {
@@ -130,6 +131,7 @@ export class HistoryController {
   }
 
   loadInitial(workspace: string) {
+    this.services.log?.("info", "renderer.history_load.started", { workspace });
     this.workspace = workspace;
     this.historyCursor = null;
     this.state.setCursor(null);
@@ -142,10 +144,13 @@ export class HistoryController {
       if (this.historyGeneration !== generation) return;
       this.historyCursor = cursor;
       this.state.setCursor(cursor);
-    }).catch(() => undefined).finally(() => {
+    }).catch((error) => {
+      this.services.log?.("error", "renderer.history_load.failed", { workspace, error: error instanceof Error ? { name: error.name, message: error.message, stack: error.stack } : { message: String(error) } });
+    }).finally(() => {
       if (this.historyGeneration !== generation) return;
       this.historyLoading = false;
       this.state.setLoading(false);
+      this.services.log?.("info", "renderer.history_load.finished", { workspace, cursor: this.historyCursor });
     });
     return () => {
       if (this.historyGeneration === generation) this.historyGeneration += 1;

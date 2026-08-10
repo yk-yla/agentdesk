@@ -2,6 +2,22 @@ import type { AgentEventEnvelope, AgentInteractionResponse, AgentOperation, Agen
 
 export type JsonObject = Record<string, unknown>;
 
+export type LogLevel = "debug" | "info" | "warn" | "error";
+
+export interface LogEntry {
+  timestamp: string;
+  level: LogLevel;
+  event: string;
+  details: JsonObject;
+  processId?: number;
+}
+
+export interface ClientLogEntry {
+  level?: LogLevel;
+  event: string;
+  details?: JsonObject;
+}
+
 export interface CodexRpcErrorPayload {
   method: string;
   code?: number;
@@ -208,10 +224,12 @@ export interface CodexBridge {
   request(method: string, params?: JsonObject, context?: CodexRequestContext): Promise<unknown>;
   respond(id: number | string, result: JsonObject): Promise<void>;
   getWorkspace(): Promise<string>;
+  getLaunchProvider(): Promise<AgentProvider | null>;
   chooseWorkspace(defaultPath?: string): Promise<string | null>;
   getPreferences(): Promise<DesktopPreferences>;
   getCodexDefaults(): Promise<CodexDefaults>;
   savePreferences(preferences: Partial<DesktopPreferences>): Promise<DesktopPreferences>;
+  writeLog(entry: ClientLogEntry): Promise<void>;
   getBossKeyStatus(): Promise<BossKeyStatus>;
   setBossKey(accelerator: string): Promise<BossKeyStatus>;
   saveClipboardImage(dataUrl: string, suggestedName?: string): Promise<SavedImage>;

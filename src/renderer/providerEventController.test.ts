@@ -16,6 +16,7 @@ function createHarness(initialSessions?: Record<string, SessionState>) {
   const recovered: AgentProvider[] = [];
   const notifications: string[] = [];
   const providerModels: Array<{ provider: AgentProvider; ids: string[] }> = [];
+  const openedWorkspaces: Array<{ workspace: string; provider?: AgentProvider }> = [];
   const rejectedStarts: string[] = [];
   const resolvedStarts: string[] = [];
   let frame: (() => void) | null = null;
@@ -52,7 +53,7 @@ function createHarness(initialSessions?: Record<string, SessionState>) {
       closeActiveTab: () => undefined,
       reloadSkills: () => undefined,
       activateSession: () => undefined,
-      openWorkspace: () => undefined,
+      openWorkspace: (workspace, provider) => { openedWorkspaces.push({ workspace, provider }); },
       adoptStartedThread: () => "thread",
       loadSkills: () => undefined,
       updateProviderModels: (provider, models) => { providerModels.push({ provider, ids: models.map((model) => model.id) }); },
@@ -76,6 +77,7 @@ function createHarness(initialSessions?: Record<string, SessionState>) {
     recovered,
     notifications,
     providerModels,
+    openedWorkspaces,
     rejectedStarts,
     resolvedStarts,
     get frame() { return frame; },
@@ -175,5 +177,13 @@ describe("ProviderEventController", () => {
 
     assert.deepEqual(harness.resolvedStarts, ["session"]);
     assert.deepEqual(harness.recovered, ["codex"]);
+  });
+
+  it("passes a requested Provider when opening a workspace", () => {
+    const harness = createHarness();
+
+    harness.controller.handleEnvelope(event("client/open-workspace", { workspace: "D:\\target", provider: "claude" }));
+
+    assert.deepEqual(harness.openedWorkspaces, [{ workspace: "D:\\target", provider: "claude" }]);
   });
 });

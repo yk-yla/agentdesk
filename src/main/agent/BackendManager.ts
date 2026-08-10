@@ -1,6 +1,8 @@
 import type { AgentBackend } from "./AgentBackend";
 import type { AgentEventEnvelope, AgentOperation, AgentProvider, AgentRequestContext, InteractionRef } from "../../shared/agentProtocol";
 import type { JsonObject } from "../../shared/protocol";
+import type { AppLogger } from "../logger";
+import { logErrorDetails } from "../logger";
 
 export class BackendManager {
   private readonly backends = new Map<AgentProvider, AgentBackend>();
@@ -8,11 +10,14 @@ export class BackendManager {
   private readonly subscriptions = new Map<AgentProvider, () => void>();
   private closePromise: Promise<void> | null = null;
 
+  constructor(private readonly logger?: AppLogger) {}
+
   register(backend: AgentBackend) {
     if (this.backends.has(backend.provider)) throw new Error(`Provider 已注册：${backend.provider}`);
     this.backends.set(backend.provider, backend);
     this.subscriptions.set(backend.provider, backend.subscribeEvents((event) => {
       if (event.provider !== backend.provider) return;
+      this.logger?.log("debug", "provider.event", { provider: backend.provider, type: event.type, requestId: event.requestId, payload: event.payload });
       this.listeners.forEach((listener) => listener(event));
     }));
   }
@@ -22,10 +27,21 @@ export class BackendManager {
   }
 
   async request(provider: AgentProvider, operation: AgentOperation, params: JsonObject = {}, context: AgentRequestContext = {}) {
-    const backend = this.require(provider);
-    if (operation === "getCapabilities") return backend.getCapabilities();
-    if (operation === "closeSession") return backend.closeSession(context);
-    return backend.request(operation, params, context);
+    const requestId = context.requestId || `${provider}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+    const startedAt = Date.now();
+    this.logger?.log("info", "provider.request.started", { requestId, provider, operation, params, context });
+    try {
+      const backend = this.require(provider);
+      let result: unknown;
+      if (operation === "getCapabilities") result = await backend.getCapabilities();
+      else if (operation === "closeSession") result = await backend.closeSession(context);
+      else result = await backend.request(operation, params, context);
+      this.logger?.log("info", "provider.request.completed", { requestId, provider, operation, durationMs: Date.now() - startedAt, result });
+      return result;
+    } catch (error) {
+      this.logger?.log("error", "provider.request.failed", { requestId, provider, operation, durationMs: Date.now() - startedAt, error: logErrorDetails(error) });
+      throw error;
+    }
   }
 
   respond(ref: InteractionRef, result: JsonObject) {

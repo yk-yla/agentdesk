@@ -3,6 +3,7 @@ export interface PendingRpcRequest<TChild> {
   resolve: (value: unknown) => void;
   reject: (reason: Error) => void;
   method: string;
+  requestId?: string;
   sessionId?: string;
 }
 
@@ -13,6 +14,7 @@ interface TrackedPendingRpcRequest<TChild> extends PendingRpcRequest<TChild> {
 export interface TimedOutRpcRequest<TChild> {
   child: TChild;
   method: string;
+  requestId?: string;
   sessionId?: string;
 }
 
@@ -31,7 +33,7 @@ export class RpcRequestRegistry<TChild> {
       const current = this.pending.get(id);
       if (!current || current.child !== request.child) return;
       this.pending.delete(id);
-      this.timedOut.set(id, { child: current.child, method: current.method, sessionId: current.sessionId });
+      this.timedOut.set(id, { child: current.child, method: current.method, requestId: current.requestId, sessionId: current.sessionId });
       while (this.timedOut.size > this.maxTimedOutRequests) {
         const oldest = this.timedOut.keys().next().value as number | undefined;
         if (oldest === undefined) break;

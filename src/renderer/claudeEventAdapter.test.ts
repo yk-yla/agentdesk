@@ -63,6 +63,41 @@ describe("Claude activity settlement", () => {
     assert.equal(findModelOption([model], "claude-sonnet-5")?.id, "sonnet");
   });
 
+  it("keeps the selected alias when Claude reports a shared resolved model", () => {
+    const models = [
+      { id: "default", resolvedId: "claude-opus-5[1m]", displayName: "Default", description: "", efforts: [], defaultEffort: "", supportsImage: true },
+      { id: "opus[1m]", resolvedId: "claude-opus-5[1m]", displayName: "Opus (1M)", description: "", efforts: [], defaultEffort: "", supportsImage: true },
+    ];
+    assert.equal(findModelOption(models, "opus[1m]")?.id, "opus[1m]");
+
+    const source = emptySession("session", "C:\\workspace", "opus[1m]", "medium", "claude");
+    const initialized = applyClaudeEvent(source, event("claude/sdkMessage", {
+      type: "system",
+      subtype: "init",
+      model: "claude-opus-5[1m]",
+    })).session;
+
+    assert.equal(event("claude/sdkMessage", { type: "system", subtype: "init", model: "claude-opus-5[1m]" }).kind, "state");
+    assert.equal(initialized.model, "opus[1m]");
+    assert.equal(initialized.resolvedModel, "claude-opus-5[1m]");
+  });
+
+  it("keeps known context usage when a result omits usage details", () => {
+    const source = emptySession("session", "C:\\workspace", "opus[1m]", "medium", "claude");
+    source.tokenUsage = { used: 120, total: 1_000_000 };
+    const malformed = applyClaudeEvent(source, event("claude/contextUsage", { nativeSessionId: "native" })).session;
+    assert.deepEqual(malformed.tokenUsage, source.tokenUsage);
+
+    const withContext = applyClaudeEvent(source, event("claude/contextUsage", {
+      nativeSessionId: "native",
+      used: 23_300,
+      total: 1_000_000,
+    })).session;
+    const completed = applyClaudeEvent(withContext, event("claude/sdkMessage", { type: "result", is_error: false })).session;
+
+    assert.deepEqual(completed.tokenUsage, { used: 23_300, total: 1_000_000 });
+  });
+
   it("settles unfinished tools on result, interruption and backend exit", () => {
     const source = emptySession("session", "C:\\workspace", "", "", "claude");
     source.activities = [{ id: "tool", kind: "commandExecution", title: "Bash", detail: "running", status: "inProgress", visibleInMain: false }];

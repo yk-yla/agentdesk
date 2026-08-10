@@ -117,6 +117,7 @@ export type AgentOperation =
   | "closeSession";
 
 export interface AgentRequestContext {
+  requestId?: string;
   sessionId?: string;
   canonicalCwd?: string;
   nativeSessionId?: string;

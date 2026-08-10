@@ -32,6 +32,14 @@ async page => {
     assert((await page.evaluate(() => window.agentDesk.getUpdateStatus())).phase === "downloaded", "桌面更新状态没有通过正式 Bridge 返回。" );
     results.push("Electron 43、窗口安全配置和桌面更新 IPC 可用");
 
+    const currentWorkspace = sidebar.locator(".current-workspace");
+    assert(await currentWorkspace.locator(".current-workspace-terminal").count() === 1, "当前目录缺少 WT 入口。" );
+    const currentWorkspacePin = currentWorkspace.locator(".current-workspace-pin");
+    if (await currentWorkspacePin.getAttribute("aria-pressed") !== "true") await currentWorkspacePin.click();
+    await sidebar.locator(".shortcut-row .shortcut-terminal").first().waitFor({ state: "visible", timeout: 10_000 });
+    assert(await page.locator(".composer-more-menu").getByText("在 WT 打开当前目录", { exact: true }).count() === 0, "会话更多菜单仍包含 WT 入口。" );
+    results.push("WT 入口位于当前目录和固定目录，且已从会话菜单移除");
+
     const settingsButton = sidebar.locator("button.settings-button");
     await settingsButton.click();
     const settingsPopover = sidebar.locator(".settings-popover");

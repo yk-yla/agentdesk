@@ -477,7 +477,17 @@ export class ClaudeBackend implements AgentBackend {
       void this.control(session, "mcp").then(() => emitCapability({ mcp: "supported" })).catch((error) => emitCapability({ mcp: unsupported(error) ? "unsupported" : "temporarilyUnavailable" }));
       void this.control(session, "reloadPlugins").then(() => emitCapability({ pluginsLoad: "supported" })).catch((error) => emitCapability({ pluginsLoad: unsupported(error) ? "unsupported" : "temporarilyUnavailable" }));
       void this.control(session, "agents").then(() => emitCapability({ subagents: "supported" })).catch((error) => emitCapability({ subagents: unsupported(error) ? "unsupported" : "temporarilyUnavailable" }));
-      void this.contextUsage(session).then((usage) => { emitCapability({ contextUsage: "supported" }); this.emit(session, "claude/contextUsage", { nativeSessionId: session.nativeSessionId, ...usage }); }).catch((error) => emitCapability({ contextUsage: unsupported(error) ? "unsupported" : "temporarilyUnavailable" }));
+      void this.contextUsage(session).then((usage) => {
+        emitCapability({ contextUsage: "supported" });
+        this.emit(session, "claude/contextUsage", { nativeSessionId: session.nativeSessionId, ...usage });
+      }).catch((error) => {
+        emitCapability({ contextUsage: unsupported(error) ? "unsupported" : "temporarilyUnavailable" });
+        this.emit(session, "claude/contextUsageFailed", {
+          nativeSessionId: session.nativeSessionId,
+          phase: "ready",
+          message: error instanceof Error ? error.message : String(error),
+        });
+      });
       return;
     }
     if (event.type === "processStarted") {
@@ -493,7 +503,13 @@ export class ClaudeBackend implements AgentBackend {
         session.pendingStart = undefined;
         session.turnId = null;
       }
-      if (payload.type === "result") void this.contextUsage(session).then((usage) => this.emit(session, "claude/contextUsage", { nativeSessionId: session.nativeSessionId, ...usage })).catch(() => undefined);
+      if (payload.type === "result") void this.contextUsage(session)
+        .then((usage) => this.emit(session, "claude/contextUsage", { nativeSessionId: session.nativeSessionId, ...usage }))
+        .catch((error) => this.emit(session, "claude/contextUsageFailed", {
+          nativeSessionId: session.nativeSessionId,
+          phase: "result",
+          message: error instanceof Error ? error.message : String(error),
+        }));
       return;
     }
     if (event.type === "interactionPending") {

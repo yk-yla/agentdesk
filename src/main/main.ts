@@ -1,6 +1,6 @@
 import { app, BrowserWindow, dialog, globalShortcut, ipcMain, Menu, net, Notification, safeStorage, shell, Tray } from "electron";
 import { autoUpdater } from "electron-updater";
-import { spawn, spawnSync } from "node:child_process";
+import { spawnSync } from "node:child_process";
 import { existsSync, mkdirSync, promises as fsPromises, readFileSync, statSync, writeFileSync } from "node:fs";
 import { randomUUID } from "node:crypto";
 import { homedir } from "node:os";
@@ -33,6 +33,9 @@ import { CodexCliUpdateManager } from "./codexCliUpdateManager";
 import { ClaudeUpdateManager } from "./claudeUpdateManager";
 import { isSafeExternalUrl, WindowLifecycle, type DesktopWindow } from "./windowLifecycle";
 import { registerDesktopIpc } from "./ipc/registerDesktopIpc";
+import { FileLogger, logErrorDetails } from "./logger";
+import { launchWindowsTerminal } from "./windowsTerminal";
+import { requestedProviderFromArgs, requestedWorkspaceFromArgs } from "./workspaceArgs";
 
 const MAX_AUTHORIZED_LOCAL_PATHS = 4_096;
 const MAX_AUTHORIZED_WORKSPACE_PATHS = 64;
@@ -68,6 +71,10 @@ function readCodexDefaults(): CodexDefaults {
 }
 
 const preferencesStore = new PreferencesStore(() => path.join(app.getPath("userData"), "preferences.json"));
+const appLogger = new FileLogger(() => path.join(app.getPath("userData"), "logs"));
+
+process.on("uncaughtExceptionMonitor", (error) => appLogger.log("error", "process.uncaught_exception", logErrorDetails(error)));
+process.on("unhandledRejection", (reason) => appLogger.log("error", "process.unhandled_rejection", reason instanceof Error ? logErrorDetails(reason) : { reason: String(reason) }));
 const windowLifecycle = new WindowLifecycle({
   createWindow: (options) => new BrowserWindow(options) as unknown as DesktopWindow,
   createTray: (iconPath) => new Tray(iconPath),
@@ -157,13 +164,22 @@ function isAllowedLocalPath(filePath: string) {
 }
 
 async function closeAllBackendsForExit() {
+  appLogger.log("info", "app.shutdown.started");
   return backendShutdownCoordinator.run(async () => {
-    await runShutdownSteps([
-      { name: "Provider", run: () => backendManager.close() },
-      { name: "已跟踪进程", run: () => processSupervisor.terminateAll() },
-      { name: "Claude 网关夹具", run: () => closeClaudeGatewayFixture() },
-      { name: "Codex app-server 进程树", run: () => codexCliUpdateManager.stopAllAppServers() },
-    ]);
+    try {
+      await runShutdownSteps([
+        { name: "Provider", run: () => backendManager.close() },
+        { name: "已跟踪进程", run: () => processSupervisor.terminateAll() },
+        { name: "Claude 网关夹具", run: () => closeClaudeGatewayFixture() },
+        { name: "Codex app-server 进程树", run: () => codexCliUpdateManager.stopAllAppServers() },
+      ]);
+      appLogger.log("info", "app.shutdown.completed");
+    } catch (error) {
+      appLogger.log("error", "app.shutdown.failed", logErrorDetails(error));
+      throw error;
+    } finally {
+      await appLogger.flush();
+    }
   });
 }
 
@@ -331,8 +347,7 @@ function openWindowsTerminal(cwd: string) {
   if (process.platform !== "win32") throw new Error("Windows Terminal 仅支持 Windows。" );
   const resolved = canonicalPath(cwd);
   if (!existingDirectory(resolved)) throw new Error("目标目录不存在。" );
-  const child = spawn("wt.exe", ["-d", resolved], { detached: true, windowsHide: true, shell: false, stdio: "ignore" });
-  child.unref();
+  launchWindowsTerminal(resolved);
 }
 
 function collectHandoffGitState(cwd: string) {
@@ -417,9 +432,7 @@ function resolveWorkspace(argv: string[]): string {
 }
 
 function requestedWorkspace(argv: string[]): string | null {
-  const flagIndex = argv.findIndex((value) => value === "--cwd");
-  const candidate = flagIndex >= 0 ? argv[flagIndex + 1] : "";
-  return candidate ? existingDirectory(candidate) : null;
+  return requestedWorkspaceFromArgs(argv, existingDirectory);
 }
 
 function emitToRenderer(message: JsonRpcMessage) {
@@ -443,6 +456,7 @@ const codexAppServer = new CodexAppServer({
   isQuitting: () => windowLifecycle.isQuitting,
   isExitNotificationSuppressed: () => codexCliUpdateManager?.exitNotificationSuppressed || false,
   terminateTree: (child) => processSupervisor.terminate(child),
+  logger: appLogger,
   inspectMessage(message, requestMethod) {
     registerAuthorizedImageReferences(message);
     if (message.method) registerAuthorizedThreadWorkspaces(message.method, message.params);
@@ -461,7 +475,7 @@ let claudeBackend: ClaudeBackend;
 const backendManager = createBackendRegistry([new CodexBackend(codexAppServer), (claudeBackend = new ClaudeBackend(claudeWorkerHost, undefined, (workspaces) => {
   preferencesStore.write({ trustedClaudeWorkspaces: workspaces });
   claudeUpdateManager?.setStatus({ trustedWorkspaces: workspaces });
-}, readClaudeCredentialsForQuery, () => claudeGatewayFixture || claudeLifecycleFixture ? { kind: claudeGatewayFixture?.kind || "offline", ...(claudeGatewayFixture?.timeoutMs ? { timeoutMs: claudeGatewayFixture.timeoutMs } : {}), ...(claudeLifecycleFixture ? { lifecycle: claudeLifecycleFixture } : {}) } : undefined))]);
+}, readClaudeCredentialsForQuery, () => claudeGatewayFixture || claudeLifecycleFixture ? { kind: claudeGatewayFixture?.kind || "offline", ...(claudeGatewayFixture?.timeoutMs ? { timeoutMs: claudeGatewayFixture.timeoutMs } : {}), ...(claudeLifecycleFixture ? { lifecycle: claudeLifecycleFixture } : {}) } : undefined))], appLogger);
 
 claudeUpdateManager = new ClaudeUpdateManager({
   appPath: () => app.getAppPath(),
@@ -488,14 +502,17 @@ codexCliUpdateManager = new CodexCliUpdateManager({
 backendManager.subscribeEvents((event) => windowLifecycle.send("agent:event", event));
 
 const hasLock = windowLifecycle.acquireSingleInstance((argv) => {
+  appLogger.log("info", "app.second_instance", { argv });
   const nextWorkspace = requestedWorkspace(argv);
+  const nextProvider = requestedProviderFromArgs(argv);
   if (nextWorkspace) {
     rememberWorkspace(nextWorkspace);
-    emitToRenderer({ method: "client/open-workspace", params: { workspace: nextWorkspace } });
+    emitToRenderer({ method: "client/open-workspace", params: { workspace: nextWorkspace, ...(nextProvider ? { provider: nextProvider } : {}) } });
   }
 });
 if (hasLock) {
   app.whenReady().then(() => {
+    appLogger.log("info", "app.started", { version: app.getVersion(), packaged: app.isPackaged, argv: process.argv });
     const explicitWorkspace = requestedWorkspace(process.argv);
     const startupPreferences = preferencesStore.read();
     replaceTrustedWorkspaces(startupPreferences.trustedClaudeWorkspaces || []);
@@ -505,9 +522,12 @@ if (hasLock) {
     registerAuthorizedWorkspacePath(workspacePath);
     startupPreferences.favoriteWorkspaces.forEach(registerAuthorizedWorkspacePath);
     rememberWorkspace(workspacePath);
+    appLogger.log("info", "workspace.selected", { workspace: workspacePath, explicit: Boolean(explicitWorkspace), restored: Boolean(previousWorkspace) });
     registerDesktopIpc(ipcMain, {
+      logger: appLogger,
       workspace: {
         current: () => workspacePath,
+        launchProvider: () => requestedProviderFromArgs(process.argv),
         choose: async (defaultPath) => {
           const result = await dialog.showOpenDialog({ properties: ["openDirectory"], defaultPath: defaultPath || workspacePath });
           if (result.canceled || !result.filePaths[0]) return null;
@@ -659,12 +679,21 @@ if (hasLock) {
     windowLifecycle.createTray();
     void codexCliUpdateManager.initialize();
     void codexAppServer.ensureStarted().catch((error: Error) => {
+      appLogger.log("error", "codex.app_server.start_failed", logErrorDetails(error));
       emitToRenderer({ method: "client/error", params: { message: error.message } });
     });
   });
 }
 
 app.on("before-quit", (event) => windowLifecycle.handleBeforeQuit(event, closeAllBackendsForExit, () => codexCliUpdateManager.dispose()));
+
+app.on("render-process-gone", (_event, webContents, details) => {
+  appLogger.log("error", "electron.render_process_gone", { webContentsId: webContents.id, details });
+});
+
+app.on("child-process-gone", (_event, details) => {
+  appLogger.log("error", "electron.child_process_gone", { details });
+});
 
 app.on("will-quit", () => {
   windowLifecycle.dispose();
