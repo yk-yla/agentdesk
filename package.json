@@ -1,6 +1,6 @@
 {
   "name": "agentdesk",
-  "version": "1.0.2",
+  "version": "1.0.3",
   "private": true,
   "description": "A focused desktop client for Codex and Claude Code.",
   "engines": {
@@ -38,6 +38,7 @@
     "smol-toml": "^1.3.1"
   },
   "devDependencies": {
+    "@playwright/cli": "0.1.17",
     "@types/node": "^24.0.0",
     "@types/react": "^19.0.3",
     "@types/react-dom": "^19.0.2",

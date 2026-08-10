@@ -64,6 +64,35 @@ async page => {
   assert(desktopIpc.unsafeExternalRejected, "打包版没有拒绝非 HTTP(S) 外链。");
   assert(desktopIpc.invalidNotificationAccepted === false, "打包版接受了无效通知输入。");
 
+  const providerSmoke = await page.evaluate(async () => {
+    const cwd = await window.agentDesk.getWorkspace();
+    const claudeList = await window.agentDesk.agentRequest("claude", "listSessions", { cwd, cursor: null, limit: 10 }, { canonicalCwd: cwd });
+    const claudeItems = claudeList && typeof claudeList === "object" && Array.isArray(claudeList.data) ? claudeList.data : [];
+    const fixtureId = "11111111-1111-4111-8111-111111111111";
+    const fixture = claudeItems.find((entry) => entry && typeof entry === "object" && entry.id === fixtureId);
+    if (!fixture) throw new Error("打包版 Claude listSessions 没有返回隔离夹具。");
+    const claudeRead = await window.agentDesk.agentRequest("claude", "readSession", { cwd, threadId: fixtureId }, { canonicalCwd: cwd, nativeSessionId: fixtureId });
+    const thread = claudeRead && typeof claudeRead === "object" && claudeRead.thread && typeof claudeRead.thread === "object" ? claudeRead.thread : null;
+    const messages = thread && Array.isArray(thread.messages) ? thread.messages : [];
+    const codexList = await window.agentDesk.agentRequest("codex", "listSessions", {
+      cwd,
+      cursor: null,
+      limit: 10,
+      sortKey: "recency_at",
+      sortDirection: "desc",
+      sourceKinds: ["cli", "vscode", "exec", "appServer"],
+      archived: false,
+    }, { canonicalCwd: cwd });
+    return {
+      cwd,
+      claudeFixtureFound: Boolean(fixture),
+      claudeMessageCount: messages.length,
+      codexListValid: Boolean(codexList && typeof codexList === "object" && Array.isArray(codexList.data)),
+    };
+  });
+  assert(providerSmoke.claudeFixtureFound && providerSmoke.claudeMessageCount >= 2, "打包版 Claude 历史读取结果不完整。");
+  assert(providerSmoke.codexListValid, "打包版 Codex listSessions 返回格式无效。");
+
   return {
     ok: true,
     results: [
@@ -73,6 +102,8 @@ async page => {
       "窗口最大化切换 IPC 可用",
       "输入框鼠标和文字插入光标可见",
       "附件、外链和通知输入边界可用",
+      "Claude Worker 可加载并完成 listSessions/readSession",
+      "Codex Provider 可完成 listSessions",
     ],
   };
 }

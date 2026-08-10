@@ -5,7 +5,6 @@ import { MAX_BASE_FONT_SIZE, MIN_BASE_FONT_SIZE, type BossKeyStatus, type Claude
 const SettingsAdvanced = lazy(() => import("./SettingsAdvanced"));
 
 const THEME_OPTIONS: Array<{ id: ThemeId; label: string; swatch: string }> = [
-  { id: "system", label: "跟随系统", swatch: "#7d8794" },
   { id: "github-light", label: "GitHub Light", swatch: "#e8f4ee" },
   { id: "light-owl", label: "Light Owl", swatch: "#fbfbfb" },
   { id: "catppuccin-latte", label: "Catppuccin Latte", swatch: "#eff1f5" },

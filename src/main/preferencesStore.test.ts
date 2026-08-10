@@ -29,6 +29,7 @@ describe("PreferencesStore", () => {
 
   it("normalizes legacy and untrusted preference values", () => {
     assert.equal(normalizePreferences({ theme: "dracula" }).bossKey, "F2");
+    assert.equal(normalizePreferences({ theme: "system" }).theme, "github-dark");
 
     const preferences = normalizePreferences({
       theme: "graphite",

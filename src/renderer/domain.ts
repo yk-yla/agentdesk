@@ -223,7 +223,7 @@ export interface LayoutState {
   activePaneId: string;
 }
 
-export const DEFAULT_THEME: ThemeId = "system";
+export const DEFAULT_THEME: ThemeId = "github-dark";
 export const DEFAULT_DISPLAY_MODE: DisplayMode = "simple";
 export const EMPTY_CODEX_DEFAULTS: CodexDefaults = { model: "", effort: "" };
 

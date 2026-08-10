@@ -20,19 +20,19 @@ export const DEFAULT_PREFERENCES: DesktopPreferences = {
   favoriteSessions: [],
   favoriteSessionSummaries: {},
   modelContextWindows: {},
-  theme: "system",
+  theme: "github-dark",
   displayMode: "simple",
   bossKey: DEFAULT_BOSS_KEY,
   trustedClaudeWorkspaces: [],
 };
 
 const THEME_IDS: ThemeId[] = [
-  "system", "github-light", "light-owl", "catppuccin-latte", "rose-pine-dawn",
+  "github-light", "light-owl", "catppuccin-latte", "rose-pine-dawn",
   "github-dark", "one-dark-pro", "dracula", "tokyo-night", "night-owl", "catppuccin-mocha",
 ];
 
 export function normalizeTheme(value: unknown): ThemeId {
-  if (value === "graphite") return "github-dark";
+  if (value === "graphite" || value === "system") return "github-dark";
   if (value === "nord") return "night-owl";
   if (value === "one-dark") return "one-dark-pro";
   return typeof value === "string" && THEME_IDS.includes(value as ThemeId) ? value as ThemeId : DEFAULT_PREFERENCES.theme;

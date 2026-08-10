@@ -86,7 +86,6 @@ export interface FavoriteSessionSummary {
 }
 
 export type ThemeId =
-  | "system"
   | "github-light"
   | "light-owl"
   | "catppuccin-latte"

@@ -47,7 +47,7 @@ function createHarness(request: (provider: AgentProvider, operation: AgentOperat
     setSearchCursor: (value) => { searchCursor = value; },
   }, {
     request,
-    getPreferences: () => ({ recentWorkspaces: [], lastWorkspace: "", favoriteWorkspaces: [], theme: "system", displayMode: "simple", bossKey: "", sessionAliases: {}, favoriteSessions: [] }),
+    getPreferences: () => ({ recentWorkspaces: [], lastWorkspace: "", favoriteWorkspaces: [], theme: "github-dark", displayMode: "simple", bossKey: "", sessionAliases: {}, favoriteSessions: [] }),
     isVisible: () => true,
   });
   return {
@@ -66,7 +66,7 @@ describe("history helpers", () => {
     const merged = mergeHistory([thread("same", "codex", 1)], [thread("same", "claude", 2), thread("same", "codex", 3)]);
     const decorated = applyLocalSessionMetadata(merged, {
       recentWorkspaces: [], lastWorkspace: "", favoriteWorkspaces: [],
-      theme: "system", displayMode: "simple", bossKey: "",
+      theme: "github-dark", displayMode: "simple", bossKey: "",
       sessionAliases: { "claude:same": "Claude alias" },
       favoriteSessions: ["codex:same"],
     });
@@ -79,7 +79,7 @@ describe("history helpers", () => {
   it("restores cross-directory favorites from saved summaries", () => {
     const favorites = favoriteHistoryEntries([thread("loaded", "codex", 2)], {
       recentWorkspaces: [], lastWorkspace: "", favoriteWorkspaces: [],
-      theme: "system", displayMode: "simple", bossKey: "",
+      theme: "github-dark", displayMode: "simple", bossKey: "",
       favoriteSessions: ["codex:loaded", "claude:saved"],
       favoriteSessionSummaries: {
         "claude:saved": { provider: "claude", id: "saved", title: "跨目录收藏", cwd: "D:\\other", updatedAt: 3 },

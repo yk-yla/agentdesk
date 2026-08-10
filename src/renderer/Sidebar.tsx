@@ -1,4 +1,4 @@
-import { FolderOpen, Package, PanelLeftClose, PanelLeftOpen, RefreshCw } from "lucide-react";
+import { FolderOpen, Package, PanelLeftClose, PanelLeftOpen } from "lucide-react";
 import { memo, type PointerEvent as ReactPointerEvent } from "react";
 import type { CapabilityState } from "../shared/agentProtocol";
 import HistorySidebar, { type HistorySidebarProps } from "./HistorySidebar";
@@ -17,7 +17,6 @@ export interface SidebarLayout {
 export interface SidebarToolbar {
   pluginMarketplaceState: CapabilityState;
   onChooseWorkspace: () => void;
-  onRefreshHistory: () => void;
   onOpenPlugins: () => void;
 }
 
@@ -38,7 +37,6 @@ function SidebarBase({ layout, toolbar, workspace, history, settings }: SidebarP
         <button className="new-thread-button provider-new-claude" onClick={() => workspace.actions.onNewSession(currentCwd, "claude")} title="新建 Claude Code 会话" aria-label="新建 Claude Code 会话"><ProviderIcon provider="claude" /><span className="sidebar-copy">Claude</span></button>
       </div>
       <button className="icon-button" onClick={toolbar.onChooseWorkspace} title="选择目录" aria-label="选择目录"><FolderOpen size={16} /></button>
-      <button className="icon-button" onClick={toolbar.onRefreshHistory} title="刷新历史" aria-label="刷新历史"><RefreshCw size={15} /></button>
       {toolbar.pluginMarketplaceState !== "unsupported" ? <button className="icon-button" disabled={toolbar.pluginMarketplaceState !== "supported"} onClick={toolbar.onOpenPlugins} title={toolbar.pluginMarketplaceState === "supported" ? "插件市场" : "当前 Provider 的插件市场暂不可用"} aria-label="插件市场"><Package size={15} /></button> : null}
       <SettingsPopover collapsed={layout.collapsed} {...settings} />
       <button className="icon-button sidebar-toggle" onClick={layout.onToggleCollapsed} title={layout.collapsed ? "展开左侧面板" : "收起左侧面板"} aria-label={layout.collapsed ? "展开左侧面板" : "收起左侧面板"} aria-expanded={!layout.collapsed}>{layout.collapsed ? <PanelLeftOpen size={16} /> : <PanelLeftClose size={16} />}</button>

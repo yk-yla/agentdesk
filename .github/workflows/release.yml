@@ -48,6 +48,10 @@ jobs:
             throw "Tag $env:GITHUB_REF_NAME does not match package version $version"
           }
 
+      - name: Verify packaged providers
+        shell: pwsh
+        run: pwsh -NoProfile -ExecutionPolicy Bypass -File scripts/electron-package-regression.ps1 -PlaywrightWrapper scripts/playwright-cli-wrapper.ps1
+
       - name: Publish GitHub Release
         shell: pwsh
         env:

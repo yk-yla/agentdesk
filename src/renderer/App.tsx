@@ -1759,9 +1759,8 @@ export default function App() {
   const sidebarToolbar = useMemo<SidebarProps["toolbar"]>(() => ({
     pluginMarketplaceState: providerCapabilities.codex.pluginMarketplace === "supported" || providerCapabilities.claude.pluginMarketplace === "supported" ? "supported" : "temporarilyUnavailable",
     onChooseWorkspace: chooseWorkspace,
-    onRefreshHistory: refreshHistory,
     onOpenPlugins: openPluginPanel,
-  }), [chooseWorkspace, openPluginPanel, providerCapabilities.claude.pluginMarketplace, providerCapabilities.codex.pluginMarketplace, refreshHistory]);
+  }), [chooseWorkspace, openPluginPanel, providerCapabilities.claude.pluginMarketplace, providerCapabilities.codex.pluginMarketplace]);
   const sidebarWorkspace = useMemo<SidebarProps["workspace"]>(() => ({
     viewModel: {
       currentCwd: sidebarCurrentCwd,

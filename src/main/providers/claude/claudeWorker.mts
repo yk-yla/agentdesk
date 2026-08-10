@@ -3,7 +3,6 @@ import { randomUUID } from "node:crypto";
 import { spawn } from "node:child_process";
 import { createRequire } from "node:module";
 import path from "node:path";
-import { resolveExecutableFromPath } from "../../executablePath.js";
 import {
   deleteSession,
   forkSession,
@@ -138,7 +137,7 @@ function pluginExecutable(command: Extract<ClaudeWorkerCommand, { type: "plugin"
   const configured = command.executablePath?.trim();
   if (configured) return configured;
   try { return nodeRequire.resolve(`@anthropic-ai/claude-agent-sdk-${process.platform}-${process.arch}/claude.exe`); } catch { /* optional SDK binary absent */ }
-  return resolveExecutableFromPath("claude.exe") || resolveExecutableFromPath("claude") || "claude";
+  return process.platform === "win32" ? "claude.exe" : "claude";
 }
 
 function pluginConfigDir(value: unknown) {

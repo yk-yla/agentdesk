@@ -89,6 +89,8 @@ AgentDesk 是 Windows x64 桌面客户端，同时接入 Codex 和 Claude Code�
 - Renderer 批次：先执行 `npm run build:renderer`，再按真实依赖选择 Mock 预览或 Electron 回归；检查桌面布局、长文本、加载、空状态和错误状态。
 - 主进程、preload、shared 批次：先执行相关测试和 `npm run build:main`；涉及真实桌面行为、Provider、IPC、审批、附件、更新、中断、进程或窗口生命周期时，批次结束后执行一次 Electron 回归。
 - Electron 运行时、electron-builder、安装包或更新链路变更：批次结束后执行一次 `npm run package` 和打包版回归；若同时影响开发版桌面行为，再补一次 Electron 核心回归。
+- Worker、子进程入口、`asar` 或 `asarUnpack` 相关改动必须检查打包产物的运行时依赖闭包：入口及其全部相对导入必须在最终加载路径中真实存在，不得跨 `app.asar` 与 `app.asar.unpacked` 引用缺失文件。开发版能够加载不能替代此检查。
+- 打包版回归必须真实启动 `build/release/win-unpacked/AgentDesk.exe`，通过正式 Bridge 使用隔离夹具至少调用 Claude `listSessions`、Claude `readSession` 和 Codex `listSessions`；必须确认 Worker/Provider 能启动、请求成功且没有模块缺失。只验证窗口、Renderer 或 Bridge 存在不算通过。
 - 对 `npm test`、`npm run build`、`npm run package` 这条嵌套构建链，一个批次只选择最终需要的最高入口：`build` 已包含 `test`，`package` 又包含 `build`，代码未变化时不得连续重复执行。
 - Electron 核心、真实 Provider 和打包版回归验证的是不同运行行为，不能因执行了更高构建入口就互相替代；只运行本批次实际影响的场景，并把同类场景集中回归一次。
 - 多个改动覆盖同一套 Electron 场景时统一回归一次；只有失败后修复了相关代码或验收范围变化时才重跑。
@@ -100,6 +102,7 @@ AgentDesk 是 Windows x64 桌面客户端，同时接入 Codex 和 Claude Code�
 - 未经明确授权，不执行 `git add`、`git commit`、`git push`、切分支、清理、重置或改写历史。
 - 正式发布前确认分支、远程、工作区、版本号和授权；版本号同步修改 `package.json` 与 `package-lock.json`。
 - 正式发布前只执行一次本地 `npm run package` 及必要的打包版回归，不在代码未变化时额外重复 `npm run build`。
+- 发布流程必须遵守“构建一次、验证同一份产物、发布同一份产物”；CI 在上传 Release 资产前必须对本次生成的 `win-unpacked` 执行上述打包版 Provider 回归，失败时禁止发布。
 - 正式发布使用普通推送 `develop`，再在已推送提交上创建并推送对应 `vX.Y.Z` Tag，等待 `.github/workflows/release.yml` 完成。
-- Release 必须同时包含 `AgentDesk-Setup-X.Y.Z.exe`、对应 blockmap 和 `latest.yml`，全部确认后才能报告发布完成。
+- Release 必须同时满足打包版 Provider 回归通过，并包含 `AgentDesk-Setup-X.Y.Z.exe`、对应 blockmap 和 `latest.yml`；全部确认后才能报告发布完成。
 - 发布失败时停在失败步骤；不重复创建 Tag、不修改旧 Tag、不强制推送，修复后重新取得发布授权。
