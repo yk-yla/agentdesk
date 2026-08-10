@@ -271,7 +271,7 @@ export interface AgentBridge extends Omit<CodexBridge, "request" | "respond" | "
   dev?: {
     holdClaudeWorkerRequests(): Promise<void>;
     injectClaudeWorkerFatal(): Promise<void>;
-    setClaudeLifecycleFixture(kind: "longBash" | "hook" | "mcp" | "approval" | "stream" | null): Promise<{ kind: string | null }>;
+    setClaudeLifecycleFixture(kind: "longBash" | "hook" | "mcp" | "approval" | "stream" | "compact" | "incompleteTool" | null): Promise<{ kind: string | null }>;
     setDesktopUpdateFixture(): Promise<DesktopUpdateStatus>;
     shutdownDryRun(): Promise<{ ok: true }>;
     quitForTesting(): Promise<{ requested: true }>;

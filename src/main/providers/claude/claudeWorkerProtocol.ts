@@ -1,14 +1,17 @@
 import type { JsonObject } from "../../../shared/protocol";
 
 export type ClaudeGatewayFixtureKind = "unauthorized" | "rateLimited" | "serverError" | "truncatedSse" | "timeout" | "offline";
-export type ClaudeLifecycleFixtureKind = "longBash" | "hook" | "mcp" | "approval" | "stream";
+export type ClaudeLifecycleFixtureKind = "longBash" | "hook" | "mcp" | "approval" | "stream" | "compact" | "incompleteTool";
+export type ClaudePluginOperation = "list" | "details" | "install" | "uninstall" | "update" | "marketplaceList" | "marketplaceAdd" | "marketplaceUpdate" | "marketplaceRemove";
 
 export type ClaudeWorkerCommand = ({ requestId?: string } & (
   | { type: "start"; sessionId: string; nativeSessionId: string; resumeSessionId?: string; forkSession?: boolean; queryGeneration: number; cwd: string; prompt: string; input?: JsonObject[]; model?: string; effort?: string; executablePath?: string; env?: Record<string, string>; settingSources: string[]; gatewayFixture?: { kind: ClaudeGatewayFixtureKind; timeoutMs?: number; lifecycle?: ClaudeLifecycleFixtureKind } }
+  | { type: "compactSession"; sessionId: string; nativeSessionId: string; queryGeneration: number; cwd: string; model?: string; effort?: string; executablePath?: string; env?: Record<string, string>; settingSources: string[]; gatewayFixture?: { kind: ClaudeGatewayFixtureKind; timeoutMs?: number; lifecycle?: ClaudeLifecycleFixtureKind } }
   | { type: "send"; sessionId: string; queryGeneration: number; text: string; input?: JsonObject[] }
   | { type: "interrupt"; sessionId: string; queryGeneration: number }
   | { type: "interactionResponse"; sessionId: string; queryGeneration: number; interactionId: string; result: JsonObject }
-  | { type: "control"; sessionId: string; queryGeneration: number; action: "models" | "commands" | "agents" | "contextUsage" | "mcp" | "reloadSkills" | "reloadPlugins" | "setModel" | "setEffort" | "compact"; value?: string }
+  | { type: "control"; sessionId: string; queryGeneration: number; action: "models" | "commands" | "agents" | "contextUsage" | "mcp" | "reloadSkills" | "reloadPlugins" | "setModel" | "setEffort"; value?: string }
+  | { type: "plugin"; operation: ClaudePluginOperation; cwd: string; executablePath?: string; env?: Record<string, string>; configDir?: string; plugin?: string; marketplace?: string; source?: string; sparsePaths?: string[] }
   | { type: "closeSession"; sessionId: string; queryGeneration?: number }
   | { type: "listSessions"; cwd: string; limit: number; offset: number; includeWorktrees: false }
   | { type: "searchSessions"; cwd: string; searchTerm: string; limit: number; offset: number; includeWorktrees: false }

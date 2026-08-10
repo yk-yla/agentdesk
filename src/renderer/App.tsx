@@ -319,11 +319,27 @@ export default function App() {
     }
   }, [agentClient]);
 
-  const requestForPluginPanel = useCallback((operation: AgentOperation, params: JsonObject) => {
-    const pane = layoutRef.current.panes.find((entry) => entry.id === layoutRef.current.activePaneId) || layoutRef.current.panes[0];
-    const sessionId = pane?.activeTabId || Object.keys(sessionsRef.current)[0];
-    return sessionId ? requestForSession(sessionId, operation, params) : agentClient.request("codex", operation, params);
-  }, [agentClient, requestForSession]);
+  const requestForPluginPanel = useCallback((provider: AgentProvider, operation: AgentOperation, params: JsonObject) => {
+    const sessionId = Object.keys(sessionsRef.current).find((id) => sessionsRef.current[id]?.provider === provider);
+    const session = sessionId ? sessionsRef.current[sessionId] : undefined;
+    const cwd = typeof params.cwd === "string" ? params.cwd : session?.cwd || workspace;
+    const context = {
+      ...(sessionId ? { sessionId } : {}),
+      canonicalCwd: cwd,
+      ...(session?.threadId ? { nativeSessionId: session.threadId } : {}),
+      ...(session?.queryGeneration !== undefined ? { queryGeneration: session.queryGeneration } : {}),
+    };
+    return agentClient.request(provider, operation, { ...params, cwd }, context).catch(async (error) => {
+      if (provider !== "claude") throw error;
+      const normalized = normalizeAgentRequestError(provider, operation, error);
+      const marker = normalized.message.indexOf("__CLAUDE_WORKSPACE_TRUST_REQUIRED__");
+      if (marker < 0) throw normalized;
+      const canonicalCwd = normalized.message.slice(marker + "__CLAUDE_WORKSPACE_TRUST_REQUIRED__".length).trim() || cwd;
+      const accepted = window.confirm(`Claude Code 插件管理将使用以下目录：\n\n${canonicalCwd}\n\n插件或市场操作可能下载并加载代码。仅在你信任此目录时继续。`);
+      if (!accepted) throw new Error("已取消 Claude Code 工作区授权。");
+      return agentClient.request(provider, operation, { ...params, cwd, trustWorkspace: true }, context);
+    });
+  }, [agentClient, workspace]);
 
   const openPluginPanel = useCallback(() => setPluginPanelOpen(true), []);
   const closePluginPanel = useCallback(() => setPluginPanelOpen(false), []);
@@ -976,6 +992,9 @@ export default function App() {
   }, [agentClient, setError, updateSession]);
 
   const compactSession = useCallback(async (sessionId: string) => {
+    const session = sessionsRef.current[sessionId];
+    if (!session) return;
+    updateSession(sessionId, (current) => ({ ...current, status: "working", statusLabel: "正在压缩", startedAt: Date.now(), errorText: "" }));
     try {
       const threadId = await ensureThread(sessionId);
       await requestForSession(sessionId, "compactSession", { threadId });
@@ -1126,10 +1145,10 @@ export default function App() {
         ...hydrateAgentSession(current, session.provider, { ...thread, name: title }),
         threadId,
         title,
-        model: stringValue(result.model, session.model),
-        effort: stringValue(result.reasoningEffort, session.effort),
+        model: stringValue(result.model) || session.model,
+        effort: stringValue(result.reasoningEffort) || session.effort,
         resumed: false,
-        tokenUsage: tokenUsageForModel(current, stringValue(result.model, session.model), preferencesRef.current),
+        tokenUsage: tokenUsageForModel(current, stringValue(result.model) || session.model, preferencesRef.current),
       }));
       setHistory((current) => upsertHistoryEntry(current, { id: threadId, provider: session.provider, title, cwd }));
       void requestForSession(forkedSessionId, "renameSession", { threadId, name: title }).catch((error) => setError(forkedSessionId, error, "分支重命名失败"));
@@ -1292,8 +1311,8 @@ export default function App() {
     try {
       const resume = asRecord(await resumePromise);
       updateSession(sessionId, (current) => {
-        const model = stringValue(resume.model, current.model);
-        return { ...current, model, effort: stringValue(resume.reasoningEffort, current.effort), resumed: true, tokenUsage: tokenUsageForModel(current, model, preferencesRef.current) };
+        const model = stringValue(resume.model) || current.model;
+        return { ...current, model, effort: stringValue(resume.reasoningEffort) || current.effort, resumed: true, tokenUsage: tokenUsageForModel(current, model, preferencesRef.current) };
       });
     } catch (error) {
       setError(sessionId, error, "恢复历史会话失败");
@@ -1586,8 +1605,8 @@ export default function App() {
         .then((resumeValue) => {
           const resume = asRecord(resumeValue);
           updateSession(sessionId, (current) => {
-            const model = stringValue(resume.model, current.model);
-            return { ...current, model, effort: stringValue(resume.reasoningEffort, current.effort), resumed: true, tokenUsage: tokenUsageForModel(current, model, preferencesRef.current) };
+            const model = stringValue(resume.model) || current.model;
+            return { ...current, model, effort: stringValue(resume.reasoningEffort) || current.effort, resumed: true, tokenUsage: tokenUsageForModel(current, model, preferencesRef.current) };
           });
         })
         .catch((error) => setError(sessionId, error, "恢复更新前会话失败"));
@@ -1738,11 +1757,11 @@ export default function App() {
     onResizeStart: startSidebarResize,
   }), [sidebarCollapsed, startSidebarResize, toggleSidebarCollapsed]);
   const sidebarToolbar = useMemo<SidebarProps["toolbar"]>(() => ({
-    pluginMarketplaceState: activeSession?.capabilities.pluginMarketplace || "temporarilyUnavailable",
+    pluginMarketplaceState: providerCapabilities.codex.pluginMarketplace === "supported" || providerCapabilities.claude.pluginMarketplace === "supported" ? "supported" : "temporarilyUnavailable",
     onChooseWorkspace: chooseWorkspace,
     onRefreshHistory: refreshHistory,
     onOpenPlugins: openPluginPanel,
-  }), [activeSession?.capabilities.pluginMarketplace, chooseWorkspace, openPluginPanel, refreshHistory]);
+  }), [chooseWorkspace, openPluginPanel, providerCapabilities.claude.pluginMarketplace, providerCapabilities.codex.pluginMarketplace, refreshHistory]);
   const sidebarWorkspace = useMemo<SidebarProps["workspace"]>(() => ({
     viewModel: {
       currentCwd: sidebarCurrentCwd,
@@ -1955,7 +1974,7 @@ export default function App() {
         {layout.panes.map(renderPane)}
       </div>
     </div>
-    {pluginPanelOpen ? <Suspense fallback={<div className="plugin-overlay" role="dialog" aria-modal="true" aria-label="正在打开插件市场"><section className="plugin-panel lazy-panel-loading">正在打开插件市场</section></div>}><PluginPanel cwd={activeSession?.cwd || workspace} request={requestForPluginPanel} onClose={closePluginPanel} /></Suspense> : null}
+    {pluginPanelOpen ? <Suspense fallback={<div className="plugin-overlay" role="dialog" aria-modal="true" aria-label="正在打开插件市场"><section className="plugin-panel lazy-panel-loading">正在打开插件市场</section></div>}><PluginPanel cwd={activeSession?.cwd || workspace} initialProvider={activeSession?.provider || "codex"} request={requestForPluginPanel} onClose={closePluginPanel} /></Suspense> : null}
     {tabContextMenu && contextPane ? <div
       className="tab-context-menu"
       role="menu"

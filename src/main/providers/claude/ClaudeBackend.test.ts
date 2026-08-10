@@ -13,6 +13,7 @@ class FakeRuntime implements ClaudeWorkerRuntime {
   known = new Map<string, string>();
   listener: ((event: ClaudeWorkerEvent) => void) | null = null;
   searchResult: unknown = { data: [], scannedCount: 0, hasMore: false };
+  readSessionResult: unknown = { info: null, messages: [] };
   failControl = new Set<string>();
   unsupportedControl = new Set<string>();
   send(command: ClaudeWorkerCommand) { this.commands.push(command); }
@@ -22,6 +23,7 @@ class FakeRuntime implements ClaudeWorkerRuntime {
       const cwd = this.known.get(command.nativeSessionId);
       return cwd === command.cwd ? { id: command.nativeSessionId, cwd } : null;
     }
+    if (command.type === "readSession") return this.readSessionResult;
     if (command.type === "forkSession") {
       const id = "33333333-3333-4333-8333-333333333333";
       this.known.set(id, command.cwd);
@@ -36,6 +38,10 @@ class FakeRuntime implements ClaudeWorkerRuntime {
       if (command.action === "agents") return [{ name: "worker" }];
       return {};
     }
+    if (command.type === "plugin") {
+      if (command.operation === "list") return { marketplaces: [{ name: "Claude Code", path: "", plugins: [] }] };
+      return { ok: true };
+    }
     return { data: [], hasMore: false };
   }
   subscribe(listener: (event: ClaudeWorkerEvent) => void) { this.listener = listener; return () => { this.listener = null; }; }
@@ -44,13 +50,13 @@ class FakeRuntime implements ClaudeWorkerRuntime {
 
 const fixtureCredentials = () => ({ source: "settings" as const, baseUrl: "https://example.invalid", authToken: "fixture-token" });
 
-function testBackend(runtime: FakeRuntime, timeoutMs = 300_000) {
-  return new ClaudeBackend(runtime, timeoutMs, undefined, fixtureCredentials);
+function testBackend(runtime: FakeRuntime, timeoutMs = 300_000, toolArgumentStallTimeoutMs = 90_000) {
+  return new ClaudeBackend(runtime, timeoutMs, undefined, fixtureCredentials, undefined, toolArgumentStallTimeoutMs);
 }
 
-async function activeBackend(timeoutMs = 300_000) {
+async function activeBackend(timeoutMs = 300_000, toolArgumentStallTimeoutMs = 90_000) {
   const runtime = new FakeRuntime();
-  const backend = testBackend(runtime, timeoutMs);
+  const backend = testBackend(runtime, timeoutMs, toolArgumentStallTimeoutMs);
   const sessionId = `client-${Math.random().toString(36).slice(2)}`;
   await backend.request("startSession", { cwd: process.cwd(), trustWorkspace: true }, { sessionId, canonicalCwd: process.cwd() });
   await backend.request("startTurn", { input: [{ type: "text", text: "test" }] }, { sessionId, canonicalCwd: process.cwd() });
@@ -101,6 +107,37 @@ describe("ClaudeBackend", () => {
     const start = runtime.commands.at(-1) as Extract<ClaudeWorkerCommand, { type: "start" }>;
     assert.equal(start.model, "sonnet");
     assert.equal(start.effort, "high");
+    await backend.close();
+  });
+
+  it("compacts through an isolated Query and resumes the native session", async () => {
+    const { backend, runtime, sessionId, generation } = await activeBackend();
+    const events: AgentEventEnvelope[] = [];
+    backend.subscribeEvents((event) => events.push(event));
+    const initialStart = runtime.commands.find((command): command is Extract<ClaudeWorkerCommand, { type: "start" }> => command.type === "start");
+    assert.ok(initialStart);
+
+    await backend.request("compactSession", {}, { sessionId, canonicalCwd: process.cwd() });
+    const close = runtime.commands.find((command): command is Extract<ClaudeWorkerCommand, { type: "closeSession" }> => command.type === "closeSession");
+    assert.equal(close?.queryGeneration, generation);
+    const compact = runtime.requests.find((command): command is Extract<ClaudeWorkerCommand, { type: "compactSession" }> => command.type === "compactSession");
+    assert.ok(compact);
+    assert.equal(compact.nativeSessionId, initialStart.nativeSessionId);
+    assert.equal(compact.queryGeneration, generation + 1);
+
+    runtime.listener?.({ type: "message", sessionId, queryGeneration: generation, payload: { type: "system", subtype: "compact_boundary" } });
+    assert.ok(events.some((event) => event.type === "claude/staleEvent"));
+    await assert.rejects(
+      backend.request("interruptTurn", {}, { sessionId, canonicalCwd: process.cwd() }),
+      /没有运行中的任务/,
+    );
+
+    await backend.request("startTurn", { input: [{ type: "text", text: "continue" }] }, { sessionId, canonicalCwd: process.cwd() });
+    const resumedStart = runtime.commands.filter((command): command is Extract<ClaudeWorkerCommand, { type: "start" }> => command.type === "start").at(-1);
+    assert.equal(resumedStart?.queryGeneration, generation + 2);
+    assert.equal(resumedStart?.resumeSessionId, initialStart.nativeSessionId);
+    runtime.listener?.({ type: "message", sessionId, queryGeneration: generation + 2, payload: { type: "result", subtype: "success", is_error: false } });
+    assert.deepEqual(await backend.request("interruptTurn", {}, { sessionId, canonicalCwd: process.cwd() }), { turnId: null });
     await backend.close();
   });
 
@@ -225,6 +262,101 @@ describe("ClaudeBackend", () => {
     await exited.backend.close();
   });
 
+  it("rejects a successful result when a streamed tool call never completes", async () => {
+    const active = await activeBackend();
+    const events: AgentEventEnvelope[] = [];
+    active.backend.subscribeEvents((event) => events.push(event));
+    active.runtime.listener?.({
+      type: "message",
+      sessionId: active.sessionId,
+      queryGeneration: active.generation,
+      payload: {
+        type: "stream_event",
+        event: { type: "content_block_start", content_block: { type: "tool_use", id: "tool-write", name: "Write", input: {} } },
+      },
+    });
+    active.runtime.listener?.({
+      type: "message",
+      sessionId: active.sessionId,
+      queryGeneration: active.generation,
+      payload: { type: "result", subtype: "success", is_error: false, stop_reason: "tool_use" },
+    });
+
+    const result = events.filter((event) => event.type === "claude/sdkMessage").at(-1)?.payload as Record<string, unknown>;
+    assert.equal(result.is_error, true);
+    assert.equal(result.subtype, "error_incomplete_tool_use");
+    assert.match((result.errors as string[])[0], /Write.*文件未写入/);
+    assert.ok(active.runtime.commands.some((command) => command.type === "closeSession" && command.queryGeneration === active.generation));
+
+    await active.backend.request("startTurn", { input: [{ type: "text", text: "retry" }] }, { sessionId: active.sessionId, canonicalCwd: process.cwd() });
+    const restarted = active.runtime.commands.filter((command): command is Extract<ClaudeWorkerCommand, { type: "start" }> => command.type === "start").at(-1);
+    assert.equal(restarted?.resumeSessionId, (active.runtime.commands[0] as Extract<ClaudeWorkerCommand, { type: "start" }>).nativeSessionId);
+    await active.backend.close();
+  });
+
+  it("accepts a successful result after the tool result arrives", async () => {
+    const active = await activeBackend();
+    const events: AgentEventEnvelope[] = [];
+    active.backend.subscribeEvents((event) => events.push(event));
+    active.runtime.listener?.({
+      type: "message",
+      sessionId: active.sessionId,
+      queryGeneration: active.generation,
+      payload: {
+        type: "assistant",
+        message: { role: "assistant", content: [{ type: "tool_use", id: "tool-write", name: "Write", input: { file_path: "report.md", content: "done" } }] },
+      },
+    });
+    active.runtime.listener?.({
+      type: "message",
+      sessionId: active.sessionId,
+      queryGeneration: active.generation,
+      payload: {
+        type: "user",
+        message: { role: "user", content: [{ type: "tool_result", tool_use_id: "tool-write", content: "File written successfully" }] },
+      },
+    });
+    active.runtime.listener?.({
+      type: "message",
+      sessionId: active.sessionId,
+      queryGeneration: active.generation,
+      payload: { type: "result", subtype: "success", is_error: false },
+    });
+
+    const result = events.filter((event) => event.type === "claude/sdkMessage").at(-1)?.payload as Record<string, unknown>;
+    assert.equal(result.is_error, false);
+    assert.equal(result.subtype, "success");
+    assert.equal(active.runtime.commands.some((command) => command.type === "closeSession"), false);
+    await active.backend.close();
+  });
+
+  it("stops a tool call whose arguments make no meaningful progress", async () => {
+    const active = await activeBackend(300_000, 10);
+    const events: AgentEventEnvelope[] = [];
+    active.backend.subscribeEvents((event) => events.push(event));
+    active.runtime.listener?.({
+      type: "message",
+      sessionId: active.sessionId,
+      queryGeneration: active.generation,
+      payload: {
+        type: "stream_event",
+        event: { type: "content_block_start", content_block: { type: "tool_use", id: "tool-write", name: "Write", input: {} } },
+      },
+    });
+    active.runtime.listener?.({
+      type: "message",
+      sessionId: active.sessionId,
+      queryGeneration: active.generation,
+      payload: { type: "stream_event", event: { type: "content_block_delta", delta: { type: "input_json_delta", partial_json: "" } } },
+    });
+    await new Promise((resolve) => setTimeout(resolve, 30));
+
+    const error = events.find((event) => event.type === "claude/error")?.payload as { message?: string };
+    assert.match(error.message || "", /参数长时间没有继续生成.*文件未写入/);
+    assert.ok(active.runtime.commands.some((command) => command.type === "closeSession" && command.queryGeneration === active.generation));
+    await active.backend.close();
+  });
+
   it("keeps resume identity until the matching query is ready", async () => {
     const runtime = new FakeRuntime();
     const backend = testBackend(runtime);
@@ -295,6 +427,18 @@ describe("ClaudeBackend", () => {
     await backend.close();
   });
 
+  it("forwards the model recovered from Claude history", async () => {
+    const runtime = new FakeRuntime();
+    const cwd = path.resolve(process.cwd());
+    const nativeSessionId = "66666666-6666-4666-8666-666666666666";
+    runtime.known.set(nativeSessionId, cwd);
+    runtime.readSessionResult = { info: { name: "历史会话" }, model: "claude-sonnet-5", messages: [] };
+    const backend = testBackend(runtime);
+    const result = await backend.request("readSession", { cwd, threadId: nativeSessionId }, {}) as { thread: { model?: string } };
+    assert.equal(result.thread.model, "claude-sonnet-5");
+    await backend.close();
+  });
+
   it("uses one credential source for a settings-backed query", async () => {
     const active = await activeBackend();
     const start = active.runtime.commands.find((command): command is Extract<ClaudeWorkerCommand, { type: "start" }> => command.type === "start");
@@ -302,5 +446,29 @@ describe("ClaudeBackend", () => {
     assert.equal(start.env, undefined);
     assert.deepEqual(start.settingSources, ["user", "project", "local"]);
     await active.backend.close();
+  });
+
+  it("maps Claude plugin operations through the Worker and reloads active Queries", async () => {
+    const active = await activeBackend();
+    const list = await active.backend.request("listPlugins", { cwd: process.cwd() }, { canonicalCwd: process.cwd() });
+    assert.deepEqual(list, { marketplaces: [{ name: "Claude Code", path: "", plugins: [] }] });
+    const installed = await active.backend.request("installPlugin", { cwd: process.cwd(), pluginName: "demo@market" }, { canonicalCwd: process.cwd() }) as { ok: boolean; reloaded: number };
+    assert.equal(installed.ok, true);
+    assert.equal(installed.reloaded, 1);
+    const command = active.runtime.requests.find((value): value is Extract<ClaudeWorkerCommand, { type: "plugin" }> => value.type === "plugin" && value.operation === "install");
+    assert.equal(command?.operation, "install");
+    assert.equal(command?.plugin, "demo@market");
+    await active.backend.close();
+  });
+
+  it("rejects unsafe Claude plugin arguments before reaching the Worker", async () => {
+    const runtime = new FakeRuntime();
+    const backend = testBackend(runtime);
+    await assert.rejects(
+      backend.request("installPlugin", { cwd: process.cwd(), pluginName: "demo; whoami" }, { canonicalCwd: process.cwd() }),
+      /Claude 工作区未授权|工作区授权|插件操作缺少|插件名称/,
+    );
+    assert.equal(runtime.requests.some((value) => value.type === "plugin"), false);
+    await backend.close();
   });
 });

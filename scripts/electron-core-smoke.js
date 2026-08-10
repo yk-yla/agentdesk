@@ -11,9 +11,18 @@ async page => {
   const activeInput = () => page.locator('.pane-panel textarea[aria-label="消息输入"]');
   const newClaude = () => sidebar.locator("button.provider-new-claude").first();
   const newCodex = () => sidebar.locator("button.provider-new-codex").first();
+  const openClaude = async () => {
+    await newClaude().click({ force: true });
+    await page.waitForFunction(() => Boolean(document.querySelector(".tab.active .provider-mark.claude")), null, { timeout: 10_000 });
+  };
+  const openCodex = async () => {
+    await newCodex().click({ force: true });
+    await page.waitForFunction(() => Boolean(document.querySelector(".tab.active .provider-mark.codex")), null, { timeout: 10_000 });
+  };
 
   try {
     await sidebar.waitFor({ state: "visible", timeout: 15_000 });
+    await page.evaluate(() => { window.confirm = () => true; });
     const hasDevBridge = await page.evaluate(() => Boolean(window.agentDesk?.dev));
     assert(hasDevBridge, "开发版 Electron 没有暴露受控测试夹具。" );
     results.push("真实 Electron Bridge 已连接");
@@ -49,13 +58,13 @@ async page => {
     await settingsPopover.waitFor({ state: "hidden", timeout: 10_000 });
     results.push("设置弹层和懒加载高级设置可用");
 
-    await sidebar.getByRole("tab", { name: "已收藏" }).click();
+    await sidebar.getByRole("tab", { name: "已收藏" }).click({ force: true });
     await sidebar.locator('nav[aria-label="已收藏会话列表"]').waitFor({ state: "visible", timeout: 10_000 });
-    await sidebar.getByRole("tab", { name: "当前目录" }).click();
+    await sidebar.getByRole("tab", { name: "当前目录" }).click({ force: true });
     await sidebar.locator('nav[aria-label="当前目录会话列表"]').waitFor({ state: "visible", timeout: 10_000 });
     results.push("历史目录和收藏视图可切换");
 
-    await newClaude().click({ force: true });
+    await openClaude();
     const model = activeModel();
     await model.waitFor({ state: "visible", timeout: 10_000 });
     const initialModels = await model.locator("option").evaluateAll((options) => options.map((option) => option.value));
@@ -85,6 +94,88 @@ async page => {
     assert(await page.locator(".pane-panel .error-banner").count() === 0, "Claude 夹具中断后留下错误状态。" );
     results.push("Claude Worker 任务可中断并收敛");
 
+    await openClaude();
+    await page.evaluate(() => window.agentDesk.dev.setClaudeLifecycleFixture("compact"));
+    await activeInput().fill("AgentDesk fixture compact " + Date.now());
+    await activeInput().press("Enter");
+    const compactButton = page.locator(".pane-panel .compact-count");
+    await page.waitForFunction(() => {
+      const button = document.querySelector(".pane-panel .compact-count");
+      return button instanceof HTMLButtonElement && !button.disabled;
+    }, null, { timeout: 15_000 });
+    try {
+      await page.locator(".pane-panel .context-usage", { hasText: "3.2k/200k" }).waitFor({ state: "visible", timeout: 15_000 });
+    } catch (error) {
+      const state = await page.evaluate(() => ({
+        activeProvider: document.querySelector(".tab.active .provider-mark")?.className || "",
+        context: Array.from(document.querySelectorAll(".context-usage")).map((entry) => entry.textContent || ""),
+        compact: Array.from(document.querySelectorAll(".compact-count")).map((entry) => ({ text: entry.textContent || "", disabled: entry.disabled })),
+        error: document.querySelector(".pane-panel .error-banner")?.textContent || "",
+      }));
+      throw new Error("Claude 夹具上下文显示异常：" + JSON.stringify(state) + "；" + (error instanceof Error ? error.message : String(error)));
+    }
+    await compactButton.click({ force: true });
+    await page.locator(".pane-panel .compact-count", { hasText: "压缩 1" }).waitFor({ state: "visible", timeout: 15_000 });
+    await stopButton.waitFor({ state: "hidden", timeout: 15_000 });
+    await activeInput().fill("AgentDesk fixture post compact " + Date.now());
+    await activeInput().press("Enter");
+    await stopButton.waitFor({ state: "visible", timeout: 15_000 });
+    try {
+      await page.locator(".message-row.assistant", { hasText: "AgentDesk 流式夹具" }).first().waitFor({ state: "visible", timeout: 15_000 });
+    } catch (error) {
+      const state = await page.evaluate(() => ({
+        tabs: Array.from(document.querySelectorAll(".tab")).map((tab) => ({ active: tab.classList.contains("active"), text: tab.textContent || "" })),
+        provider: document.querySelector(".tab.active .provider-mark")?.className || "",
+        messages: Array.from(document.querySelectorAll(".message-row")).map((entry) => entry.textContent || ""),
+        error: document.querySelector(".pane-panel .error-banner")?.textContent || "",
+      }));
+      throw new Error("Claude 压缩后恢复回复异常：" + JSON.stringify(state) + "；" + (error instanceof Error ? error.message : String(error)));
+    }
+    await stopButton.click({ force: true });
+    await stopButton.waitFor({ state: "hidden", timeout: 15_000 });
+    results.push("Claude 上下文用量可见，压缩后可恢复并继续回复");
+
+    await openClaude();
+    await page.evaluate(() => window.agentDesk.dev.setClaudeLifecycleFixture("approval"));
+    await activeInput().fill("AgentDesk fixture approval " + Date.now());
+    await activeInput().press("Enter");
+    const approval = page.getByRole("dialog", { name: "Bash 请求授权" });
+    await approval.waitFor({ state: "visible", timeout: 15_000 });
+    await approval.getByRole("button", { name: "允许", exact: true }).click({ force: true });
+    await approval.waitFor({ state: "hidden", timeout: 15_000 });
+    await stopButton.click({ force: true });
+    await stopButton.waitFor({ state: "hidden", timeout: 15_000 });
+    results.push("Claude 权限审批可处理并收敛");
+
+    await openClaude();
+    await page.evaluate(() => window.agentDesk.dev.setClaudeLifecycleFixture("stream"));
+    await activeInput().fill("AgentDesk fixture stream " + Date.now());
+    await activeInput().press("Enter");
+    await page.waitForFunction(() => {
+      const messages = Array.from(document.querySelectorAll(".pane-panel .message-row.assistant")).map((entry) => entry.textContent || "");
+      return messages.length === 2
+        && messages[0].includes("AgentDesk 流式夹具 第一条")
+        && messages[1].includes("AgentDesk 流式夹具 第二条")
+        && messages[1].includes("CLAUDE_LONG_TEXT_END");
+    }, null, { timeout: 15_000 });
+    const streamMessages = await page.locator(".pane-panel .message-row.assistant").allTextContents();
+    assert(streamMessages.length === 2, `Claude 不同 UUID 的流式消息没有分条显示：${streamMessages.length}`);
+    assert(!streamMessages.some((message) => message.includes("[已截断]")), "Claude 长回复仍被 8 KB 上限截断。" );
+    await stopButton.click({ force: true });
+    await stopButton.waitFor({ state: "hidden", timeout: 15_000 });
+    assert(await page.locator(".pane-panel .error-banner").count() === 0, "Claude 流式夹具中断后留下错误状态。" );
+    results.push("Claude 流式消息按 UUID 分条、长回复完整且中断后收敛");
+
+    await openClaude();
+    await page.evaluate(() => window.agentDesk.dev.setClaudeLifecycleFixture("incompleteTool"));
+    await activeInput().fill("AgentDesk fixture incomplete Write " + Date.now());
+    await activeInput().press("Enter");
+    const incompleteWriteError = page.locator(".pane-panel .error-banner");
+    await incompleteWriteError.waitFor({ state: "visible", timeout: 15_000 });
+    assert((await incompleteWriteError.textContent() || "").includes("Write") && (await incompleteWriteError.textContent() || "").includes("文件未写入"), "未完成 Write 调用没有显示明确错误。" );
+    await page.evaluate(() => window.agentDesk.dev.setClaudeLifecycleFixture(null));
+    results.push("未完成 Write 调用不会假成功，并明确提示文件未写入");
+
     await page.waitForFunction(async () => {
       const cache = (await window.agentDesk.getPreferences()).claudeModelCache;
       return cache?.schema === 1 && cache.models.some((entry) => entry.id === "sonnet");
@@ -104,15 +195,14 @@ async page => {
     await historyMenu.waitFor({ state: "hidden", timeout: 10_000 });
     results.push("历史会话右键菜单可用");
 
-    await newClaude().click({ force: true });
+    await openClaude();
     await page.evaluate(() => window.agentDesk.dev.setClaudeLifecycleFixture("longBash"));
     await activeInput().fill(`AgentDesk fixture provider isolation ${Date.now()}`);
     await activeInput().press("Enter");
     await stopButton.waitFor({ state: "visible", timeout: 15_000 });
     const failingClaudeTab = page.locator(".tab:has(.provider-mark.claude)").last();
 
-    await newCodex().click({ force: true });
-    await page.waitForFunction(() => Boolean(document.querySelector(".tab.active .provider-mark.codex")));
+    await openCodex();
     const codexModel = activeModel();
     await codexModel.waitFor({ state: "visible", timeout: 10_000 });
     assert(!(await codexModel.isDisabled()), "Codex 会话在 Claude 运行时不可用。" );
@@ -128,7 +218,7 @@ async page => {
     await claudeError.waitFor({ state: "visible", timeout: 10_000 });
     results.push("Claude Worker 退出错误只显示在所属会话");
 
-    await newClaude().click({ force: true });
+    await openClaude();
     await page.evaluate(() => window.agentDesk.dev.setClaudeLifecycleFixture("longBash"));
     await activeInput().fill(`AgentDesk fixture running tab close ${Date.now()}`);
     await activeInput().press("Enter");

@@ -32,12 +32,28 @@ function textSummary(value: string) {
   };
 }
 
+function redactUrl(value: string) {
+  try {
+    const url = new URL(value);
+    if (url.protocol !== "http:" && url.protocol !== "https:") return value;
+    const sensitiveQuery = /(token|secret|key|password|credential|authorization|auth)/i;
+    if (url.username || url.password) {
+      url.username = "";
+      url.password = "";
+    }
+    for (const key of [...url.searchParams.keys()]) if (sensitiveQuery.test(key)) url.searchParams.set(key, "[已脱敏]");
+    return url.toString();
+  } catch {
+    return value;
+  }
+}
+
 function summarize(value: unknown, key = "", depth = 0, seen = new WeakSet<object>()): unknown {
   if (value === null || value === undefined || typeof value === "boolean" || typeof value === "number") return value;
   if (typeof value === "string") {
     if (SENSITIVE_KEY.test(key)) return { redacted: true, length: value.length };
     if (key === "arrayItem" || USER_TEXT_KEY.test(key) || value.length > MAX_STRING_LENGTH) return textSummary(value);
-    return value;
+    return redactUrl(value);
   }
   if (typeof value === "bigint") return String(value);
   if (typeof value === "function" || typeof value === "symbol") return `[${typeof value}]`;

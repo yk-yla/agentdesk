@@ -49,7 +49,73 @@ describe("Claude activity settlement", () => {
       { role: "user", text: "/model" },
       { role: "user", text: "保留普通字符串消息" },
       { role: "assistant", text: "历史回复（最终）" },
+      { role: "assistant", text: "历史回复（最终）" },
     ]);
+  });
+
+  it("keeps distinct Claude messages during streaming and history hydration", () => {
+    const source = emptySession("session", "C:\\workspace", "", "", "claude");
+    source.status = "working";
+    source.activeTurnId = "turn";
+    const firstDelta = applyClaudeEvent(source, event("claude/sdkMessage", {
+      type: "stream_event",
+      uuid: "first",
+      event: { type: "content_block_delta", delta: { type: "text_delta", text: "第一" } },
+    })).session;
+    const firstFinal = applyClaudeEvent(firstDelta, event("claude/sdkMessage", {
+      type: "assistant",
+      uuid: "first",
+      message: { role: "assistant", content: [{ type: "text", text: "第一条" }] },
+    })).session;
+    const second = applyClaudeEvent(firstFinal, event("claude/sdkMessage", {
+      type: "assistant",
+      uuid: "second",
+      message: { role: "assistant", content: [{ type: "text", text: "第二条" }] },
+    })).session;
+
+    assert.deepEqual(second.messages.map(({ id, text, streaming }) => ({ id, text, streaming })), [
+      { id: "claude-message-first", text: "第一条", streaming: false },
+      { id: "claude-message-second", text: "第二条", streaming: false },
+    ]);
+
+    const hydrated = hydrateClaudeSession(second, {
+      id: "native-session",
+      messages: [
+        { type: "assistant", uuid: "first", message: { role: "assistant", content: [{ type: "text", text: "历史旧值" }] } },
+      ],
+    }, { preserveRealtime: true, preserveLifecycle: true });
+    assert.deepEqual(hydrated.messages.map(({ id, text }) => ({ id, text })), [
+      { id: "claude-message-first", text: "第一条" },
+      { id: "claude-message-second", text: "第二条" },
+    ]);
+    assert.equal(hydrated.status, "working");
+    assert.equal(hydrated.activeTurnId, "turn");
+  });
+
+  it("shows streamed tools immediately and marks incomplete file writes as failed", () => {
+    const source = emptySession("session", "C:\\workspace", "", "", "claude");
+    source.status = "working";
+    source.activeTurnId = "turn";
+    const started = applyClaudeEvent(source, event("claude/sdkMessage", {
+      type: "stream_event",
+      event: {
+        type: "content_block_start",
+        content_block: { type: "tool_use", id: "tool-write", name: "Write", input: {} },
+      },
+    })).session;
+    assert.deepEqual(started.activities.map(({ id, kind, status }) => ({ id, kind, status })), [
+      { id: "tool-write", kind: "fileChange", status: "inProgress" },
+    ]);
+
+    const failed = applyClaudeEvent(started, event("claude/sdkMessage", {
+      type: "result",
+      subtype: "error_incomplete_tool_use",
+      is_error: true,
+      errors: ["Claude 的 Write 工具调用未完整执行，文件未写入。请继续当前会话重试。"],
+    })).session;
+    assert.equal(failed.status, "error");
+    assert.match(failed.errorText, /文件未写入/);
+    assert.equal(failed.activities[0]?.status, "failed");
   });
 
   it("matches a resolved SDK model ID to its selectable alias", () => {
@@ -61,6 +127,17 @@ describe("Claude activity settlement", () => {
     });
     assert.equal(model.resolvedId, "claude-sonnet-5");
     assert.equal(findModelOption([model], "claude-sonnet-5")?.id, "sonnet");
+  });
+
+  it("restores the last resolved Claude model from session history", () => {
+    const source = emptySession("session", "C:\\workspace", "default", "medium", "claude");
+    const hydrated = hydrateClaudeSession(source, {
+      id: "native-session",
+      model: "claude-sonnet-5",
+      messages: [],
+    });
+    assert.equal(hydrated.model, "claude-sonnet-5");
+    assert.equal(hydrated.resolvedModel, "claude-sonnet-5");
   });
 
   it("keeps the selected alias when Claude reports a shared resolved model", () => {
@@ -96,6 +173,26 @@ describe("Claude activity settlement", () => {
     const completed = applyClaudeEvent(withContext, event("claude/sdkMessage", { type: "result", is_error: false })).session;
 
     assert.deepEqual(completed.tokenUsage, { used: 23_300, total: 1_000_000 });
+  });
+
+  it("counts Claude compaction boundaries in realtime and restored history", () => {
+    const source = emptySession("session", "C:\\workspace", "", "", "claude");
+    const compacted = applyClaudeEvent(source, event("claude/sdkMessage", {
+      type: "system",
+      subtype: "compact_boundary",
+      compact_metadata: { trigger: "manual", pre_tokens: 2_000, post_tokens: 800 },
+    })).session;
+    assert.equal(compacted.compactionCount, 1);
+
+    const hydrated = hydrateClaudeSession(source, {
+      id: "native-session",
+      messages: [
+        { type: "system", subtype: "compact_boundary", compact_metadata: { trigger: "auto", pre_tokens: 2_000 } },
+        { type: "assistant", uuid: "answer", message: { role: "assistant", content: [{ type: "text", text: "压缩后回复" }] } },
+      ],
+    });
+    assert.equal(hydrated.compactionCount, 1);
+    assert.equal(hydrated.messages[0]?.text, "压缩后回复");
   });
 
   it("settles unfinished tools on result, interruption and backend exit", () => {

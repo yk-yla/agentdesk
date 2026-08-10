@@ -301,7 +301,7 @@ const MOCK_METHODS: Record<Exclude<AgentOperation, "getCapabilities" | "closeSes
   updateSessionSettings: "thread/settings/update", startTurn: "turn/start", startReview: "review/start", steerTurn: "turn/steer",
   interruptTurn: "turn/interrupt", compactSession: "thread/compact/start", readRateLimits: "account/rateLimits/read",
   listMcpServers: "mcpServerStatus/list", getGoal: "thread/goal/get", setGoal: "thread/goal/set", clearGoal: "thread/goal/clear",
-  listPlugins: "plugin/list", readPlugin: "plugin/read", installPlugin: "plugin/install", uninstallPlugin: "plugin/uninstall",
+  listPlugins: "plugin/list", readPlugin: "plugin/read", installPlugin: "plugin/install", uninstallPlugin: "plugin/uninstall", updatePlugin: "plugin/install",
   addMarketplace: "marketplace/add", updateMarketplace: "marketplace/upgrade", removeMarketplace: "marketplace/remove",
 };
 

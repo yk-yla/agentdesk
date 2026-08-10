@@ -109,7 +109,7 @@ export class SessionMessageController {
       errorText: "",
       title: nextTitle,
       updatedAt: this.now(),
-      ...(localCommand === "/compact" || localCommand === "/status" || localCommand === "/mcp"
+      ...(localCommand === "/status" || localCommand === "/mcp"
         ? {}
         : { status: "working" as const, statusLabel: "正在提交", startedAt: this.now() }),
       messages: current.messages.some((entry) => entry.clientId === clientUserMessageId)

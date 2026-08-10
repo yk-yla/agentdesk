@@ -13,15 +13,19 @@ describe("FileLogger", () => {
       await writeFile(path.join(directory, "agentdesk-2026-08-04.ndjson"), "kept\n");
       const logger = new FileLogger(() => directory, () => new Date("2026-08-10T12:00:00.000Z"));
       logger.log("info", "test.request", { cwd: "D:\\work", token: "secret-token", prompt: "private prompt" });
+      logger.log("info", "marketplace.request", { source: "https://user:pass@example.invalid/marketplace.json?access_token=secret" });
       await logger.flush();
 
       await assert.rejects(() => readFile(path.join(directory, "agentdesk-2026-08-03.ndjson"), "utf8"), /ENOENT/);
       assert.equal(await readFile(path.join(directory, "agentdesk-2026-08-04.ndjson"), "utf8"), "kept\n");
-      const line = JSON.parse(await readFile(path.join(directory, "agentdesk-2026-08-10.ndjson"), "utf8")) as Record<string, any>;
+      const logLines = (await readFile(path.join(directory, "agentdesk-2026-08-10.ndjson"), "utf8")).trim().split("\n");
+      const line = JSON.parse(logLines[0]) as Record<string, any>;
       assert.equal(line.event, "test.request");
       assert.deepEqual(line.details.token, { redacted: true, length: 12 });
       assert.equal(line.details.prompt.kind, "text");
       assert.equal(line.details.cwd, "D:\\work");
+      const marketplaceLine = JSON.parse(logLines[1]) as Record<string, any>;
+      assert.equal(marketplaceLine.details.source, "https://example.invalid/marketplace.json?access_token=%5B%E5%B7%B2%E8%84%B1%E6%95%8F%5D");
     } finally {
       await rm(directory, { recursive: true, force: true });
     }

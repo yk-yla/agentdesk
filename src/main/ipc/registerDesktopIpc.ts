@@ -11,7 +11,7 @@ const AGENT_OPERATIONS = new Set<AgentOperation>([
   "listModels", "listSkills", "listSessions", "searchSessions", "readSession", "startSession", "resumeSession", "forkSession",
   "renameSession", "deleteSession", "updateSessionMetadata", "updateSessionSettings", "startTurn", "startReview", "steerTurn",
   "interruptTurn", "compactSession", "readRateLimits", "listMcpServers", "getGoal", "setGoal", "clearGoal", "listPlugins",
-  "readPlugin", "installPlugin", "uninstallPlugin", "getCapabilities", "closeSession",
+  "readPlugin", "installPlugin", "uninstallPlugin", "updatePlugin", "getCapabilities", "closeSession",
   "addMarketplace", "updateMarketplace", "removeMarketplace",
 ]);
 

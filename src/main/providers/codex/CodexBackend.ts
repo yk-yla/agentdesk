@@ -29,6 +29,7 @@ const METHODS: Record<Exclude<AgentOperation, "getCapabilities" | "closeSession"
   readPlugin: "plugin/read",
   installPlugin: "plugin/install",
   uninstallPlugin: "plugin/uninstall",
+  updatePlugin: "plugin/update",
   addMarketplace: "marketplace/add",
   updateMarketplace: "marketplace/upgrade",
   removeMarketplace: "marketplace/remove",

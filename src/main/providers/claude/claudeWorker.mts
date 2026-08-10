@@ -1,6 +1,9 @@
 import { parentPort } from "node:worker_threads";
 import { randomUUID } from "node:crypto";
 import { spawn } from "node:child_process";
+import { createRequire } from "node:module";
+import path from "node:path";
+import { resolveExecutableFromPath } from "../../executablePath.js";
 import {
   deleteSession,
   forkSession,
@@ -21,12 +24,13 @@ import {
 } from "@anthropic-ai/claude-agent-sdk";
 import { redactClaudeMessage } from "./claudeRedaction.js";
 import type { ClaudeLifecycleFixtureKind, ClaudeWorkerCommand, ClaudeWorkerEvent } from "./claudeWorkerProtocol.js";
+import type { ClaudePluginOperation } from "./claudeWorkerProtocol.js";
 import type { JsonObject } from "../../../shared/protocol.js";
 import { validateVerifiedClaudeImage, type VerifiedClaudeImage } from "./claudeImageInput.js";
 import { createClaudeSettingsSnapshot, type ClaudeSettingsSnapshot } from "./claudeSettingsSnapshot.js";
 import { searchSnippet, sessionSearchText } from "./claudeHistorySearch.js";
 import { classifyClaudeGatewayFailure, type ClaudeGatewayFailureKind } from "./claudeGatewayError.js";
-import { ClaudeProcessTreeController } from "./claudeProcessTree.js";
+import { ClaudeProcessTreeController, terminateClaudeProcessTree } from "./claudeProcessTree.js";
 
 if (!parentPort) throw new Error("Claude Worker 缺少父进程通道。");
 
@@ -59,6 +63,9 @@ class InputQueue implements AsyncIterable<SDKUserMessage> {
       type: "user",
       message: { role: "user", content: blocks as never },
       parent_tool_use_id: null,
+      uuid: randomUUID(),
+      origin: { kind: "human" },
+      timestamp: new Date().toISOString(),
     };
     const reader = this.readers.shift();
     if (reader) reader({ value, done: false });
@@ -96,14 +103,208 @@ interface QueryState {
 
 const states = new Map<string, QueryState>();
 const processTrees = new ClaudeProcessTreeController();
+const nodeRequire = createRequire(import.meta.url);
 const lifecycleNativeSessions = new Set<string>();
 let holdRequestsForTesting = false;
+const MAX_PLUGIN_OUTPUT_BYTES = 2 * 1024 * 1024;
+const PLUGIN_NAME_PATTERN = /^[A-Za-z0-9._:-]{1,160}(?:@[A-Za-z0-9._:-]{1,160})?$/;
+const MARKETPLACE_NAME_PATTERN = /^[A-Za-z0-9._:-]{1,160}$/;
+
+function safeCliText(value: unknown, label: string, max = 512) {
+  if (typeof value !== "string" || !value.trim() || value.length > max || /[\u0000-\u001f\u007f]/.test(value)) throw new Error(`Claude ${label} 无效。`);
+  return value.trim();
+}
+
+function safePluginName(value: unknown) {
+  const name = safeCliText(value, "插件名称");
+  if (!PLUGIN_NAME_PATTERN.test(name)) throw new Error("Claude 插件名称格式无效。");
+  return name;
+}
+
+function safeMarketplaceName(value: unknown) {
+  const name = safeCliText(value, "插件市场名称");
+  if (!MARKETPLACE_NAME_PATTERN.test(name)) throw new Error("Claude 插件市场名称格式无效。");
+  return name;
+}
+
+function safeMarketplaceSource(value: unknown) {
+  const source = safeCliText(value, "插件市场来源", 2_048);
+  if (/^(?:https?|git):\/\//i.test(source) || /^git@[^:]+:[^\s]+$/i.test(source) || /^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+(?:#[A-Za-z0-9._/-]+)?$/.test(source)) return source;
+  if (/^[.\\/]|^[A-Za-z]:[\\/]/.test(source) && !source.includes("..\\..") && !source.includes("../..")) return source;
+  throw new Error("Claude 插件市场来源必须是 HTTP(S)、Git、GitHub 仓库或受控本地路径。");
+}
+
+function pluginExecutable(command: Extract<ClaudeWorkerCommand, { type: "plugin" }>) {
+  const configured = command.executablePath?.trim();
+  if (configured) return configured;
+  try { return nodeRequire.resolve(`@anthropic-ai/claude-agent-sdk-${process.platform}-${process.arch}/claude.exe`); } catch { /* optional SDK binary absent */ }
+  return resolveExecutableFromPath("claude.exe") || resolveExecutableFromPath("claude") || "claude";
+}
+
+function pluginConfigDir(value: unknown) {
+  if (value === undefined) return undefined;
+  if (typeof value !== "string" || !value.trim() || !path.isAbsolute(value) || /[\u0000-\u001f\u007f]/.test(value)) {
+    throw new Error("Claude 插件隔离配置目录无效。");
+  }
+  return path.resolve(value);
+}
+
+function runClaudePluginCli(command: Extract<ClaudeWorkerCommand, { type: "plugin" }>, args: string[], timeoutMs = 120_000) {
+  return new Promise<string>((resolve, reject) => {
+    const configDir = pluginConfigDir(command.configDir);
+    const child = spawn(pluginExecutable(command), args, {
+      cwd: command.cwd,
+      env: processEnvironment(command.env || {}, configDir),
+      shell: false,
+      windowsHide: true,
+      stdio: ["ignore", "pipe", "pipe"],
+    });
+    let stdout = "";
+    let stderr = "";
+    let bytes = 0;
+    let settled = false;
+    const fail = (error: Error) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      void terminateClaudeProcessTree(child).catch(() => undefined).finally(() => reject(error));
+    };
+    const timer = setTimeout(() => fail(new Error("Claude 插件命令超时。")), timeoutMs);
+    child.stdout.setEncoding("utf8");
+    child.stderr.setEncoding("utf8");
+    child.stdout.on("data", (chunk: string) => {
+      bytes += Buffer.byteLength(chunk, "utf8");
+      if (bytes > MAX_PLUGIN_OUTPUT_BYTES) return fail(new Error("Claude 插件命令输出过大。"));
+      stdout += chunk;
+    });
+    child.stderr.on("data", (chunk: string) => { stderr = `${stderr}${chunk}`.slice(-64 * 1024); });
+    child.once("error", (error) => fail(error instanceof Error ? error : new Error("Claude 插件命令启动失败。")));
+    child.once("exit", (code) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      if (code === 0) resolve(stdout.trim());
+      else reject(new Error(stderr.trim() || stdout.trim() || `Claude 插件命令失败（${code ?? "unknown"}）。`));
+    });
+  });
+}
+
+function jsonOutput(value: string, label: string) {
+  try {
+    const parsed = JSON.parse(value || "null");
+    if (!parsed || typeof parsed !== "object") throw new Error();
+    return parsed;
+  } catch {
+    throw new Error(`Claude ${label} 返回了无效 JSON。`);
+  }
+}
+
+function pluginSummary(value: unknown, marketplace = "") {
+  const record = value && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : {};
+  const rawName = typeof record.name === "string" ? record.name : typeof record.id === "string" ? record.id : "";
+  const separator = rawName.lastIndexOf("@");
+  const inferredMarketplace = separator > 0 ? rawName.slice(separator + 1) : "";
+  const market = typeof record.marketplaceName === "string" ? record.marketplaceName : typeof record.marketplace === "string" ? record.marketplace : inferredMarketplace || marketplace;
+  const name = separator > 0 && !record.marketplaceName && !record.marketplace ? rawName.slice(0, separator) : rawName;
+  return {
+    id: typeof record.id === "string" ? record.id : `${name}${market ? `@${market}` : ""}`,
+    name,
+    marketplace: market,
+    installed: record.installed === true,
+    enabled: record.enabled !== false,
+    version: typeof record.version === "string" ? record.version : "",
+    localVersion: typeof record.localVersion === "string" ? record.localVersion : "",
+    interface: { shortDescription: typeof record.description === "string" ? record.description : typeof record.shortDescription === "string" ? record.shortDescription : "Claude Code 插件", longDescription: typeof record.description === "string" ? record.description : "" },
+  };
+}
+
+function normalizePluginList(raw: Record<string, unknown>, marketplaceValue: unknown) {
+  const marketplaces = new Map<string, { name: string; path: string; plugins: Map<string, Record<string, unknown>> }>();
+  const marketplaceItems = Array.isArray(marketplaceValue)
+    ? marketplaceValue
+    : marketplaceValue && typeof marketplaceValue === "object" && Array.isArray((marketplaceValue as Record<string, unknown>).marketplaces)
+      ? (marketplaceValue as Record<string, unknown>).marketplaces as unknown[]
+      : [];
+  marketplaceItems.forEach((value) => {
+    const record = value && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : {};
+    const name = typeof record.name === "string" ? record.name : "";
+    if (name) marketplaces.set(name, { name, path: typeof record.path === "string" ? record.path : "", plugins: new Map() });
+  });
+  const add = (value: unknown, installed: boolean) => {
+    const summary = pluginSummary(value);
+    if (!summary.name) return;
+    const record = value && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : {};
+    const market = typeof record.marketplaceName === "string" ? record.marketplaceName : typeof record.marketplace === "string" ? record.marketplace : typeof summary.marketplace === "string" ? summary.marketplace : "Claude Code";
+    const entry = marketplaces.get(market) || { name: market, path: "", plugins: new Map<string, Record<string, unknown>>() };
+    const key = summary.id || summary.name;
+    const previous = entry.plugins.get(key);
+    entry.plugins.set(key, { ...previous, ...summary, installed: installed || summary.installed || previous?.installed === true });
+    marketplaces.set(market, entry);
+  };
+  (Array.isArray(raw.installed) ? raw.installed : []).forEach((item) => add(item, true));
+  (Array.isArray(raw.available) ? raw.available : []).forEach((item) => add(item, false));
+  return { marketplaces: [...marketplaces.values()].map((entry) => ({ ...entry, plugins: [...entry.plugins.values()] })) };
+}
+
+async function pluginRequest(command: Extract<ClaudeWorkerCommand, { type: "plugin" }>) {
+  switch (command.operation) {
+    case "list": {
+      const [plugins, marketplaces] = await Promise.all([
+        runClaudePluginCli(command, ["plugin", "list", "--json", "--available"]),
+        runClaudePluginCli(command, ["plugin", "marketplace", "list", "--json"]),
+      ]);
+      const pluginValue = jsonOutput(plugins, "插件列表");
+      if (!pluginValue || typeof pluginValue !== "object" || Array.isArray(pluginValue)) throw new Error("Claude 插件列表返回了无效 JSON。");
+      return normalizePluginList(pluginValue as Record<string, unknown>, jsonOutput(marketplaces, "插件市场列表"));
+    }
+    case "details": {
+      const plugin = safePluginName(command.plugin);
+      return { plugin: { name: plugin, description: await runClaudePluginCli(command, ["plugin", "details", plugin]) } };
+    }
+    case "install": {
+      const plugin = safePluginName(command.plugin);
+      await runClaudePluginCli(command, ["plugin", "install", plugin, "--scope", "user"]);
+      return { ok: true };
+    }
+    case "uninstall": {
+      const plugin = safePluginName(command.plugin);
+      await runClaudePluginCli(command, ["plugin", "uninstall", plugin, "--scope", "user"]);
+      return { ok: true };
+    }
+    case "update": {
+      const plugin = safePluginName(command.plugin);
+      await runClaudePluginCli(command, ["plugin", "update", plugin, "--scope", "user"]);
+      return { ok: true };
+    }
+    case "marketplaceList": {
+      const raw = jsonOutput(await runClaudePluginCli(command, ["plugin", "marketplace", "list", "--json"]), "插件市场列表");
+      const entries = Array.isArray(raw) ? raw : Array.isArray((raw as Record<string, unknown>).marketplaces) ? (raw as Record<string, unknown>).marketplaces as unknown[] : [];
+      return { marketplaces: entries.map((item) => { const record = item && typeof item === "object" && !Array.isArray(item) ? item as Record<string, unknown> : {}; return { name: typeof record.name === "string" ? record.name : "未命名市场", path: typeof record.path === "string" ? record.path : "", plugins: [] }; }) };
+    }
+    case "marketplaceAdd": {
+      const source = safeMarketplaceSource(command.source);
+      await runClaudePluginCli(command, ["plugin", "marketplace", "add", "--scope", "user", source]);
+      return { ok: true };
+    }
+    case "marketplaceUpdate": {
+      const args = ["plugin", "marketplace", "update"];
+      if (command.marketplace) args.push(safeMarketplaceName(command.marketplace));
+      await runClaudePluginCli(command, args);
+      return { ok: true };
+    }
+    case "marketplaceRemove": {
+      const marketplace = safeMarketplaceName(command.marketplace);
+      await runClaudePluginCli(command, ["plugin", "marketplace", "remove", marketplace]);
+      return { ok: true };
+    }
+  }
+}
 
 function emit(event: ClaudeWorkerEvent) {
   parentPort!.postMessage(redactClaudeMessage(event));
 }
 
-function processEnvironment(secretEnv: Record<string, string>) {
+function processEnvironment(secretEnv: Record<string, string>, configDir?: string) {
   const allowed = [
     "SystemRoot", "SystemDrive", "ComSpec", "PATHEXT", "PATH", "Path", "USERPROFILE", "HOMEDRIVE", "HOMEPATH",
     "APPDATA", "LOCALAPPDATA", "TEMP", "TMP", "ProgramFiles", "ProgramW6432", "CommonProgramFiles", "windir", "LANG",
@@ -113,7 +314,7 @@ function processEnvironment(secretEnv: Record<string, string>) {
     const value = process.env[key];
     if (value) env[key] = value;
   }
-  Object.assign(env, secretEnv, { CLAUDE_AGENT_SDK_CLIENT_APP: "agentdesk/0.1" });
+  Object.assign(env, secretEnv, configDir ? { CLAUDE_CONFIG_DIR: configDir } : {}, { CLAUDE_AGENT_SDK_CLIENT_APP: "agentdesk/0.1" });
   return env;
 }
 
@@ -172,9 +373,9 @@ function lifecycleQuery() {
       { value: "sonnet", resolvedModel: "claude-sonnet-fixture", displayName: "Sonnet (fixture)", description: "Lifecycle fixture Sonnet", supportedEffortLevels: ["low", "medium", "high"] },
       { value: "haiku", displayName: "Haiku (fixture)", description: "Lifecycle fixture Haiku", supportedEffortLevels: [] },
     ],
-    supportedCommands: async () => [],
+    supportedCommands: async () => [{ name: "compact", description: "压缩当前上下文" }],
     supportedAgents: async () => [],
-    getContextUsage: async () => ({ totalTokens: 0, maxTokens: 200_000 }),
+    getContextUsage: async () => ({ totalTokens: 3_200, maxTokens: 200_000 }),
     mcpServerStatus: async () => [],
     reloadSkills: async () => undefined,
     reloadPlugins: async () => undefined,
@@ -199,6 +400,38 @@ async function startLifecycleFixture(command: Extract<ClaudeWorkerCommand, { typ
   lifecycleNativeSessions.add(command.nativeSessionId);
   spawnLifecycleProcess(command);
   emit({ type: "ready", sessionId: command.sessionId, queryGeneration: command.queryGeneration, nativeSessionId: command.nativeSessionId });
+  if (scenario === "incompleteTool") {
+    emit({
+      type: "message",
+      sessionId: command.sessionId,
+      queryGeneration: command.queryGeneration,
+      payload: {
+        type: "stream_event",
+        uuid: "fixture-incomplete-tool-message",
+        session_id: command.nativeSessionId,
+        event: {
+          type: "content_block_start",
+          index: 0,
+          content_block: { type: "tool_use", id: "fixture-incomplete-write", name: "Write", input: {} },
+        },
+      },
+    });
+    const timer = setTimeout(() => emit({
+      type: "message",
+      sessionId: command.sessionId,
+      queryGeneration: command.queryGeneration,
+      payload: {
+        type: "result",
+        subtype: "success",
+        is_error: false,
+        stop_reason: "tool_use",
+        session_id: command.nativeSessionId,
+        result: "Now writing the consolidated report.",
+      },
+    }), 100);
+    state.cleanupTimers?.push(timer);
+    return;
+  }
   if (scenario === "longBash" || scenario === "hook" || scenario === "mcp") {
     const toolName = scenario === "hook" ? "Hook" : scenario === "mcp" ? "MCP" : "Bash";
     emit({ type: "message", sessionId: command.sessionId, queryGeneration: command.queryGeneration, payload: { type: "assistant", session_id: command.nativeSessionId, message: { role: "assistant", content: [{ type: "tool_use", id: `fixture-${scenario}`, name: toolName, input: { command: `agentdesk ${scenario} lifecycle fixture` } }] } } });
@@ -209,9 +442,22 @@ async function startLifecycleFixture(command: Extract<ClaudeWorkerCommand, { typ
     void interactionPromise(command, state, "permission:fixture-approval", "permission", { nativeSessionId: command.nativeSessionId, requestId: "fixture-approval", toolUseId: "fixture-approval", toolName: "Bash", input: { command: "agentdesk approval fixture" }, suggestions: [] }, abortController.signal);
     return;
   }
+  let streamStep = 0;
+  const firstMessageId = "fixture-stream-first";
+  const secondMessageId = "fixture-stream-second";
   const interval = setInterval(() => {
     if (states.get(command.sessionId) !== state) return;
-    emit({ type: "message", sessionId: command.sessionId, queryGeneration: command.queryGeneration, payload: { type: "stream_event", session_id: command.nativeSessionId, event: { type: "content_block_delta", delta: { type: "text_delta", text: "AgentDesk 流式夹具 " } } } });
+    streamStep += 1;
+    if (streamStep === 1) {
+      emit({ type: "message", sessionId: command.sessionId, queryGeneration: command.queryGeneration, payload: { type: "stream_event", uuid: firstMessageId, session_id: command.nativeSessionId, event: { type: "content_block_delta", delta: { type: "text_delta", text: "AgentDesk 流式夹具 第一条" } } } });
+    } else if (streamStep === 2) {
+      emit({ type: "message", sessionId: command.sessionId, queryGeneration: command.queryGeneration, payload: { type: "assistant", uuid: firstMessageId, session_id: command.nativeSessionId, message: { role: "assistant", content: [{ type: "text", text: "AgentDesk 流式夹具 第一条" }] } } });
+    } else if (streamStep === 3) {
+      emit({ type: "message", sessionId: command.sessionId, queryGeneration: command.queryGeneration, payload: { type: "stream_event", uuid: secondMessageId, session_id: command.nativeSessionId, event: { type: "content_block_delta", delta: { type: "text_delta", text: "AgentDesk 流式夹具 第二条" } } } });
+    } else {
+      clearInterval(interval);
+      emit({ type: "message", sessionId: command.sessionId, queryGeneration: command.queryGeneration, payload: { type: "assistant", uuid: secondMessageId, session_id: command.nativeSessionId, message: { role: "assistant", content: [{ type: "text", text: `AgentDesk 流式夹具 第二条 ${"长".repeat(8_300)} CLAUDE_LONG_TEXT_END` }] } } });
+    }
   }, 120);
   state.cleanupTimers?.push(interval);
 }
@@ -324,6 +570,95 @@ async function start(command: Extract<ClaudeWorkerCommand, { type: "start" }>) {
   }
 }
 
+async function compactSession(command: Extract<ClaudeWorkerCommand, { type: "compactSession" }>) {
+  if (command.gatewayFixture?.lifecycle === "compact") {
+    emit({
+      type: "message",
+      sessionId: command.sessionId,
+      queryGeneration: command.queryGeneration,
+      payload: {
+        type: "system",
+        subtype: "compact_boundary",
+        compact_metadata: { trigger: "manual", pre_tokens: 3_200, post_tokens: 900 },
+        uuid: randomUUID(),
+        session_id: command.nativeSessionId,
+      },
+    });
+    emit({
+      type: "message",
+      sessionId: command.sessionId,
+      queryGeneration: command.queryGeneration,
+      payload: { type: "result", subtype: "success", is_error: false, session_id: command.nativeSessionId, result: "" },
+    });
+    return { ok: true };
+  }
+
+  const secretEnv = command.env;
+  const subprocessEnv = secretEnv ? processEnvironment(secretEnv) : undefined;
+  if (subprocessEnv && command.gatewayFixture) {
+    subprocessEnv.CLAUDE_CODE_MAX_RETRIES = "0";
+    subprocessEnv.API_TIMEOUT_MS = String(Math.max(250, command.gatewayFixture.timeoutMs || 2_000));
+  }
+  if (secretEnv) for (const key of Object.keys(secretEnv)) delete secretEnv[key];
+  const resolvedSettings = await resolveSettings({ cwd: command.cwd, settingSources: command.settingSources as SettingSource[] });
+  const settingsSnapshot = await createClaudeSettingsSnapshot(resolvedSettings.effective);
+  const abortController = new AbortController();
+  let compactBoundary = false;
+  let resultSeen = false;
+  try {
+    const compactQuery = query({
+      prompt: "/compact",
+      options: {
+        abortController,
+        cwd: command.cwd,
+        settingSources: [],
+        settings: settingsSnapshot.path,
+        ...(subprocessEnv ? { env: subprocessEnv } : {}),
+        permissionMode: "default",
+        systemPrompt: { type: "preset", preset: "claude_code" },
+        tools: { type: "preset", preset: "claude_code" },
+        canUseTool: async (): Promise<PermissionResult> => ({ behavior: "deny", message: "Claude 压缩期间不允许执行工具。", interrupt: false }),
+        ...(command.model ? { model: command.model } : {}),
+        ...(command.effort ? { effort: command.effort as "low" | "medium" | "high" | "xhigh" | "max" } : {}),
+        ...(command.executablePath ? { pathToClaudeCodeExecutable: command.executablePath } : {}),
+        resume: command.nativeSessionId,
+        spawnClaudeCodeProcess: (options: SpawnOptions) => {
+          const child = spawn(options.command, options.args, { cwd: options.cwd, env: options.env, shell: false, windowsHide: true, stdio: ["pipe", "pipe", "pipe"] });
+          const rootPid = processTrees.track(command.sessionId, command.queryGeneration, child);
+          if (rootPid) emit({ type: "processStarted", sessionId: command.sessionId, queryGeneration: command.queryGeneration, rootPid });
+          return child as unknown as SpawnedProcess;
+        },
+      },
+    });
+    try {
+      for await (const message of compactQuery) {
+        const payload = normalizedSdkMessage(message, command.gatewayFixture?.kind);
+        emit({ type: "message", sessionId: command.sessionId, queryGeneration: command.queryGeneration, payload });
+        if (payload && typeof payload === "object" && !Array.isArray(payload)) {
+          const record = payload as Record<string, unknown>;
+          if (record.type === "system" && record.subtype === "compact_boundary") compactBoundary = true;
+          if (record.type === "result") {
+            resultSeen = true;
+            if (record.is_error === true) {
+              const errors = Array.isArray(record.errors) ? record.errors.map(String).join("\n") : "Claude 压缩失败。";
+              throw new Error(errors);
+            }
+          }
+        }
+      }
+    } finally {
+      try { await compactQuery.return(); } catch { compactQuery.close(); }
+    }
+    if (!resultSeen) throw new Error("Claude 压缩未返回结果。");
+    return { ok: true, compacted: compactBoundary };
+  } finally {
+    abortController.abort();
+    if (subprocessEnv) for (const key of Object.keys(subprocessEnv)) delete subprocessEnv[key];
+    await processTrees.close(command.sessionId, command.queryGeneration);
+    await settingsSnapshot.dispose();
+  }
+}
+
 function normalizedSdkMessage(message: unknown, hint?: ClaudeGatewayFailureKind) {
   if (!message || typeof message !== "object" || Array.isArray(message)) return message;
   const payload = message as Record<string, unknown>;
@@ -349,6 +684,23 @@ function sessionSummary(session: SDKSessionInfo) {
   };
 }
 
+function modelFromSessionMessages(messages: unknown) {
+  if (!Array.isArray(messages)) return "";
+  for (let index = messages.length - 1; index >= 0; index -= 1) {
+    const entry = messages[index];
+    if (!entry || typeof entry !== "object" || Array.isArray(entry)) continue;
+    const record = entry as Record<string, unknown>;
+    const message = record.message;
+    if (message && typeof message === "object" && !Array.isArray(message)) {
+      const model = (message as Record<string, unknown>).model;
+      if (typeof model === "string" && model.trim()) return model.trim();
+    }
+    const model = record.model;
+    if (typeof model === "string" && model.trim()) return model.trim();
+  }
+  return "";
+}
+
 async function workerRequest(command: Exclude<ClaudeWorkerCommand, { type: "start" | "send" | "interrupt" | "closeSession" | "testHoldRequests" | "testFatal" | "close" }>) {
   if (holdRequestsForTesting) await new Promise<never>(() => undefined);
   if (command.type === "control") {
@@ -364,11 +716,16 @@ async function workerRequest(command: Exclude<ClaudeWorkerCommand, { type: "star
       case "reloadPlugins": return await state.query.reloadPlugins();
       case "setModel": await state.query.setModel(command.value || undefined); return { ok: true };
       case "setEffort": await state.query.applyFlagSettings({ effortLevel: command.value as "low" | "medium" | "high" | "xhigh" | "max" }); return { ok: true };
-      case "compact": state.input.push("/compact"); return { ok: true };
       default: throw new Error("Claude Query 控制操作不受支持。");
     }
   }
   switch (command.type) {
+    case "plugin": {
+      return await pluginRequest(command);
+    }
+    case "compactSession": {
+      return await compactSession(command);
+    }
     case "listSessions": {
       const sessions = await listSessions({ dir: command.cwd, limit: command.limit, offset: command.offset, includeWorktrees: command.includeWorktrees });
       return { data: sessions.map(sessionSummary), hasMore: sessions.length === command.limit };
@@ -398,9 +755,10 @@ async function workerRequest(command: Exclude<ClaudeWorkerCommand, { type: "star
     case "readSession": {
       const [info, messages] = await Promise.all([
         getSessionInfo(command.nativeSessionId, { dir: command.cwd }),
-        getSessionMessages(command.nativeSessionId, { dir: command.cwd, limit: command.limit, offset: command.offset }),
+        getSessionMessages(command.nativeSessionId, { dir: command.cwd, limit: command.limit, offset: command.offset, includeSystemMessages: true }),
       ]);
-      return { info: info ? sessionSummary(info) : null, messages };
+      const model = modelFromSessionMessages(messages);
+      return { info: info ? sessionSummary(info) : null, messages, ...(model ? { model } : {}) };
     }
     case "forkSession": {
       return await forkSession(command.nativeSessionId, { dir: command.cwd, ...(command.title ? { title: command.title } : {}) });

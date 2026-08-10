@@ -181,7 +181,7 @@ const agentBridge: AgentBridge = {
       injectClaudeWorkerFatal() {
         return ipcRenderer.invoke("agentdesk:dev-claude-worker-fatal");
       },
-      setClaudeLifecycleFixture(kind: "longBash" | "hook" | "mcp" | "approval" | "stream" | null) {
+      setClaudeLifecycleFixture(kind: "longBash" | "hook" | "mcp" | "approval" | "stream" | "compact" | "incompleteTool" | null) {
         return ipcRenderer.invoke("agentdesk:dev-claude-lifecycle-fixture", kind);
       },
       setDesktopUpdateFixture() {

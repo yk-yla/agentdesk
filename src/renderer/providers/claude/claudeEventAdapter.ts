@@ -63,6 +63,33 @@ function textBlocks(value: unknown) {
   }).filter(Boolean).join("\n");
 }
 
+function claudeMessageId(value: ReturnType<typeof asRecord>, fallback: string) {
+  const uuid = stringValue(value.uuid);
+  return uuid ? `claude-message-${uuid}` : fallback;
+}
+
+function claudeToolKind(name: string): Activity["kind"] {
+  if (name === "Bash") return "commandExecution";
+  if (name === "Edit" || name === "Write") return "fileChange";
+  return "other";
+}
+
+function mergeMessages(snapshot: Message[], current: Message[], preferCurrent: boolean) {
+  if (!preferCurrent) return snapshot;
+  const result = [...snapshot];
+  const indexes = new Map(result.map((message, index) => [message.id, index]));
+  for (const message of current) {
+    const index = indexes.get(message.id);
+    if (index === undefined) {
+      indexes.set(message.id, result.length);
+      result.push(message);
+    } else {
+      result[index] = message;
+    }
+  }
+  return result;
+}
+
 function upsertAssistant(session: SessionState, id: string, text: string, streaming: boolean) {
   const existing = session.messages.find((message) => message.id === id);
   if (existing) {
@@ -247,12 +274,26 @@ export function applyClaudeEvent(source: SessionState, routed: RoutedClaudeEvent
       const stream = asRecord(payload.event);
       const delta = asRecord(stream.delta);
       if (stream.type === "content_block_delta" && delta.type === "text_delta") {
-        const id = `claude-assistant-${session.activeTurnId || "current"}`;
+        const id = claudeMessageId(payload, `claude-turn-${session.activeTurnId || "current"}`);
         const current = session.messages.find((message) => message.id === id);
         upsertAssistant(session, id, `${current?.text || ""}${stringValue(delta.text)}`, true);
+      } else if (stream.type === "content_block_start") {
+        const block = asRecord(stream.content_block);
+        const id = stringValue(block.id);
+        const name = stringValue(block.name, "Claude 工具");
+        if (block.type === "tool_use" && id) {
+          upsertActivity(session, {
+            id,
+            kind: claudeToolKind(name),
+            title: name,
+            detail: `${name} 参数生成中`,
+            status: "inProgress",
+            visibleInMain: false,
+          });
+        }
       }
     } else if (type === "assistant") {
-      const id = `claude-assistant-${session.activeTurnId || stringValue(payload.uuid, "current")}`;
+      const id = claudeMessageId(payload, `claude-turn-${session.activeTurnId || "current"}`);
       const text = textBlocks(payload.message);
       if (text) upsertAssistant(session, id, text, false);
       const message = asRecord(payload.message);
@@ -261,7 +302,7 @@ export function applyClaudeEvent(source: SessionState, routed: RoutedClaudeEvent
         if (block.type !== "tool_use") continue;
         upsertActivity(session, {
           id: stringValue(block.id, `claude-tool-${Date.now()}`),
-          kind: stringValue(block.name) === "Bash" ? "commandExecution" : ["Edit", "Write"].includes(stringValue(block.name)) ? "fileChange" : "other",
+          kind: claudeToolKind(stringValue(block.name)),
           title: stringValue(block.name, "Claude 工具"),
           detail: stringValue(block.name, "Claude 工具调用"),
           status: "inProgress",
@@ -287,6 +328,8 @@ export function applyClaudeEvent(source: SessionState, routed: RoutedClaudeEvent
       session.tokenUsage = usageFromResult(payload, session.tokenUsage);
       session.messages = session.messages.map((message) => message.streaming ? { ...message, streaming: false } : message);
       settleRunningActivities(session, failed ? "failed" : "completed", failed ? "随失败回合结束。" : "随回合结束。");
+    } else if (type === "system" && subtype === "compact_boundary") {
+      session.compactionCount += 1;
     } else if (type === "system" && subtype === "init") {
       const resolvedModel = stringValue(payload.model);
       if (resolvedModel) {
@@ -299,36 +342,47 @@ export function applyClaudeEvent(source: SessionState, routed: RoutedClaudeEvent
   return { session, approval, ignored: false };
 }
 
-export function hydrateClaudeSession(session: SessionState, value: unknown): SessionState {
+export function hydrateClaudeSession(
+  session: SessionState,
+  value: unknown,
+  options: { preserveRealtime?: boolean; preserveLifecycle?: boolean } = {},
+): SessionState {
   const thread = asRecord(value);
-  const messages = Array.isArray(thread.messages) ? (() => {
+  const historyModel = stringValue(thread.model);
+  let compactionCount = session.compactionCount;
+  const snapshotMessages = Array.isArray(thread.messages) ? (() => {
     const order: string[] = [];
     const byId = new Map<string, Message>();
+    compactionCount = 0;
     thread.messages.forEach((entry, index) => {
       const item = asRecord(entry);
       const role = stringValue(item.type);
+      if (role === "system" && stringValue(item.subtype) === "compact_boundary") compactionCount += 1;
       const text = textBlocks(item.message);
       if ((role !== "user" && role !== "assistant") || !text) return;
-      const id = stringValue(item.uuid, `${role}-${index}`);
+      const id = claudeMessageId(item, `claude-history-${role}-${index}`);
       if (!byId.has(id)) order.push(id);
       byId.set(id, { id, role, text, images: [] });
     });
-    return order.flatMap((id) => byId.get(id) || []).filter((message, index, all) => {
-      const previous = all[index - 1];
-      return message.role !== "assistant" || previous?.role !== "assistant" || previous.text !== message.text;
-    });
+    return order.flatMap((id) => byId.get(id) || []);
   })() : session.messages;
+  const preserveRealtime = options.preserveRealtime === true;
+  const preserveLifecycle = options.preserveLifecycle ?? preserveRealtime;
   return {
     ...session,
     threadId: stringValue(thread.id, session.threadId || "") || session.threadId,
     cwd: stringValue(thread.cwd, session.cwd),
     title: stringValue(thread.title, session.title),
-    messages,
+    ...(historyModel && !session.resumed ? { model: historyModel, resolvedModel: historyModel } : {}),
+    messages: mergeMessages(snapshotMessages, session.messages, preserveRealtime),
+    compactionCount: Math.max(compactionCount, preserveRealtime ? session.compactionCount : 0),
     resumed: true,
-    status: "idle",
-    statusLabel: "就绪",
-    activeTurnId: null,
-    startedAt: null,
+    ...(preserveLifecycle ? {} : {
+      status: "idle" as const,
+      statusLabel: "就绪",
+      activeTurnId: null,
+      startedAt: null,
+    }),
   };
 }
 

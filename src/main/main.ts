@@ -651,7 +651,7 @@ if (hasLock) {
           },
           setClaudeLifecycleFixture: (kind: unknown) => {
             if (kind === null) return closeClaudeGatewayFixture().then(() => ({ kind: null }));
-            if (kind !== "longBash" && kind !== "hook" && kind !== "mcp" && kind !== "approval" && kind !== "stream") throw new Error("Claude 生命周期夹具类型无效。");
+            if (kind !== "longBash" && kind !== "hook" && kind !== "mcp" && kind !== "approval" && kind !== "stream" && kind !== "compact" && kind !== "incompleteTool") throw new Error("Claude 生命周期夹具类型无效。");
             claudeLifecycleFixture = kind;
             return { kind };
           },

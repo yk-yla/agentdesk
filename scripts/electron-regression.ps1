@@ -1,5 +1,6 @@
 param(
   [switch]$LiveProviders,
+  [switch]$ClaudeOnly,
   [switch]$SkipCore,
   [switch]$KeepRunning,
   [string]$NpmCommand = $env:AGENTDESK_NPM_COMMAND,
@@ -101,7 +102,9 @@ try {
 
   Invoke-PlaywrightChecked @("-s=$session", "attach", "--cdp=http://127.0.0.1:9223")
   $attached = $true
-  if (-not $SkipCore) {
+  if ($ClaudeOnly) {
+    Invoke-PlaywrightChecked @("-s=$session", "run-code", "--filename=$(Join-Path $scriptRoot 'electron-live-claude-smoke.js')")
+  } elseif (-not $SkipCore) {
     Invoke-PlaywrightChecked @("-s=$session", "run-code", "--filename=$(Join-Path $scriptRoot 'electron-core-smoke.js')")
   }
 

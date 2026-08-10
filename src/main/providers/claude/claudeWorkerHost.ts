@@ -5,6 +5,8 @@ import type { ClaudeWorkerCommand, ClaudeWorkerEvent } from "./claudeWorkerProto
 
 const MAX_MESSAGE_BYTES = 2 * 1024 * 1024;
 const REQUEST_TIMEOUT_MS = 30_000;
+const COMPACT_REQUEST_TIMEOUT_MS = 180_000;
+const PLUGIN_REQUEST_TIMEOUT_MS = 120_000;
 const FATAL_CLEANUP_TIMEOUT_MS = 10_000;
 
 function validEvent(value: unknown): value is ClaudeWorkerEvent {
@@ -55,11 +57,12 @@ export class ClaudeWorkerHost {
 
   request(command: Exclude<ClaudeWorkerCommand, { type: "start" | "send" | "interrupt" | "closeSession" | "testHoldRequests" | "testFatal" | "close" }>) {
     const requestId = randomUUID();
+    const timeoutMs = command.type === "compactSession" ? COMPACT_REQUEST_TIMEOUT_MS : command.type === "plugin" ? PLUGIN_REQUEST_TIMEOUT_MS : REQUEST_TIMEOUT_MS;
     return new Promise<unknown>((resolve, reject) => {
       const timer = setTimeout(() => {
         this.pending.delete(requestId);
-        reject(new Error("Claude Worker 请求超时。"));
-      }, REQUEST_TIMEOUT_MS);
+        reject(new Error(command.type === "compactSession" ? "Claude Worker 压缩请求超时。" : "Claude Worker 请求超时。"));
+      }, timeoutMs);
       this.pending.set(requestId, { resolve, reject, timer });
       try {
         const payload = { ...command, requestId } as ClaudeWorkerCommand;

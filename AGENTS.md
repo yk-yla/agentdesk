@@ -15,7 +15,6 @@
 AgentDesk 是 Windows x64 桌面客户端，同时接入 Codex 和 Claude Code。Electron 主进程负责桌面能力和受控 IPC，Renderer 负责会话与界面；两个 Provider 的后端、事件和生命周期彼此隔离。
 
 - 项目日常分支为 `develop`，远程私有仓库为 `yxb715/agentdesk`。
-- 优化任务、顺序、验收标准和剩余风险以 `docs/代码审查与优化路线图.md` 为执行基线；相关小任务可以合并成批次开发和验证，但状态与结果仍要逐项记录。
 - 依赖版本、npm 命令和打包配置以 `package.json`、`package-lock.json` 为准；当前主技术栈为 Node 24、Electron 43、React 19、TypeScript 5.7、Vite 6 和 electron-builder。
 - 已实现行为以 `src`、Provider 能力注册表、测试和真实 Electron 行为为准；设计稿和路线图中的规划不能写成已实现功能。
 - CI 与 Release 行为以 `.github/workflows` 为准；版本和 Release 结果以 Git 与 GitHub 为准。

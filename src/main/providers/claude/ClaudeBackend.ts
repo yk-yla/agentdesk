@@ -7,7 +7,7 @@ import type { AgentCapabilities, AgentEventEnvelope, AgentOperation, AgentReques
 import type { JsonObject } from "../../../shared/protocol";
 import { credentialEnv, readClaudeCredentials } from "./claudeCredentials";
 import { canonicalWorkspace, isTrustedWorkspace, trustedWorkspaces, trustWorkspace } from "./claudeWorkspaceTrust";
-import type { ClaudeGatewayFixtureKind, ClaudeLifecycleFixtureKind, ClaudeWorkerEvent } from "./claudeWorkerProtocol";
+import type { ClaudeGatewayFixtureKind, ClaudeLifecycleFixtureKind, ClaudePluginOperation, ClaudeWorkerEvent } from "./claudeWorkerProtocol";
 import { resolveExecutableFromPath } from "../../executablePath";
 
 export const CLAUDE_TRUST_REQUIRED_PREFIX = "__CLAUDE_WORKSPACE_TRUST_REQUIRED__";
@@ -17,7 +17,7 @@ const CAPABILITIES: AgentCapabilities = {
   historySearch: "supported", rename: "supported", pin: "unsupported", favorite: "supported", fork: "supported",
   delete: "supported", interrupt: "supported", steer: "unsupported", compact: "temporarilyUnavailable", review: "unsupported",
   skills: "temporarilyUnavailable", commands: "temporarilyUnavailable", mcp: "temporarilyUnavailable", pluginsLoad: "temporarilyUnavailable",
-  pluginMarketplace: "unsupported", goals: "unsupported", plans: "unsupported", subagents: "temporarilyUnavailable", contextUsage: "temporarilyUnavailable",
+  pluginMarketplace: "supported", goals: "unsupported", plans: "unsupported", subagents: "temporarilyUnavailable", contextUsage: "temporarilyUnavailable",
 };
 
 interface ClaudeSession {
@@ -32,6 +32,8 @@ interface ClaudeSession {
   resumeNativeSessionId?: string;
   mode: "new" | "resume";
   pendingStart?: { queryGeneration: number; resumeNativeSessionId?: string; mode: "new" | "resume" };
+  toolCalls: Map<string, { name: string; finalized: boolean }>;
+  toolArgumentTimer: ReturnType<typeof setTimeout> | null;
 }
 
 interface ClaudePendingInteraction {
@@ -49,6 +51,25 @@ interface ClaudePendingInteraction {
 }
 
 const DEFAULT_INTERACTION_TIMEOUT_MS = 5 * 60_000;
+const DEFAULT_TOOL_ARGUMENT_STALL_TIMEOUT_MS = 90_000;
+const CLAUDE_PLUGIN_NAME_PATTERN = /^[A-Za-z0-9._:-]{1,160}(?:@[A-Za-z0-9._:-]{1,160})?$/;
+const CLAUDE_MARKETPLACE_NAME_PATTERN = /^[A-Za-z0-9._:-]{1,160}$/;
+
+function validateClaudePluginName(value: string, label = "插件名称") {
+  if (!CLAUDE_PLUGIN_NAME_PATTERN.test(value)) throw new Error(`Claude ${label}格式无效。`);
+  return value;
+}
+
+function validateClaudeMarketplaceName(value: string) {
+  if (!CLAUDE_MARKETPLACE_NAME_PATTERN.test(value)) throw new Error("Claude 插件市场名称格式无效。");
+  return value;
+}
+
+function validateClaudeMarketplaceSource(value: string) {
+  if (/^(?:https?|git):\/\//i.test(value) || /^git@[^:]+:[^\s]+$/i.test(value) || /^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+(?:#[A-Za-z0-9._/-]+)?$/.test(value)) return value;
+  if (/^[.\\/]|^[A-Za-z]:[\\/]/.test(value) && !value.includes("..\\..") && !value.includes("../..")) return value;
+  throw new Error("Claude 插件市场来源格式无效。");
+}
 
 export interface ClaudeGatewayFixtureConfig {
   kind: ClaudeGatewayFixtureKind;
@@ -84,7 +105,8 @@ function managedClaudePath() {
   const fromPath = resolveExecutableFromPath("claude.exe");
   if (fromPath) return fromPath;
   const value = path.join(homedir(), ".local", "bin", "claude.exe");
-  return existsSync(value) ? value : undefined;
+  if (existsSync(value)) return value;
+  try { return require.resolve(`@anthropic-ai/claude-agent-sdk-${process.platform}-${process.arch}/claude.exe`); } catch { return undefined; }
 }
 
 export class ClaudeBackend implements AgentBackend {
@@ -100,6 +122,7 @@ export class ClaudeBackend implements AgentBackend {
     private readonly onTrustChanged?: (workspaces: string[]) => void,
     private readonly credentialsReader: typeof readClaudeCredentials = readClaudeCredentials,
     private readonly gatewayFixtureReader?: () => ClaudeGatewayFixtureConfig | undefined,
+    private readonly toolArgumentStallTimeoutMs = DEFAULT_TOOL_ARGUMENT_STALL_TIMEOUT_MS,
   ) {
     this.unsubscribe = runtime.subscribe((event) => this.handleWorkerEvent(event));
   }
@@ -120,6 +143,14 @@ export class ClaudeBackend implements AgentBackend {
     if (operation === "updateSessionSettings") return this.updateSessionSettings(params, context);
     if (operation === "compactSession") return this.compactSession(context);
     if (operation === "listMcpServers") return this.listMcpServers(context);
+    if (operation === "listPlugins") return this.pluginRequest("list", params, context);
+    if (operation === "readPlugin") return this.pluginRequest("details", params, context);
+    if (operation === "installPlugin") return this.pluginRequest("install", params, context);
+    if (operation === "uninstallPlugin") return this.pluginRequest("uninstall", params, context);
+    if (operation === "updatePlugin") return this.pluginRequest("update", params, context);
+    if (operation === "addMarketplace") return this.pluginRequest("marketplaceAdd", params, context);
+    if (operation === "updateMarketplace") return this.pluginRequest("marketplaceUpdate", params, context);
+    if (operation === "removeMarketplace") return this.pluginRequest("marketplaceRemove", params, context);
     if (operation === "startTurn") return this.startTurn(params, context);
     if (operation === "interruptTurn") return this.interruptTurn(context);
     throw new Error(`Claude Code 暂不支持该操作：${operation}`);
@@ -165,6 +196,7 @@ export class ClaudeBackend implements AgentBackend {
   async closeSession(context: AgentRequestContext) {
     const session = this.sessionFor(context);
     if (!session) return;
+    this.clearToolTracking(session);
     this.cancelSessionInteractions(session, "cancelled");
     const queryGeneration = session.queryGeneration;
     session.queryGeneration += 1;
@@ -176,7 +208,10 @@ export class ClaudeBackend implements AgentBackend {
   }
 
   async close() {
-    for (const session of this.sessions.values()) this.cancelSessionInteractions(session, "cancelled");
+    for (const session of this.sessions.values()) {
+      this.clearToolTracking(session);
+      this.cancelSessionInteractions(session, "cancelled");
+    }
     this.sessions.clear();
     await this.runtime.close();
     this.unsubscribe();
@@ -184,6 +219,7 @@ export class ClaudeBackend implements AgentBackend {
 
   async shutdownQueries() {
     for (const session of this.sessions.values()) {
+      this.clearToolTracking(session);
       this.cancelSessionInteractions(session, "cancelled");
       this.emit(session, "claude/queryClosed", { nativeSessionId: session.nativeSessionId, reason: "backendRestart" });
     }
@@ -214,6 +250,8 @@ export class ClaudeBackend implements AgentBackend {
       model: typeof params.model === "string" ? params.model : "",
       effort: "",
       mode: "new",
+      toolCalls: new Map(),
+      toolArgumentTimer: null,
     };
     this.sessions.set(clientSessionId, session);
     this.rememberNativeSession(cwd, nativeSessionId);
@@ -257,7 +295,8 @@ export class ClaudeBackend implements AgentBackend {
     const result = await this.runtime.request({ type: "readSession", cwd, nativeSessionId });
     const value = result && typeof result === "object" ? result as Record<string, unknown> : {};
     const info = value.info && typeof value.info === "object" ? value.info as Record<string, unknown> : {};
-    return { thread: { ...info, id: nativeSessionId, cwd, messages: Array.isArray(value.messages) ? value.messages : [] } };
+    const model = typeof value.model === "string" && value.model.trim() ? value.model.trim() : "";
+    return { thread: { ...info, id: nativeSessionId, cwd, ...(model ? { model } : {}), messages: Array.isArray(value.messages) ? value.messages : [] } };
   }
 
   private async resumeSession(params: JsonObject, context: AgentRequestContext) {
@@ -284,7 +323,10 @@ export class ClaudeBackend implements AgentBackend {
       effort: "",
       resumeNativeSessionId: nativeSessionId,
       mode: "resume",
+      toolCalls: new Map(),
+      toolArgumentTimer: null,
     };
+    this.clearToolTracking(session);
     session.nativeSessionId = nativeSessionId;
     session.cwd = cwd;
     session.resumeNativeSessionId = nativeSessionId;
@@ -325,6 +367,7 @@ export class ClaudeBackend implements AgentBackend {
     const text = textFromInput(params.input);
     const inputBlocks = blocksFromInput(params.input);
     if (!text && !inputBlocks.some((item) => item.type === "localImage")) throw new Error("Claude Code 输入不能为空。");
+    this.clearToolTracking(session);
     const turnId = randomUUID();
     session.turnId = turnId;
     if (!session.queryActive) {
@@ -401,12 +444,90 @@ export class ClaudeBackend implements AgentBackend {
     return { ok: true, model: session.model, effort: session.effort };
   }
 
-  private compactSession(context: AgentRequestContext) {
-    return this.control(this.requireSession(context), "compact");
+  private async compactSession(context: AgentRequestContext) {
+    const session = this.requireSession(context);
+    if (!session.queryActive) throw new Error("Claude Code 当前没有可压缩的活动 Query。");
+    const credential = this.credentialsReader();
+    const env = credential.source === "process" ? credentialEnv(credential) : undefined;
+    const gatewayFixture = this.gatewayFixtureReader?.();
+    const previousGeneration = session.queryGeneration;
+    this.cancelSessionInteractions(session, "cancelled");
+    session.queryGeneration += 1;
+    session.queryActive = false;
+    session.turnId = null;
+    session.pendingStart = undefined;
+    session.resumeNativeSessionId = session.nativeSessionId;
+    session.mode = "resume";
+    if (this.runtime.closeSession) await this.runtime.closeSession(session.clientSessionId, previousGeneration);
+    else this.runtime.send({ type: "closeSession", sessionId: session.clientSessionId, queryGeneration: previousGeneration });
+
+    try {
+      return await this.runtime.request({
+        type: "compactSession",
+        sessionId: session.clientSessionId,
+        nativeSessionId: session.nativeSessionId,
+        queryGeneration: session.queryGeneration,
+        cwd: session.cwd,
+        model: session.model || undefined,
+        effort: session.effort || undefined,
+        executablePath: managedClaudePath(),
+        ...(env ? { env } : {}),
+        settingSources: credential.source === "settings" ? ["user", "project", "local"] : [],
+        ...(gatewayFixture ? { gatewayFixture } : {}),
+      });
+    } finally {
+      if (env) for (const key of Object.keys(env)) delete env[key];
+    }
   }
 
   private listMcpServers(context: AgentRequestContext) {
     return this.control(this.requireSession(context), "mcp");
+  }
+
+  private async pluginRequest(operation: ClaudePluginOperation, params: JsonObject, context: AgentRequestContext) {
+    const cwdValue = typeof params.cwd === "string" ? params.cwd : context.canonicalCwd;
+    if (!cwdValue) throw new Error("Claude 插件操作缺少工作区。");
+    const cwd = canonicalWorkspace(cwdValue);
+    if (!isTrustedWorkspace(cwd)) {
+      if (params.trustWorkspace === true) {
+        trustWorkspace(cwd);
+        this.onTrustChanged?.(trustedWorkspaces());
+      } else throw new Error(`${CLAUDE_TRUST_REQUIRED_PREFIX}${cwd}`);
+    }
+    const pluginName = typeof params.pluginName === "string" ? params.pluginName : typeof params.pluginId === "string" ? params.pluginId : undefined;
+    const remoteMarketplace = typeof params.remoteMarketplaceName === "string" ? params.remoteMarketplaceName : undefined;
+    const plugin = pluginName && remoteMarketplace && !pluginName.includes("@") ? `${pluginName}@${remoteMarketplace}` : pluginName;
+    const marketplace = typeof params.marketplaceName === "string" ? params.marketplaceName : undefined;
+    const source = typeof params.source === "string" ? params.source : undefined;
+    if (["details", "install", "uninstall", "update"].includes(operation) && plugin) validateClaudePluginName(plugin);
+    if (["marketplaceUpdate", "marketplaceRemove"].includes(operation) && marketplace) validateClaudeMarketplaceName(marketplace);
+    if (operation === "marketplaceAdd" && source) validateClaudeMarketplaceSource(source);
+    const credential = this.credentialsReader();
+    const env = credential.source === "process" ? credentialEnv(credential) : undefined;
+    const result = await this.runtime.request({
+      type: "plugin",
+      operation,
+      cwd,
+      executablePath: managedClaudePath(),
+      ...(env ? { env } : {}),
+      ...(plugin ? { plugin } : {}),
+      ...(marketplace ? { marketplace } : {}),
+      ...(source ? { source } : {}),
+      ...(Array.isArray(params.sparsePaths) ? { sparsePaths: params.sparsePaths.filter((entry): entry is string => typeof entry === "string").slice(0, 32) } : {}),
+    });
+    if (env) for (const key of Object.keys(env)) delete env[key];
+    if (operation !== "install" && operation !== "uninstall" && operation !== "update") return result;
+    let reloaded = 0;
+    for (const session of this.sessions.values()) {
+      if (session.cwd !== cwd || !session.queryActive) continue;
+      try {
+        await this.control(session, "reloadPlugins");
+        reloaded += 1;
+      } catch {
+        // 插件管理成功不应因某个旧 Query 不支持热加载而回滚。
+      }
+    }
+    return result && typeof result === "object" && !Array.isArray(result) ? { ...(result as JsonObject), reloaded } : { ok: true, reloaded };
   }
 
   private async contextUsage(session: ClaudeSession) {
@@ -434,6 +555,7 @@ export class ClaudeBackend implements AgentBackend {
     if (event.type === "response") return;
     if (event.type === "fatal") {
       for (const session of this.sessions.values()) {
+        this.clearToolTracking(session);
         this.cancelSessionInteractions(session, "failed");
         session.queryActive = false;
         session.pendingStart = undefined;
@@ -495,15 +617,24 @@ export class ClaudeBackend implements AgentBackend {
       return;
     }
     if (event.type === "message") {
-      this.emit(session, "claude/sdkMessage", event.payload);
-      const payload = event.payload && typeof event.payload === "object" ? event.payload as Record<string, unknown> : {};
+      const inspected = this.inspectToolLifecycle(session, event.payload);
+      const payload = inspected.payload;
+      this.emit(session, "claude/sdkMessage", payload);
+      if (inspected.integrityFailure) {
+        session.turnId = null;
+        this.breakQueryForRecovery(session);
+        return;
+      }
+      if (payload.type === "result") {
+        session.turnId = null;
+      }
       if (payload.type === "result" && payload.gatewayError) {
         this.cancelSessionInteractions(session, "failed");
         session.queryActive = false;
         session.pendingStart = undefined;
         session.turnId = null;
       }
-      if (payload.type === "result") void this.contextUsage(session)
+      if (payload.type === "result" && session.queryActive) void this.contextUsage(session)
         .then((usage) => this.emit(session, "claude/contextUsage", { nativeSessionId: session.nativeSessionId, ...usage }))
         .catch((error) => this.emit(session, "claude/contextUsageFailed", {
           nativeSessionId: session.nativeSessionId,
@@ -524,6 +655,7 @@ export class ClaudeBackend implements AgentBackend {
       return;
     }
     if (event.type === "interrupted") {
+      this.clearToolTracking(session);
       session.turnId = null;
       if (session.pendingStart) {
         session.queryActive = false;
@@ -533,6 +665,7 @@ export class ClaudeBackend implements AgentBackend {
       return;
     }
     if (event.type === "closed") {
+      this.clearToolTracking(session);
       this.cancelSessionInteractions(session, "cancelled");
       session.queryActive = false;
       session.turnId = null;
@@ -541,11 +674,128 @@ export class ClaudeBackend implements AgentBackend {
       return;
     }
     if (event.type === "error") {
+      this.clearToolTracking(session);
       this.cancelSessionInteractions(session, "failed");
       session.queryActive = false;
       session.pendingStart = undefined;
       session.turnId = null;
       this.emit(session, "claude/error", { nativeSessionId: session.nativeSessionId, message: event.message, ...(event.payload ? { gatewayError: event.payload } : {}) });
+    }
+  }
+
+  private inspectToolLifecycle(session: ClaudeSession, value: unknown) {
+    if (!value || typeof value !== "object" || Array.isArray(value)) return { payload: {} as Record<string, unknown>, integrityFailure: false };
+    const payload = value as Record<string, unknown>;
+    const type = typeof payload.type === "string" ? payload.type : "";
+    if (type === "stream_event") {
+      const stream = payload.event && typeof payload.event === "object" && !Array.isArray(payload.event) ? payload.event as Record<string, unknown> : {};
+      if (stream.type === "content_block_start") {
+        const block = stream.content_block && typeof stream.content_block === "object" && !Array.isArray(stream.content_block) ? stream.content_block as Record<string, unknown> : {};
+        const id = typeof block.id === "string" ? block.id : "";
+        if (block.type === "tool_use" && id) {
+          session.toolCalls.set(id, { name: typeof block.name === "string" ? block.name : "Claude 工具", finalized: false });
+          this.refreshToolArgumentTimer(session);
+        }
+      } else if (stream.type === "content_block_delta") {
+        const delta = stream.delta && typeof stream.delta === "object" && !Array.isArray(stream.delta) ? stream.delta as Record<string, unknown> : {};
+        if (delta.type === "input_json_delta" && typeof delta.partial_json === "string" && delta.partial_json.length > 0) {
+          this.refreshToolArgumentTimer(session);
+        }
+      }
+      return { payload, integrityFailure: false };
+    }
+    const message = payload.message && typeof payload.message === "object" && !Array.isArray(payload.message) ? payload.message as Record<string, unknown> : {};
+    const content = Array.isArray(message.content) ? message.content : [];
+    if (type === "assistant") {
+      for (const value of content) {
+        const block = value && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : {};
+        const id = typeof block.id === "string" ? block.id : "";
+        if (block.type !== "tool_use" || !id) continue;
+        const existing = session.toolCalls.get(id);
+        session.toolCalls.set(id, { name: typeof block.name === "string" ? block.name : existing?.name || "Claude 工具", finalized: true });
+      }
+      this.refreshToolArgumentTimer(session);
+      return { payload, integrityFailure: false };
+    }
+    if (type === "user") {
+      for (const value of content) {
+        const block = value && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : {};
+        if (block.type === "tool_result" && typeof block.tool_use_id === "string") session.toolCalls.delete(block.tool_use_id);
+      }
+      this.refreshToolArgumentTimer(session);
+      return { payload, integrityFailure: false };
+    }
+    if (type !== "result") return { payload, integrityFailure: false };
+    const incomplete = [...session.toolCalls.entries()].map(([id, state]) => ({ id, ...state }));
+    this.clearToolTracking(session);
+    if (payload.is_error === true || !incomplete.length) return { payload, integrityFailure: false };
+    const messageText = this.toolIntegrityMessage(incomplete, false);
+    return {
+      payload: {
+        ...payload,
+        subtype: "error_incomplete_tool_use",
+        is_error: true,
+        errors: [messageText],
+        agentdeskProtocolError: {
+          kind: "incompleteToolUse",
+          tools: incomplete.map(({ id, name, finalized }) => ({ id, name, finalized })),
+        },
+      },
+      integrityFailure: true,
+    };
+  }
+
+  private refreshToolArgumentTimer(session: ClaudeSession) {
+    if (session.toolArgumentTimer) clearTimeout(session.toolArgumentTimer);
+    session.toolArgumentTimer = null;
+    if (!(this.toolArgumentStallTimeoutMs > 0) || ![...session.toolCalls.values()].some((tool) => !tool.finalized)) return;
+    const queryGeneration = session.queryGeneration;
+    session.toolArgumentTimer = setTimeout(() => {
+      if (session.queryGeneration !== queryGeneration) return;
+      const stalled = [...session.toolCalls.entries()].filter(([, state]) => !state.finalized).map(([id, state]) => ({ id, ...state }));
+      if (!stalled.length) return;
+      const message = this.toolIntegrityMessage(stalled, true);
+      this.emit(session, "claude/error", {
+        nativeSessionId: session.nativeSessionId,
+        message,
+        protocolError: { kind: "toolArgumentStalled", tools: stalled.map(({ id, name }) => ({ id, name })) },
+      });
+      session.turnId = null;
+      this.breakQueryForRecovery(session);
+    }, this.toolArgumentStallTimeoutMs);
+  }
+
+  private toolIntegrityMessage(tools: Array<{ name: string }>, stalled: boolean) {
+    const names = [...new Set(tools.map((tool) => tool.name || "Claude 工具"))];
+    const label = names.join("、") || "Claude 工具";
+    const affectsFiles = names.some((name) => name === "Write" || name === "Edit");
+    if (stalled) return affectsFiles
+      ? `Claude 的 ${label} 工具参数长时间没有继续生成，已中止本次执行，文件未写入。请继续当前会话重试。`
+      : `Claude 的 ${label} 工具参数长时间没有继续生成，已中止本次执行。请继续当前会话重试。`;
+    return affectsFiles
+      ? `Claude 的 ${label} 工具调用未完整执行，文件未写入。请继续当前会话重试。`
+      : `Claude 的 ${label} 工具调用未完整执行，执行结果未生效。请继续当前会话重试。`;
+  }
+
+  private clearToolTracking(session: ClaudeSession) {
+    if (session.toolArgumentTimer) clearTimeout(session.toolArgumentTimer);
+    session.toolArgumentTimer = null;
+    session.toolCalls.clear();
+  }
+
+  private breakQueryForRecovery(session: ClaudeSession) {
+    const queryGeneration = session.queryGeneration;
+    this.clearToolTracking(session);
+    this.cancelSessionInteractions(session, "failed");
+    session.queryActive = false;
+    session.pendingStart = undefined;
+    session.turnId = null;
+    session.resumeNativeSessionId = session.nativeSessionId;
+    session.mode = "resume";
+    session.queryGeneration += 1;
+    if (this.runtime.closeSession) void this.runtime.closeSession(session.clientSessionId, queryGeneration).catch(() => undefined);
+    else {
+      try { this.runtime.send({ type: "closeSession", sessionId: session.clientSessionId, queryGeneration }); } catch { /* recovery will retry with a new Query */ }
     }
   }
 

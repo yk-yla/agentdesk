@@ -30,7 +30,25 @@ const CLAUDE_BOOTSTRAP_MODELS: ModelOption[] = [
   { id: "sonnet[1m]", displayName: "Sonnet (1M context)", description: "Sonnet 长上下文模型", efforts: CLAUDE_BOOTSTRAP_EFFORTS, defaultEffort: "medium", supportsImage: true },
   { id: "haiku", displayName: "Haiku", description: "Haiku 快速模型", efforts: [], defaultEffort: "", supportsImage: true },
 ];
-const CLAUDE_INITIAL_CAPABILITIES: AgentCapabilities = { ...EMPTY_AGENT_CAPABILITIES, models: "supported", effort: "supported" };
+const CLAUDE_INITIAL_CAPABILITIES: AgentCapabilities = {
+  ...EMPTY_AGENT_CAPABILITIES,
+  models: "supported",
+  effort: "supported",
+  images: "supported",
+  history: "supported",
+  historySearch: "supported",
+  rename: "supported",
+  pin: "unsupported",
+  favorite: "supported",
+  fork: "supported",
+  delete: "supported",
+  interrupt: "supported",
+  steer: "unsupported",
+  review: "unsupported",
+  pluginMarketplace: "supported",
+  goals: "unsupported",
+  plans: "unsupported",
+};
 
 const definitions: Record<AgentProvider, RendererProviderDefinition> = {
   codex: {

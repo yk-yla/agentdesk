@@ -16,6 +16,10 @@ describe("renderer provider registry", () => {
       effort: "medium",
       capabilities: capabilities.claude,
     });
+    assert.equal(capabilities.claude.images, "supported");
+    assert.equal(capabilities.claude.history, "supported");
+    assert.equal(capabilities.claude.compact, "temporarilyUnavailable");
+    assert.equal(capabilities.claude.pluginMarketplace, "supported");
     assert.equal(providerHistoryParams("codex", { cursor: null, limit: 100, cwd: "C:\\w" }).archived, false);
     assert.equal(providerHistoryParams("claude", { cursor: null, limit: 100, cwd: "C:\\w" }).archived, undefined);
   });

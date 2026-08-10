@@ -110,6 +110,7 @@ export type AgentOperation =
   | "readPlugin"
   | "installPlugin"
   | "uninstallPlugin"
+  | "updatePlugin"
   | "addMarketplace"
   | "updateMarketplace"
   | "removeMarketplace"
