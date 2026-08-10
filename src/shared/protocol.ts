@@ -71,7 +71,7 @@ export interface ClaudeModelCacheModel {
 }
 
 export interface ClaudeModelCache {
-  schema: 1;
+  schema: 2;
   claudeVersion: string;
   updatedAt: number;
   models: ClaudeModelCacheModel[];

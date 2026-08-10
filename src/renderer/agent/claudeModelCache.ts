@@ -1,7 +1,8 @@
 import type { ClaudeModelCache, ClaudeModelCacheModel } from "../../shared/protocol";
 import type { ModelOption } from "../domain";
 
-export const CLAUDE_MODEL_CACHE_SCHEMA = 1 as const;
+// Schema 2 invalidates caches created before Provider-specific session state was isolated.
+export const CLAUDE_MODEL_CACHE_SCHEMA = 2 as const;
 export const CLAUDE_MODEL_CACHE_TTL_MS = 14 * 24 * 60 * 60 * 1000;
 const MAX_MODELS = 64;
 

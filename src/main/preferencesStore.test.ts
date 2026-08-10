@@ -66,14 +66,15 @@ describe("PreferencesStore", () => {
   it("keeps only a recent bounded Claude model cache", () => {
     const now = Date.now();
     const cache = normalizeClaudeModelCache({
-      schema: 1,
+      schema: 2,
       claudeVersion: "1.2.3",
       updatedAt: now,
       models: [{ id: "sonnet", displayName: "Sonnet", description: "公开模型", efforts: ["medium"], defaultEffort: "medium", supportsImage: true }],
     }, now);
     assert.equal(cache?.claudeVersion, "1.2.3");
+    assert.deepEqual(normalizeClaudeModelCache({ schema: 1, claudeVersion: "1.2.3", updatedAt: now, models: [{ id: "sonnet", displayName: "Sonnet" }] }, now), undefined);
     assert.deepEqual(normalizeClaudeModelCache({ schema: 2, claudeVersion: "1.2.3", updatedAt: now, models: [] }, now), undefined);
-    assert.deepEqual(normalizeClaudeModelCache({ schema: 1, claudeVersion: "1.2.3", updatedAt: now - 15 * 24 * 60 * 60 * 1000, models: [{ id: "sonnet", displayName: "Sonnet" }] }, now), undefined);
+    assert.deepEqual(normalizeClaudeModelCache({ schema: 2, claudeVersion: "1.2.3", updatedAt: now - 15 * 24 * 60 * 60 * 1000, models: [{ id: "sonnet", displayName: "Sonnet" }] }, now), undefined);
     const preferences = normalizePreferences({ claudeModelCache: cache });
     assert.equal(preferences.claudeModelCache?.models[0]?.id, "sonnet");
   });

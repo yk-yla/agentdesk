@@ -93,11 +93,11 @@ function normalizeClaudeModel(value: unknown): ClaudeModelCacheModel | null {
 export function normalizeClaudeModelCache(value: unknown, now = Date.now()): ClaudeModelCache | undefined {
   if (!value || typeof value !== "object" || Array.isArray(value)) return undefined;
   const cache = value as Record<string, unknown>;
-  if (cache.schema !== 1 || typeof cache.claudeVersion !== "string" || !cache.claudeVersion.trim() || cache.claudeVersion.trim() === "unknown" || cache.claudeVersion.length > 128) return undefined;
+  if (cache.schema !== 2 || typeof cache.claudeVersion !== "string" || !cache.claudeVersion.trim() || cache.claudeVersion.trim() === "unknown" || cache.claudeVersion.length > 128) return undefined;
   if (!Number.isSafeInteger(cache.updatedAt) || Number(cache.updatedAt) <= 0 || Number(cache.updatedAt) > now + 5 * 60_000 || now - Number(cache.updatedAt) > CLAUDE_MODEL_CACHE_TTL_MS) return undefined;
   if (!Array.isArray(cache.models) || cache.models.length === 0 || cache.models.length > MAX_CLAUDE_MODEL_CACHE_MODELS) return undefined;
   const models = cache.models.map(normalizeClaudeModel).filter((model): model is ClaudeModelCacheModel => Boolean(model));
-  return models.length === cache.models.length ? { schema: 1, claudeVersion: cache.claudeVersion.trim(), updatedAt: Number(cache.updatedAt), models } : undefined;
+  return models.length === cache.models.length ? { schema: 2, claudeVersion: cache.claudeVersion.trim(), updatedAt: Number(cache.updatedAt), models } : undefined;
 }
 
 export function normalizePreferences(value: unknown): DesktopPreferences {

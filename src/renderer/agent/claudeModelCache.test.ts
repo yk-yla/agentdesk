@@ -13,8 +13,17 @@ describe("Claude model cache", () => {
 
   it("rejects unknown schema, expired cache and incompatible versions", () => {
     const cache = createClaudeModelCache([model], "1.2.3", 10_000)!;
-    assert.deepEqual(usableClaudeCachedModels({ ...cache, schema: 2 }, "1.2.3", 11_000), []);
+    assert.deepEqual(usableClaudeCachedModels({ ...cache, schema: 999 }, "1.2.3", 11_000), []);
     assert.deepEqual(usableClaudeCachedModels(cache, "1.2.4", 10_000 + 14 * 24 * 60 * 60 * 1000 + 1), []);
     assert.deepEqual(usableClaudeCachedModels({ ...cache, claudeVersion: "unknown" }, undefined, 11_000), []);
+  });
+
+  it("invalidates caches written before Provider session state was isolated", () => {
+    assert.deepEqual(usableClaudeCachedModels({
+      schema: 1,
+      claudeVersion: "1.2.3",
+      updatedAt: 10_000,
+      models: [model, { ...model, id: "gpt-5.6-sol", displayName: "gpt-5.6-sol" }],
+    }, "1.2.3", 11_000), []);
   });
 });

@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 import { emptySession } from "../domain";
 import { createClaudeModelCache } from "./claudeModelCache";
-import { initialProviderCapabilities, initialProviderModels, newSessionDefaults, normalizeAgentRequestError, providerHistoryParams } from "./providerRegistry";
+import { initialProviderCapabilities, initialProviderModels, newSessionDefaults, normalizeAgentRequestError, providerHistoryParams, retargetEmptySession } from "./providerRegistry";
 
 describe("renderer provider registry", () => {
   it("owns provider defaults and history parameters", () => {
@@ -28,6 +28,34 @@ describe("renderer provider registry", () => {
     const session = emptySession("s", "C:\\w", "", "", "claude");
     assert.equal(session.provider, "claude");
     assert.equal(normalizeAgentRequestError("claude", "startTurn", new Error("failed")).message, "failed");
+  });
+
+  it("rebuilds Provider-specific state when an empty tab opens another Provider's history", () => {
+    const capabilities = initialProviderCapabilities();
+    const models = initialProviderModels();
+    const codex = emptySession("session", "C:\\workspace", "gpt-5.6-sol", "xhigh", "codex");
+    codex.capabilities = capabilities.codex;
+    codex.resolvedModel = "gpt-5.6-sol";
+    codex.tokenUsage = { used: 12, total: 258_000 };
+
+    const claude = retargetEmptySession(
+      codex,
+      "claude",
+      "C:\\workspace",
+      "claude-thread",
+      "Claude history",
+      models.claude,
+      { model: "gpt-5.6-sol", effort: "xhigh" },
+      capabilities.claude,
+    );
+
+    assert.equal(claude.provider, "claude");
+    assert.equal(claude.model, "default");
+    assert.equal(claude.effort, "medium");
+    assert.equal(claude.resolvedModel, undefined);
+    assert.deepEqual(claude.tokenUsage, { used: 0, total: null });
+    assert.equal(claude.capabilities.review, "unsupported");
+    assert.equal(claude.threadId, "claude-thread");
   });
 
   it("uses a compatible Claude cache and falls back for first install or upgrades", () => {

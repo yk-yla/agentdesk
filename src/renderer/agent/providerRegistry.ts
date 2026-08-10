@@ -6,6 +6,7 @@ import {
   defaultEffortFor,
   defaultModelFor,
   EMPTY_AGENT_CAPABILITIES,
+  emptySession,
   type ModelOption,
   type SessionState,
 } from "../domain";
@@ -91,6 +92,24 @@ export function initialProviderModels(cache?: ClaudeModelCache, claudeVersion?: 
 
 export function newSessionDefaults(provider: AgentProvider, models: ModelOption[], defaults: CodexDefaults, capabilities: AgentCapabilities) {
   return { ...definitions[provider].sessionDefaults(models, defaults), capabilities: { ...(definitions[provider].affectsStartupState ? capabilities : definitions[provider].initialCapabilities) } };
+}
+
+export function retargetEmptySession(
+  session: SessionState,
+  provider: AgentProvider,
+  cwd: string,
+  threadId: string,
+  title: string,
+  models: ModelOption[],
+  defaults: CodexDefaults,
+  capabilities: AgentCapabilities,
+) {
+  const target = newSessionDefaults(provider, models, defaults, capabilities);
+  const next = emptySession(session.id, cwd, target.model, target.effort, provider);
+  next.capabilities = target.capabilities;
+  next.threadId = threadId;
+  next.title = title;
+  return next;
 }
 
 export function applyProviderModelDefaults(session: SessionState, models: ModelOption[], defaults: CodexDefaults) {

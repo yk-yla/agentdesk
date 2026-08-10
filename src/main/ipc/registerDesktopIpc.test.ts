@@ -11,7 +11,7 @@ describe("desktop IPC validation", () => {
       sidebarWidth: 999,
       baseFontSize: 99,
       recentWorkspaces: ["one", 2],
-      claudeModelCache: { schema: 1, claudeVersion: "1.2.3", updatedAt, models: [{ id: "sonnet", displayName: "Sonnet", efforts: [], defaultEffort: "", supportsImage: true }] },
+      claudeModelCache: { schema: 2, claudeVersion: "1.2.3", updatedAt, models: [{ id: "sonnet", displayName: "Sonnet", efforts: [], defaultEffort: "", supportsImage: true }] },
       workspaceState: [],
       ignored: true,
     }), {
@@ -19,7 +19,7 @@ describe("desktop IPC validation", () => {
       sidebarWidth: 480,
       baseFontSize: 14,
       recentWorkspaces: ["one"],
-      claudeModelCache: { schema: 1, claudeVersion: "1.2.3", updatedAt, models: [{ id: "sonnet", displayName: "Sonnet", description: "", efforts: [], defaultEffort: "", supportsImage: true }] },
+      claudeModelCache: { schema: 2, claudeVersion: "1.2.3", updatedAt, models: [{ id: "sonnet", displayName: "Sonnet", description: "", efforts: [], defaultEffort: "", supportsImage: true }] },
     });
   });
 

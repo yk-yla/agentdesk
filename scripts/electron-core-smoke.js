@@ -178,10 +178,11 @@ async page => {
 
     await page.waitForFunction(async () => {
       const cache = (await window.agentDesk.getPreferences()).claudeModelCache;
-      return cache?.schema === 1 && cache.models.some((entry) => entry.id === "sonnet");
+      return cache?.schema === 2 && cache.models.some((entry) => entry.id === "sonnet");
     }, null, { timeout: 15_000 });
     const cachedModels = await page.evaluate(async () => (await window.agentDesk.getPreferences()).claudeModelCache);
     assert(cachedModels?.claudeVersion && cachedModels.updatedAt > 0, "Claude 模型缓存缺少版本或更新时间。" );
+    assert(!cachedModels.models.some((entry) => entry.id.startsWith("gpt-") || entry.id.startsWith("codex-")), "Claude 模型缓存混入了 Codex 模型。" );
     assert(!/token|credential|apiKey/i.test(JSON.stringify(cachedModels)), "Claude 模型缓存包含非公开凭据字段。" );
     results.push("Claude SDK 模型列表已安全写入版本化缓存");
 

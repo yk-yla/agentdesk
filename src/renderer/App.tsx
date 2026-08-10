@@ -17,7 +17,7 @@ import {
 import { createClaudeModelCache, sameClaudeModelCache } from "./agent/claudeModelCache";
 import { codexRequestMethod, isCodexRequestTimeout, mergeMessages } from "./inputQueue";
 import {
-  applyProviderModelDefaults, initialProviderCapabilities, initialProviderModels, newSessionDefaults, normalizeAgentRequestError, providerAffectsStartupState,
+  applyProviderModelDefaults, initialProviderCapabilities, initialProviderModels, newSessionDefaults, normalizeAgentRequestError, providerAffectsStartupState, retargetEmptySession,
   providerDisconnectedMessage, trustWorkspaceForRequest, workspaceForProvider,
 } from "./agent/providerRegistry";
 import { createMockAgentBridge } from "./mockBridge";
@@ -1282,15 +1282,20 @@ export default function App() {
     );
     const sessionId = canReusePlaceholder && placeholder ? placeholder.id : addSession(entry.cwd, { threadId: entry.id, title: entry.title, provider: entry.provider });
     if (canReusePlaceholder) {
-      updateSession(sessionId, (current) => ({
-        ...current,
-        provider: entry.provider,
-        threadId: entry.id,
-        cwd: entry.cwd,
-        title: entry.title,
-        resumed: false,
-        errorText: "",
-      }));
+      updateSession(sessionId, (current) => {
+        const next = retargetEmptySession(
+          current,
+          entry.provider,
+          entry.cwd,
+          entry.id,
+          entry.title,
+          providerModelsRef.current[entry.provider],
+          defaultsRef.current,
+          providerCapabilitiesRef.current[entry.provider],
+        );
+        next.tokenUsage.total = cachedModelContextWindow(preferencesRef.current, next.model);
+        return next;
+      });
     }
     providerEventRef.current?.bindSession(entry.provider, entry.id, sessionId);
 
