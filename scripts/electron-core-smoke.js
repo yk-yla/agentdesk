@@ -159,12 +159,12 @@ async page => {
         && messages[1].includes("CLAUDE_LONG_TEXT_END");
     }, null, { timeout: 15_000 });
     const streamMessages = await page.locator(".pane-panel .message-row.assistant").allTextContents();
-    assert(streamMessages.length === 2, `Claude 不同 UUID 的流式消息没有分条显示：${streamMessages.length}`);
+    assert(streamMessages.length === 2, `Claude 同一消息的流式片段被错误拆分：${streamMessages.length}`);
     assert(!streamMessages.some((message) => message.includes("[已截断]")), "Claude 长回复仍被 8 KB 上限截断。" );
     await stopButton.click({ force: true });
     await stopButton.waitFor({ state: "hidden", timeout: 15_000 });
     assert(await page.locator(".pane-panel .error-banner").count() === 0, "Claude 流式夹具中断后留下错误状态。" );
-    results.push("Claude 流式消息按 UUID 分条、长回复完整且中断后收敛");
+    results.push("Claude 流式片段按 message.id 聚合、长回复完整且中断后收敛");
 
     await openClaude();
     await page.evaluate(() => window.agentDesk.dev.setClaudeLifecycleFixture("incompleteTool"));

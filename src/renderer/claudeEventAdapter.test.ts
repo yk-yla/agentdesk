@@ -29,17 +29,17 @@ describe("Claude activity settlement", () => {
         {
           type: "assistant",
           uuid: "answer",
-          message: { role: "assistant", content: [{ type: "text", text: "历史回复" }] },
+          message: { id: "message-answer", role: "assistant", content: [{ type: "text", text: "历史回复" }] },
         },
         {
           type: "assistant",
-          uuid: "answer",
-          message: { role: "assistant", content: [{ type: "text", text: "历史回复（最终）" }] },
+          uuid: "answer-block",
+          message: { id: "message-answer", role: "assistant", content: [{ type: "text", text: "历史回复（最终）" }] },
         },
         {
           type: "assistant",
           uuid: "answer-duplicate",
-          message: { role: "assistant", content: [{ type: "text", text: "历史回复（最终）" }] },
+          message: { id: "message-second", role: "assistant", content: [{ type: "text", text: "另一条回复" }] },
         },
       ],
     });
@@ -49,7 +49,7 @@ describe("Claude activity settlement", () => {
       { role: "user", text: "/model" },
       { role: "user", text: "保留普通字符串消息" },
       { role: "assistant", text: "历史回复（最终）" },
-      { role: "assistant", text: "历史回复（最终）" },
+      { role: "assistant", text: "另一条回复" },
     ]);
   });
 
@@ -57,36 +57,60 @@ describe("Claude activity settlement", () => {
     const source = emptySession("session", "C:\\workspace", "", "", "claude");
     source.status = "working";
     source.activeTurnId = "turn";
-    const firstDelta = applyClaudeEvent(source, event("claude/sdkMessage", {
+    const firstStart = applyClaudeEvent(source, event("claude/sdkMessage", {
       type: "stream_event",
-      uuid: "first",
+      uuid: "first-start",
+      event: { type: "message_start", message: { id: "message-first", role: "assistant", content: [] } },
+    })).session;
+    const firstDelta = applyClaudeEvent(firstStart, event("claude/sdkMessage", {
+      type: "stream_event",
+      uuid: "first-delta-1",
       event: { type: "content_block_delta", delta: { type: "text_delta", text: "第一" } },
     })).session;
-    const firstFinal = applyClaudeEvent(firstDelta, event("claude/sdkMessage", {
-      type: "assistant",
-      uuid: "first",
-      message: { role: "assistant", content: [{ type: "text", text: "第一条" }] },
+    const secondDelta = applyClaudeEvent(firstDelta, event("claude/sdkMessage", {
+      type: "stream_event",
+      uuid: "first-delta-2",
+      event: { type: "content_block_delta", delta: { type: "text_delta", text: "条" } },
     })).session;
-    const second = applyClaudeEvent(firstFinal, event("claude/sdkMessage", {
+    assert.deepEqual(secondDelta.messages.map(({ text, streaming }) => ({ text, streaming })), [
+      { text: "第一条", streaming: true },
+    ]);
+
+    const firstFinal = applyClaudeEvent(secondDelta, event("claude/sdkMessage", {
       type: "assistant",
-      uuid: "second",
-      message: { role: "assistant", content: [{ type: "text", text: "第二条" }] },
+      uuid: "first-final",
+      message: { id: "message-first", role: "assistant", content: [{ type: "text", text: "第一条" }] },
+    })).session;
+    const secondStart = applyClaudeEvent(firstFinal, event("claude/sdkMessage", {
+      type: "stream_event",
+      uuid: "second-start",
+      event: { type: "message_start", message: { id: "message-second", role: "assistant", content: [] } },
+    })).session;
+    const secondStream = applyClaudeEvent(secondStart, event("claude/sdkMessage", {
+      type: "stream_event",
+      uuid: "second-delta",
+      event: { type: "content_block_delta", delta: { type: "text_delta", text: "第二" } },
+    })).session;
+    const second = applyClaudeEvent(secondStream, event("claude/sdkMessage", {
+      type: "assistant",
+      uuid: "second-final",
+      message: { id: "message-second", role: "assistant", content: [{ type: "text", text: "第二条" }] },
     })).session;
 
     assert.deepEqual(second.messages.map(({ id, text, streaming }) => ({ id, text, streaming })), [
-      { id: "claude-message-first", text: "第一条", streaming: false },
-      { id: "claude-message-second", text: "第二条", streaming: false },
+      { id: "claude-message-message-first", text: "第一条", streaming: false },
+      { id: "claude-message-message-second", text: "第二条", streaming: false },
     ]);
 
     const hydrated = hydrateClaudeSession(second, {
       id: "native-session",
       messages: [
-        { type: "assistant", uuid: "first", message: { role: "assistant", content: [{ type: "text", text: "历史旧值" }] } },
+        { type: "assistant", uuid: "first-history", message: { id: "message-first", role: "assistant", content: [{ type: "text", text: "历史旧值" }] } },
       ],
     }, { preserveRealtime: true, preserveLifecycle: true });
     assert.deepEqual(hydrated.messages.map(({ id, text }) => ({ id, text })), [
-      { id: "claude-message-first", text: "第一条" },
-      { id: "claude-message-second", text: "第二条" },
+      { id: "claude-message-message-first", text: "第一条" },
+      { id: "claude-message-message-second", text: "第二条" },
     ]);
     assert.equal(hydrated.status, "working");
     assert.equal(hydrated.activeTurnId, "turn");
@@ -116,6 +140,39 @@ describe("Claude activity settlement", () => {
     assert.equal(failed.status, "error");
     assert.match(failed.errorText, /文件未写入/);
     assert.equal(failed.activities[0]?.status, "failed");
+  });
+
+  it("removes the empty streaming placeholder for a tool-only assistant message", () => {
+    const source = emptySession("session", "C:\\workspace", "", "", "claude");
+    const started = applyClaudeEvent(source, event("claude/sdkMessage", {
+      type: "stream_event",
+      uuid: "tool-start",
+      event: { type: "message_start", message: { id: "message-tool", role: "assistant", content: [] } },
+    })).session;
+    assert.equal(started.messages.length, 1);
+
+    const finalized = applyClaudeEvent(started, event("claude/sdkMessage", {
+      type: "assistant",
+      uuid: "tool-final",
+      message: { id: "message-tool", role: "assistant", content: [{ type: "tool_use", id: "tool-read", name: "Read", input: {} }] },
+    })).session;
+    assert.equal(finalized.messages.length, 0);
+    assert.equal(finalized.activities[0]?.id, "tool-read");
+  });
+
+  it("keeps completed text when the same Claude message later reports a tool block", () => {
+    const source = emptySession("session", "C:\\workspace", "", "", "claude");
+    source.messages = [{ id: "claude-message-message-mixed", role: "assistant", text: "先说明，再调用工具。", images: [], streaming: false }];
+    const finalized = applyClaudeEvent(source, event("claude/sdkMessage", {
+      type: "assistant",
+      uuid: "mixed-tool-block",
+      message: { id: "message-mixed", role: "assistant", content: [{ type: "tool_use", id: "tool-read", name: "Read", input: {} }] },
+    })).session;
+
+    assert.deepEqual(finalized.messages.map(({ id, text }) => ({ id, text })), [
+      { id: "claude-message-message-mixed", text: "先说明，再调用工具。" },
+    ]);
+    assert.equal(finalized.activities[0]?.id, "tool-read");
   });
 
   it("matches a resolved SDK model ID to its selectable alias", () => {

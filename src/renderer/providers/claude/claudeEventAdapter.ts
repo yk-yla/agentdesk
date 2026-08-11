@@ -64,6 +64,9 @@ function textBlocks(value: unknown) {
 }
 
 function claudeMessageId(value: ReturnType<typeof asRecord>, fallback: string) {
+  const message = asRecord(value.message);
+  const messageId = stringValue(message.id);
+  if (messageId) return `claude-message-${messageId}`;
   const uuid = stringValue(value.uuid);
   return uuid ? `claude-message-${uuid}` : fallback;
 }
@@ -98,6 +101,55 @@ function upsertAssistant(session: SessionState, id: string, text: string, stream
   } else if (text) {
     session.messages = [...session.messages, { id, role: "assistant", text, images: [], streaming }];
   }
+}
+
+function lastStreamingAssistantIndex(messages: Message[]) {
+  for (let index = messages.length - 1; index >= 0; index -= 1) {
+    const message = messages[index];
+    if (message.role === "assistant" && message.streaming) return index;
+  }
+  return -1;
+}
+
+function startStreamingAssistant(session: SessionState, id: string) {
+  if (!id || session.messages.some((message) => message.id === id)) return;
+  session.messages = [...session.messages, { id, role: "assistant", text: "", images: [], streaming: true }];
+}
+
+function appendStreamingAssistant(session: SessionState, text: string) {
+  if (!text) return;
+  const index = lastStreamingAssistantIndex(session.messages);
+  if (index >= 0) {
+    const current = session.messages[index];
+    session.messages = session.messages.map((message, messageIndex) => messageIndex === index
+      ? { ...message, text: `${current.text}${text}`, streaming: true }
+      : message);
+    return;
+  }
+  const id = `claude-stream-${session.activeTurnId || "current"}-${session.messages.length}`;
+  session.messages = [...session.messages, { id, role: "assistant", text, images: [], streaming: true }];
+}
+
+function finalizeAssistant(session: SessionState, id: string, text: string) {
+  const existingIndex = session.messages.findIndex((message) => message.id === id);
+  if (existingIndex >= 0) {
+    const existing = session.messages[existingIndex];
+    if (text) {
+      session.messages = session.messages.map((message, messageIndex) => messageIndex === existingIndex ? { ...message, text, streaming: false } : message);
+    } else if (!existing.text && existing.streaming) {
+      session.messages = session.messages.filter((_message, messageIndex) => messageIndex !== existingIndex);
+    }
+    return;
+  }
+  if (!text) return;
+  const streamingIndex = lastStreamingAssistantIndex(session.messages);
+  if (streamingIndex >= 0) {
+    session.messages = session.messages.map((message, messageIndex) => messageIndex === streamingIndex
+      ? { ...message, id, text, streaming: false }
+      : message);
+    return;
+  }
+  upsertAssistant(session, id, text, false);
 }
 
 function upsertActivity(session: SessionState, activity: Activity) {
@@ -273,10 +325,12 @@ export function applyClaudeEvent(source: SessionState, routed: RoutedClaudeEvent
     if (type === "stream_event") {
       const stream = asRecord(payload.event);
       const delta = asRecord(stream.delta);
-      if (stream.type === "content_block_delta" && delta.type === "text_delta") {
-        const id = claudeMessageId(payload, `claude-turn-${session.activeTurnId || "current"}`);
-        const current = session.messages.find((message) => message.id === id);
-        upsertAssistant(session, id, `${current?.text || ""}${stringValue(delta.text)}`, true);
+      if (stream.type === "message_start") {
+        const message = asRecord(stream.message);
+        const messageId = stringValue(message.id);
+        if (messageId) startStreamingAssistant(session, `claude-message-${messageId}`);
+      } else if (stream.type === "content_block_delta" && delta.type === "text_delta") {
+        appendStreamingAssistant(session, stringValue(delta.text));
       } else if (stream.type === "content_block_start") {
         const block = asRecord(stream.content_block);
         const id = stringValue(block.id);
@@ -295,7 +349,7 @@ export function applyClaudeEvent(source: SessionState, routed: RoutedClaudeEvent
     } else if (type === "assistant") {
       const id = claudeMessageId(payload, `claude-turn-${session.activeTurnId || "current"}`);
       const text = textBlocks(payload.message);
-      if (text) upsertAssistant(session, id, text, false);
+      finalizeAssistant(session, id, text);
       const message = asRecord(payload.message);
       for (const blockValue of Array.isArray(message.content) ? message.content : []) {
         const block = asRecord(blockValue);

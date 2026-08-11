@@ -442,20 +442,23 @@ async function startLifecycleFixture(command: Extract<ClaudeWorkerCommand, { typ
     return;
   }
   let streamStep = 0;
-  const firstMessageId = "fixture-stream-first";
-  const secondMessageId = "fixture-stream-second";
+  const firstMessageId = "msg_fixture_stream_first";
+  const secondMessageId = "msg_fixture_stream_second";
   const interval = setInterval(() => {
     if (states.get(command.sessionId) !== state) return;
     streamStep += 1;
     if (streamStep === 1) {
-      emit({ type: "message", sessionId: command.sessionId, queryGeneration: command.queryGeneration, payload: { type: "stream_event", uuid: firstMessageId, session_id: command.nativeSessionId, event: { type: "content_block_delta", delta: { type: "text_delta", text: "AgentDesk 流式夹具 第一条" } } } });
+      emit({ type: "message", sessionId: command.sessionId, queryGeneration: command.queryGeneration, payload: { type: "stream_event", uuid: "fixture-stream-first-start", session_id: command.nativeSessionId, event: { type: "message_start", message: { id: firstMessageId, role: "assistant", content: [] } } } });
+      emit({ type: "message", sessionId: command.sessionId, queryGeneration: command.queryGeneration, payload: { type: "stream_event", uuid: "fixture-stream-first-delta-1", session_id: command.nativeSessionId, event: { type: "content_block_delta", index: 0, delta: { type: "text_delta", text: "AgentDesk 流式" } } } });
+      emit({ type: "message", sessionId: command.sessionId, queryGeneration: command.queryGeneration, payload: { type: "stream_event", uuid: "fixture-stream-first-delta-2", session_id: command.nativeSessionId, event: { type: "content_block_delta", index: 0, delta: { type: "text_delta", text: "夹具 第一条" } } } });
     } else if (streamStep === 2) {
-      emit({ type: "message", sessionId: command.sessionId, queryGeneration: command.queryGeneration, payload: { type: "assistant", uuid: firstMessageId, session_id: command.nativeSessionId, message: { role: "assistant", content: [{ type: "text", text: "AgentDesk 流式夹具 第一条" }] } } });
+      emit({ type: "message", sessionId: command.sessionId, queryGeneration: command.queryGeneration, payload: { type: "assistant", uuid: "fixture-stream-first-final", session_id: command.nativeSessionId, message: { id: firstMessageId, role: "assistant", content: [{ type: "text", text: "AgentDesk 流式夹具 第一条" }] } } });
     } else if (streamStep === 3) {
-      emit({ type: "message", sessionId: command.sessionId, queryGeneration: command.queryGeneration, payload: { type: "stream_event", uuid: secondMessageId, session_id: command.nativeSessionId, event: { type: "content_block_delta", delta: { type: "text_delta", text: "AgentDesk 流式夹具 第二条" } } } });
+      emit({ type: "message", sessionId: command.sessionId, queryGeneration: command.queryGeneration, payload: { type: "stream_event", uuid: "fixture-stream-second-start", session_id: command.nativeSessionId, event: { type: "message_start", message: { id: secondMessageId, role: "assistant", content: [] } } } });
+      emit({ type: "message", sessionId: command.sessionId, queryGeneration: command.queryGeneration, payload: { type: "stream_event", uuid: "fixture-stream-second-delta", session_id: command.nativeSessionId, event: { type: "content_block_delta", index: 0, delta: { type: "text_delta", text: "AgentDesk 流式夹具 第二条" } } } });
     } else {
       clearInterval(interval);
-      emit({ type: "message", sessionId: command.sessionId, queryGeneration: command.queryGeneration, payload: { type: "assistant", uuid: secondMessageId, session_id: command.nativeSessionId, message: { role: "assistant", content: [{ type: "text", text: `AgentDesk 流式夹具 第二条 ${"长".repeat(8_300)} CLAUDE_LONG_TEXT_END` }] } } });
+      emit({ type: "message", sessionId: command.sessionId, queryGeneration: command.queryGeneration, payload: { type: "assistant", uuid: "fixture-stream-second-final", session_id: command.nativeSessionId, message: { id: secondMessageId, role: "assistant", content: [{ type: "text", text: `AgentDesk 流式夹具 第二条 ${"长".repeat(8_300)} CLAUDE_LONG_TEXT_END` }] } } });
     }
   }, 120);
   state.cleanupTimers?.push(interval);
