@@ -1,11 +1,11 @@
 import { ArrowUpRight, Check, FileSearch, FolderOpen, GitBranch, ListTodo, Copy } from "lucide-react";
-import { lazy, memo, Suspense, useMemo, useState } from "react";
+import { Fragment, lazy, memo, Suspense, useMemo, useState } from "react";
 import type { AgentBridge, DisplayMode } from "../shared/protocol";
 import type { AgentProvider } from "../shared/agentProtocol";
 import ActivityIcon from "./ActivityIcon";
 import ActivityOutput from "./ActivityOutput";
 import { basename, type Activity, type Message } from "./domain";
-import { formatMessageTimestamp } from "./messageTimestamp";
+import { formatMessageTimestamp, getMessageTimeDivider } from "./messageTimestamp";
 
 const MarkdownMessage = lazy(() => import("./MarkdownMessage"));
 
@@ -71,6 +71,21 @@ function MessageItem({ message, bridge, provider }: MessageItemProps) {
       data-user-message-anchor={message.role === "user" ? "" : undefined}
     >
       <div className="message-content">
+        <div className="message-toolbar">
+          {formattedTimestamp && message.role !== "system" ? (
+            <time className="message-timestamp" dateTime={new Date(message.timestamp || 0).toISOString()}>{formattedTimestamp}</time>
+          ) : null}
+          <button
+            type="button"
+            className="message-copy-button"
+            onClick={() => void copyMessage()}
+            title={copied ? "已复制" : "复制消息"}
+            aria-label={copied ? "已复制" : "复制消息"}
+          >
+            {copied ? <Check size={13} /> : <Copy size={13} />}
+            <span>{copied ? "已复制" : "复制"}</span>
+          </button>
+        </div>
         <div className="message-text">
           <Suspense fallback={<span className="markdown-loading" aria-busy="true">正在加载消息</span>}>
             <MarkdownMessage
@@ -84,18 +99,6 @@ function MessageItem({ message, bridge, provider }: MessageItemProps) {
           </Suspense>
           {message.streaming ? <span className="stream-caret" /> : null}
         </div>
-        {formattedTimestamp && message.role !== "system" ? (
-          <time className="message-timestamp" dateTime={new Date(message.timestamp || 0).toISOString()}>{formattedTimestamp}</time>
-        ) : null}
-        <button
-          type="button"
-          className="message-copy-button"
-          onClick={() => void copyMessage()}
-          title={copied ? "已复制" : "复制消息"}
-          aria-label={copied ? "已复制" : "复制消息"}
-        >
-          {copied ? <Check size={13} /> : <Copy size={13} />}
-        </button>
       </div>
     </article>
   );
@@ -154,9 +157,15 @@ function MessageStackBase({ messages, visibleActivities, displayMode, bridge, cw
   return (
     <div className="message-stack">
       {hidden > 0 ? <button className="history-more" data-load-earlier-messages onClick={() => setVisibleCount((count) => count + MESSAGE_WINDOW)}>加载更早消息 · 剩余 {hidden}</button> : null}
-      {shown.map((message, index) => (
-        <MemoMessageItem key={`${message.id}:${index}`} message={message} bridge={bridge} provider={provider} />
-      ))}
+      {shown.map((message, index) => {
+        const divider = getMessageTimeDivider(message.timestamp, shown[index - 1]?.timestamp);
+        return (
+          <Fragment key={`${message.id}:${index}`}>
+            {divider ? <div className={`message-time-divider ${divider.kind}`}><span>{divider.label}</span></div> : null}
+            <MemoMessageItem message={message} bridge={bridge} provider={provider} />
+          </Fragment>
+        );
+      })}
       {hiddenActivities > 0 ? <button className="history-more" onClick={() => setActivityWindow({ mode: displayMode, count: visibleActivityCount + ACTIVITY_WINDOW })}>加载更早活动 · 剩余 {hiddenActivities}</button> : null}
       {shownActivities.map((activity, index) => (
         <article className={`visible-activity ${activity.status}`} key={`visible-${activity.id}:${index}`}>

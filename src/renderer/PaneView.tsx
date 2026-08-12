@@ -7,6 +7,7 @@ import ElapsedTimer from "./ElapsedTimer";
 import MessageStack from "./MessageStack";
 import { findQuestionAnchorIndex, QUESTION_ANCHOR_SELECTOR, QUESTION_SCROLL_TOP_PADDING, questionNavigationDirection, type QuestionNavigationDirection } from "./questionNavigation";
 import ServerRequestPanel from "./ServerRequestPanel";
+import { activitiesForMainConversation } from "./activityPresentation";
 
 const DetailsPanel = lazy(() => import("./DetailsPanel"));
 
@@ -73,7 +74,7 @@ function PaneView(props: PaneViewProps) {
   // 展示过滤只发生在渲染层，底层活动数据始终完整保留。
   const visibleActivities = useMemo(() => {
     if (displayMode === "simple") {
-      const visible = session.activities.filter((activity) => activity.visibleInMain);
+      const visible = activitiesForMainConversation(session.activities);
       return visible.length ? visible : NO_VISIBLE_ACTIVITIES;
     }
     return session.activities;

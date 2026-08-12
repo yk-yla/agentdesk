@@ -47,7 +47,7 @@ function createHarness(request: (provider: AgentProvider, operation: AgentOperat
     setSearchCursor: (value) => { searchCursor = value; },
   }, {
     request,
-    getPreferences: () => ({ recentWorkspaces: [], lastWorkspace: "", favoriteWorkspaces: [], theme: "github-dark", displayMode: "simple", bossKey: "", sessionAliases: {}, favoriteSessions: [] }),
+    getPreferences: () => ({ recentWorkspaces: [], lastWorkspace: "", favoriteWorkspaces: [], theme: "github-light", displayMode: "simple", bossKey: "", sessionAliases: {}, favoriteSessions: [] }),
     isVisible: () => true,
   });
   return {
@@ -66,7 +66,7 @@ describe("history helpers", () => {
     const merged = mergeHistory([thread("same", "codex", 1)], [thread("same", "claude", 2), thread("same", "codex", 3)]);
     const decorated = applyLocalSessionMetadata(merged, {
       recentWorkspaces: [], lastWorkspace: "", favoriteWorkspaces: [],
-      theme: "github-dark", displayMode: "simple", bossKey: "",
+      theme: "github-light", displayMode: "simple", bossKey: "",
       sessionAliases: { "claude:same": "Claude alias" },
       favoriteSessions: ["codex:same"],
     });
@@ -79,7 +79,7 @@ describe("history helpers", () => {
   it("restores cross-directory favorites from saved summaries", () => {
     const favorites = favoriteHistoryEntries([thread("loaded", "codex", 2)], {
       recentWorkspaces: [], lastWorkspace: "", favoriteWorkspaces: [],
-      theme: "github-dark", displayMode: "simple", bossKey: "",
+      theme: "github-light", displayMode: "simple", bossKey: "",
       favoriteSessions: ["codex:loaded", "claude:saved"],
       favoriteSessionSummaries: {
         "claude:saved": { provider: "claude", id: "saved", title: "跨目录收藏", cwd: "D:\\other", updatedAt: 3 },
@@ -117,6 +117,25 @@ describe("HistoryController", () => {
     await new Promise<void>((resolve) => setImmediate(resolve));
 
     assert.deepEqual(harness.entries.map((entry) => entry.id).sort(), ["claude-new", "codex-new"]);
+  });
+
+  it("loads history again when switching back to a previously visited workspace", async () => {
+    const calls: string[] = [];
+    const harness = createHarness(async (provider, _operation, params) => {
+      const cwd = String(params.cwd);
+      calls.push(`${provider}:${cwd}`);
+      return listValue(`${provider}-${cwd.endsWith("one") ? "one" : "two"}`, provider);
+    });
+
+    harness.controller.loadInitial("D:\\one");
+    await waitFor(() => !harness.loading);
+    harness.controller.loadInitial("D:\\two");
+    await waitFor(() => !harness.loading);
+    harness.controller.loadInitial("D:\\one");
+    await waitFor(() => !harness.loading);
+
+    assert.equal(calls.filter((call) => call.endsWith("D:\\one")).length, 4);
+    assert.deepEqual(harness.entries.map((entry) => entry.id).sort(), ["claude-one", "claude-two", "codex-one", "codex-two"]);
   });
 
   it("lets the latest search win when responses arrive out of order", async () => {

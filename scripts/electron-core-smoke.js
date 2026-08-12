@@ -67,10 +67,12 @@ async page => {
     const themeSelect = settingsPopover.locator("label", { hasText: "主题" }).locator("select");
     const originalTheme = await page.evaluate(async () => (await window.agentDesk.getPreferences()).theme);
     const themes = [
-      { id: "modern-light", background: "#ffffff", accent: "#005fb8" },
+      { id: "github-light", background: "#f6f8fa", accent: "#20a675" },
       { id: "modern-dark", background: "#1f1f1f", accent: "#3794ff" },
       { id: "github-dark-dimmed", background: "#22272e", accent: "#539bf5" },
     ];
+    const themeOptions = await themeSelect.locator("option").evaluateAll((options) => options.map((option) => option.value));
+    assert(JSON.stringify(themeOptions) === JSON.stringify(themes.map((theme) => theme.id)), `主题下拉没有只保留三项：${themeOptions.join(", ")}`);
     for (const theme of themes) {
       await themeSelect.selectOption(theme.id);
       await page.waitForFunction(async (expectedTheme) => (
@@ -94,7 +96,7 @@ async page => {
     ), originalTheme, { timeout: 10_000 });
     await page.keyboard.press("Escape");
     await settingsPopover.waitFor({ state: "hidden", timeout: 10_000 });
-    results.push("设置弹层、三套新主题和懒加载高级设置可用");
+    results.push("设置弹层仅保留三套主题且切换可用");
 
     await sidebar.getByRole("tab", { name: "已收藏" }).click({ force: true });
     await sidebar.locator('nav[aria-label="已收藏会话列表"]').waitFor({ state: "visible", timeout: 10_000 });
@@ -232,7 +234,12 @@ async page => {
     await activeInput().press("Enter");
     const timestampedUserMessage = activeConversation().locator(".message-row.user").last();
     await timestampedUserMessage.waitFor({ state: "visible", timeout: 15_000 });
-    assert(/^\d{2}:\d{2}:\d{2}$/.test((await timestampedUserMessage.locator(".message-timestamp").textContent()) || ""), "用户消息没有常显秒级时间。" );
+    const userTimestamp = timestampedUserMessage.locator(".message-timestamp");
+    assert(await userTimestamp.count() === 1, "用户消息缺少完整时间。" );
+    assert(/^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}$/.test((await userTimestamp.textContent()) || ""), "用户消息时间格式不正确。" );
+    assert(Number(await userTimestamp.evaluate((element) => getComputedStyle(element.closest(".message-toolbar") || element).opacity)) === 0, "用户消息工具栏默认可见。" );
+    await timestampedUserMessage.locator(".message-content").hover();
+    await page.waitForFunction((element) => Number(getComputedStyle(element.closest(".message-toolbar") || element).opacity) === 1, await userTimestamp.elementHandle(), { timeout: 10_000 });
     await page.waitForFunction(() => {
       const messages = Array.from(document.querySelectorAll(".pane-panel .message-row.assistant")).map((entry) => entry.textContent || "");
       return messages.length === 2
@@ -245,14 +252,15 @@ async page => {
     assert(!streamMessages.some((message) => message.includes("[已截断]")), "Claude 长回复仍被 8 KB 上限截断。" );
     const timestampedAssistantMessage = activeConversation().locator(".message-row.assistant").last();
     const assistantTimestamp = timestampedAssistantMessage.locator(".message-timestamp");
-    assert(await assistantTimestamp.count() === 1, "AI 消息缺少秒级时间。" );
-    assert(Number(await assistantTimestamp.evaluate((element) => getComputedStyle(element).opacity)) === 0, "AI 消息时间默认可见。" );
+    assert(await assistantTimestamp.count() === 1, "AI 消息缺少完整时间。" );
+    assert(/^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}$/.test((await assistantTimestamp.textContent()) || ""), "AI 消息时间格式不正确。" );
+    assert(Number(await assistantTimestamp.evaluate((element) => getComputedStyle(element.closest(".message-toolbar") || element).opacity)) === 0, "AI 消息工具栏默认可见。" );
     await timestampedAssistantMessage.locator(".message-content").hover();
-    await page.waitForFunction((element) => Number(getComputedStyle(element).opacity) === 1, await assistantTimestamp.elementHandle(), { timeout: 10_000 });
+    await page.waitForFunction((element) => Number(getComputedStyle(element.closest(".message-toolbar") || element).opacity) === 1, await assistantTimestamp.elementHandle(), { timeout: 10_000 });
     await stopButton.click({ force: true });
     await stopButton.waitFor({ state: "hidden", timeout: 15_000 });
     assert(await page.locator(".pane-panel .error-banner").count() === 0, "Claude 流式夹具中断后留下错误状态。" );
-    results.push("Claude 流式片段完整，用户时间常显且 AI 时间悬停显示");
+    results.push("Claude 流式片段完整，消息工具栏可悬停显示完整时间");
 
     await openClaude();
     await page.evaluate(() => window.agentDesk.dev.setClaudeLifecycleFixture("incompleteTool"));

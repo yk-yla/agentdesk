@@ -7,7 +7,7 @@ describe("desktop IPC validation", () => {
     const updatedAt = Date.now();
     assert.deepEqual(sanitizePreferencesPatch(null), {});
     assert.deepEqual(sanitizePreferencesPatch({
-      theme: "dracula",
+      theme: "modern-dark",
       sidebarWidth: 999,
       baseFontSize: 99,
       recentWorkspaces: ["one", 2],
@@ -16,13 +16,14 @@ describe("desktop IPC validation", () => {
       workspaceState: [],
       ignored: true,
     }), {
-      theme: "dracula",
+      theme: "modern-dark",
       sidebarWidth: 480,
       baseFontSize: 14,
       recentWorkspaces: ["one"],
       claudeModelCache: { schema: 2, claudeVersion: "1.2.3", updatedAt, models: [{ id: "sonnet", displayName: "Sonnet", description: "", efforts: [], defaultEffort: "", supportsImage: true }] },
       lastReasoningEfforts: { codex: "xhigh", claude: "high" },
     });
+    assert.deepEqual(sanitizePreferencesPatch({ theme: "dracula" }), {});
   });
 
   it("accepts only known Provider operations and bounded ownership context", () => {

@@ -237,7 +237,7 @@ function activityFromItem(itemValue: unknown, previous?: Activity, fallbackStatu
   const status = activityStatus(item.status, previous, fallbackStatus);
   return {
     id, kind, title: kind === "commandExecution" ? "代理命令" : kind === "fileChange" ? "文件修改" : kind === "mcpToolCall" ? "工具调用" : kind === "plan" ? "任务计划" : kind === "reasoning" ? "思考摘要" : kind === "subAgent" ? "子 Agent" : "后台活动",
-    detail, status, output, visibleInMain: (kind === "fileChange" || kind === "mcpToolCall" || kind === "other") && (status === "failed" || status === "declined"),
+    detail, status, output, visibleInMain: (kind === "fileChange" || kind === "mcpToolCall" || kind === "other") && (status === "failed" || status === "declined" || status === "interrupted"),
   };
 }
 

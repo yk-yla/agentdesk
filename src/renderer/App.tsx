@@ -473,6 +473,13 @@ export default function App() {
     setTabContextMenu({ paneId, sessionId, x: event.clientX, y: event.clientY });
   }, []);
 
+  const activateTab = useCallback((paneId: string, sessionId: string) => {
+    setTabContextMenu(null);
+    setActiveTab(paneId, sessionId);
+    const session = sessionsRef.current[sessionId];
+    if (session?.cwd && !sameDirectory(workspaceRef.current, session.cwd)) setWorkspace(session.cwd);
+  }, [setActiveTab]);
+
   const clearSession = useCallback(async (sessionId: string) => {
     const session = sessionsRef.current[sessionId];
     if (!session) return;
@@ -682,26 +689,8 @@ export default function App() {
 
   const selectWorkspace = useCallback(async (directory: string) => {
     setWorkspace(directory);
-    const currentLayout = layoutRef.current;
-    const pane = currentLayout.panes.find((entry) => entry.id === currentLayout.activePaneId) ?? currentLayout.panes[0];
-    const session = pane ? sessionsRef.current[pane.activeTabId] : undefined;
-    const canRetarget = Boolean(
-      session
-      && !session.threadId
-      && !session.messages.length
-      && !session.activities.length
-      && session.status === "idle"
-      && !(attachmentsRef.current[session.id] || []).length
-      && !draftsRef.current.get(session.id),
-    );
-    if (session && canRetarget && !sameDirectory(session.cwd, directory)) {
-      updateSession(session.id, (current) => ({ ...current, cwd: directory, updatedAt: Date.now() }));
-    } else if (!session || !sameDirectory(session.cwd, directory)) {
-      // 已有 Thread 的工作目录不可修改，切换目录时打开新的空 Tab。
-      addSession(directory);
-    }
     await savePreference({ lastWorkspace: directory, recentWorkspaces: [] });
-  }, [addSession, savePreference, updateSession]);
+  }, [savePreference]);
 
   const createSessionInDirectory = useCallback((directory: string, provider: AgentProvider = "codex") => {
     setWorkspace(directory);
@@ -1723,6 +1712,10 @@ export default function App() {
     setSidebarWidth(clampSidebarWidth(preferences.sidebarWidth));
   }, [preferences.sidebarWidth]);
 
+  useEffect(() => {
+    if (activeSession?.cwd && !sameDirectory(workspaceRef.current, activeSession.cwd)) setWorkspace(activeSession.cwd);
+  }, [activeSession?.id, activeSession?.cwd]);
+
   const activeTabsKey = layout.panes.map((pane) => `${pane.id}:${pane.activeTabId}:${pane.tabIds.length}`).join("|");
   useEffect(() => {
     let frame: number | null = null;
@@ -1762,7 +1755,7 @@ export default function App() {
   const contextLeft = contextPane && contextIndex >= 0 ? contextPane.tabIds.slice(0, contextIndex) : [];
   const contextRight = contextPane && contextIndex >= 0 ? contextPane.tabIds.slice(contextIndex + 1) : [];
   const sidebarActiveThreadId = activeSession?.threadId || null;
-  const sidebarCurrentCwd = activeSession?.cwd || workspace;
+  const sidebarCurrentCwd = workspace || activeSession?.cwd || "";
   const sidebarDirectoryHistory = useMemo(() => {
     const key = normalizedDirectory(sidebarCurrentCwd);
     return key ? history.filter((entry) => entry.cwdKey === key) : [];
@@ -1964,7 +1957,7 @@ export default function App() {
                     if (draggedId && draggedId !== session.id) moveTab(draggedId, pane.id, { paneId: pane.id, sessionId: session.id, position });
                   }}
                   onDragEnd={() => { setDraggingTabId(null); setTabDropPaneId(null); setTabDropTarget(null); }}
-                  onClick={() => { setTabContextMenu(null); setActiveTab(pane.id, session.id); }}
+                  onClick={() => activateTab(pane.id, session.id)}
                   onContextMenu={(event) => openTabContextMenu(event, pane.id, session.id)}
                   key={session.id}
                 >

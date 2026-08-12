@@ -69,6 +69,19 @@ describe("protocolAdapter turn lifecycle", () => {
     }).session;
     assert.equal(applied.activities[0].status, "completed");
   });
+
+  it("clears the main-conversation marker when a tool later completes", () => {
+    const session = emptySession("session-1", "C:\\work");
+    session.activities = [{ id: "tool-1", kind: "mcpToolCall", title: "工具调用", detail: "docs / fetch", status: "failed", visibleInMain: true }];
+
+    const applied = applyServerMessage(session, {
+      method: "item/completed",
+      params: { threadId: "thread-1", item: { id: "tool-1", type: "mcpToolCall", server: "docs", tool: "fetch", status: "completed" } },
+    }).session;
+
+    assert.equal(applied.activities[0].status, "completed");
+    assert.equal(applied.activities[0].visibleInMain, false);
+  });
 });
 
 describe("protocolAdapter hydration", () => {

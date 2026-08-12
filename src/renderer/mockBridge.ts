@@ -16,9 +16,9 @@ export function createMockBridge(): CodexBridge {
   let threadCounter = 0;
   let turnCounter = 0;
   const mockWorkspace = "mock-workspace";
-  let mockPreferences: DesktopPreferences = { recentWorkspaces: [], lastWorkspace: mockWorkspace, favoriteWorkspaces: [], sidebarWidth: 250, theme: "github-dark", displayMode: "simple", bossKey: "F2" };
+  let mockPreferences: DesktopPreferences = { recentWorkspaces: [], lastWorkspace: mockWorkspace, favoriteWorkspaces: [], sidebarWidth: 250, theme: "github-light", displayMode: "simple", bossKey: "F2" };
   let mockBossKeyStatus: BossKeyStatus = { accelerator: "F2", registered: true, message: "老板键 F2 已启用。" };
-  let mockUpdateStatus: DesktopUpdateStatus = { phase: "unsupported", currentVersion: "0.1.6", message: "浏览器预览不检查软件更新。", tokenConfigured: false, repositoryUrl: "https://github.com/yxb715/agentdesk" };
+  let mockUpdateStatus: DesktopUpdateStatus = { phase: "unsupported", currentVersion: "1.0.7", message: "浏览器预览不检查软件更新。", tokenConfigured: false, repositoryUrl: "https://github.com/yxb715/agentdesk" };
   let mockCodexCliUpdateStatus: CodexCliUpdateStatus = { phase: "available", currentVersion: "0.146.1", latestVersion: "0.147.0", checkedAt: Date.now(), nextCheckAt: Date.now() + 6 * 60 * 60 * 1000, message: "发现新版本 0.147.0，可立即更新。" };
   let mockClaudeRuntimeStatus: ClaudeRuntimeStatus = { phase: "available", binarySource: "sdk", binaryVersion: "1.0.0", sdkVersion: "0.1.0", latestVersion: "1.1.0", checkedAt: Date.now(), credentialsAvailable: true, credentialSource: "settings", credentialMessage: "已从 Claude 配置读取凭据。", trustedWorkspaces: [], integrityVerified: true, message: "发现 Claude Code 新版本 1.1.0。" };
   let mockWindowMaximized = false;

@@ -29,7 +29,7 @@ describe("PreferencesStore", () => {
 
   it("normalizes legacy and untrusted preference values", () => {
     assert.equal(normalizePreferences({ theme: "dracula" }).bossKey, "F2");
-    assert.equal(normalizePreferences({ theme: "system" }).theme, "github-dark");
+    assert.equal(normalizePreferences({ theme: "system" }).theme, "github-light");
 
     const preferences = normalizePreferences({
       theme: "graphite",
@@ -50,7 +50,7 @@ describe("PreferencesStore", () => {
       ignored: "field",
     });
 
-    assert.equal(preferences.theme, "github-dark");
+    assert.equal(preferences.theme, "github-light");
     assert.equal(preferences.displayMode, "full");
     assert.equal(preferences.bossKey, "Control+Shift+K");
     assert.equal(preferences.sidebarWidth, 480);
@@ -65,10 +65,13 @@ describe("PreferencesStore", () => {
     assert.equal("ignored" in preferences, false);
   });
 
-  it("accepts and persists the new themes", () => {
-    const themes = ["modern-light", "modern-dark", "github-dark-dimmed"] as const;
+  it("accepts only the three supported themes and migrates removed themes", () => {
+    const themes = ["github-light", "modern-dark", "github-dark-dimmed"] as const;
     for (const theme of themes) {
       assert.equal(normalizePreferences({ theme }).theme, theme);
+    }
+    for (const removedTheme of ["github-dark", "modern-light", "dracula", "night-owl"]) {
+      assert.equal(normalizePreferences({ theme: removedTheme }).theme, "github-light");
     }
 
     withStore((store) => {
@@ -97,11 +100,11 @@ describe("PreferencesStore", () => {
 
   it("merges, validates and atomically persists patches", () => {
     withStore((store, filePath) => {
-      store.write({ lastWorkspace: "first", theme: "dracula", bossKey: "Alt+Q", lastReasoningEfforts: { codex: "xhigh", claude: "high" } });
+      store.write({ lastWorkspace: "first", theme: "modern-dark", bossKey: "Alt+Q", lastReasoningEfforts: { codex: "xhigh", claude: "high" } });
       const result = store.write({ lastWorkspace: "second", sidebarWidth: 100, baseFontSize: 13 });
 
       assert.equal(result.lastWorkspace, "second");
-      assert.equal(result.theme, "dracula");
+      assert.equal(result.theme, "modern-dark");
       assert.equal(result.bossKey, "Alt+Q");
       assert.equal(result.sidebarWidth, 184);
       assert.equal(result.baseFontSize, 13);

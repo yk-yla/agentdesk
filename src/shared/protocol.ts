@@ -87,18 +87,8 @@ export interface FavoriteSessionSummary {
 
 export type ThemeId =
   | "github-light"
-  | "modern-light"
-  | "light-owl"
-  | "catppuccin-latte"
-  | "rose-pine-dawn"
-  | "github-dark"
   | "modern-dark"
   | "github-dark-dimmed"
-  | "one-dark-pro"
-  | "dracula"
-  | "tokyo-night"
-  | "night-owl"
-  | "catppuccin-mocha"
 
 export interface DesktopPreferences {
   recentWorkspaces: string[];
