@@ -87,10 +87,13 @@ export interface FavoriteSessionSummary {
 
 export type ThemeId =
   | "github-light"
+  | "modern-light"
   | "light-owl"
   | "catppuccin-latte"
   | "rose-pine-dawn"
   | "github-dark"
+  | "modern-dark"
+  | "github-dark-dimmed"
   | "one-dark-pro"
   | "dracula"
   | "tokyo-night"
@@ -111,6 +114,7 @@ export interface DesktopPreferences {
   bossKey: string;
   modelContextWindows?: Record<string, ModelContextWindowCacheEntry>;
   claudeModelCache?: ClaudeModelCache;
+  lastReasoningEfforts?: Partial<Record<AgentProvider, string>>;
   trustedClaudeWorkspaces?: string[];
   workspaceState?: JsonObject;
 }

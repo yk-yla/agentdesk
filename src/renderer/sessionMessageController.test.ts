@@ -88,6 +88,7 @@ describe("SessionMessageController", () => {
     assert.equal(harness.requests[0].operation, "startTurn");
     assert.equal(harness.attachments.session.length, 0);
     assert.equal(harness.sessions.session.messages[0].text, "inspect this");
+    assert.equal(harness.sessions.session.messages[0].timestamp, 1002);
     assert.equal(harness.sessions.session.activeTurnId, "turn-1");
     assert.equal(harness.sessions.session.statusLabel, "工作中");
     assert.deepEqual(harness.history, [{ id: "thread-1", title: "inspect this" }]);

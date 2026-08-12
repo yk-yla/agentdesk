@@ -7,6 +7,7 @@ import {
   defaultModelFor,
   EMPTY_AGENT_CAPABILITIES,
   emptySession,
+  findModelOption,
   type ModelOption,
   type SessionState,
 } from "../domain";
@@ -90,8 +91,11 @@ export function initialProviderModels(cache?: ClaudeModelCache, claudeVersion?: 
   return { codex: [], claude: cached.length ? cached : CLAUDE_BOOTSTRAP_MODELS };
 }
 
-export function newSessionDefaults(provider: AgentProvider, models: ModelOption[], defaults: CodexDefaults, capabilities: AgentCapabilities) {
-  return { ...definitions[provider].sessionDefaults(models, defaults), capabilities: { ...(definitions[provider].affectsStartupState ? capabilities : definitions[provider].initialCapabilities) } };
+export function newSessionDefaults(provider: AgentProvider, models: ModelOption[], defaults: CodexDefaults, capabilities: AgentCapabilities, preferredEffort = "") {
+  const values = definitions[provider].sessionDefaults(models, defaults);
+  const model = findModelOption(models, values.model);
+  const effort = model?.efforts.includes(preferredEffort) ? preferredEffort : values.effort;
+  return { ...values, effort, capabilities: { ...(definitions[provider].affectsStartupState ? capabilities : definitions[provider].initialCapabilities) } };
 }
 
 export function retargetEmptySession(
@@ -112,8 +116,8 @@ export function retargetEmptySession(
   return next;
 }
 
-export function applyProviderModelDefaults(session: SessionState, models: ModelOption[], defaults: CodexDefaults) {
-  const values = definitions[session.provider].sessionDefaults(models, defaults);
+export function applyProviderModelDefaults(session: SessionState, models: ModelOption[], defaults: CodexDefaults, preferredEffort = "") {
+  const values = newSessionDefaults(session.provider, models, defaults, session.capabilities, preferredEffort);
   if (!values.model || session.model) return session;
   return { ...session, model: values.model, effort: values.effort };
 }

@@ -24,6 +24,7 @@ describe("Claude activity settlement", () => {
         {
           type: "user",
           uuid: "prompt",
+          timestamp: "2026-08-12T01:02:03.000Z",
           message: { role: "user", content: "保留普通字符串消息" },
         },
         {
@@ -51,6 +52,7 @@ describe("Claude activity settlement", () => {
       { role: "assistant", text: "历史回复（最终）" },
       { role: "assistant", text: "另一条回复" },
     ]);
+    assert.equal(hydrated.messages[1].timestamp, Date.parse("2026-08-12T01:02:03.000Z"));
   });
 
   it("keeps distinct Claude messages during streaming and history hydration", () => {

@@ -44,6 +44,7 @@ describe("PreferencesStore", () => {
         valid: { tokens: 200_000, updatedAt: 2 },
         invalid: { tokens: -1, updatedAt: 1 },
       },
+      lastReasoningEfforts: { codex: " xhigh ", claude: "high", unknown: "medium" },
       trustedClaudeWorkspaces: [...Array.from({ length: 300 }, (_, index) => `trusted-${index}`), 1],
       workspaceState: [],
       ignored: "field",
@@ -58,9 +59,24 @@ describe("PreferencesStore", () => {
     assert.equal(preferences.favoriteWorkspaces.length, 32);
     assert.deepEqual(preferences.sessionAliases, { valid: "Title" });
     assert.deepEqual(preferences.modelContextWindows, { valid: { tokens: 200_000, updatedAt: 2 } });
+    assert.deepEqual(preferences.lastReasoningEfforts, { codex: "xhigh", claude: "high" });
     assert.equal(preferences.trustedClaudeWorkspaces?.length, 256);
     assert.equal(preferences.workspaceState, undefined);
     assert.equal("ignored" in preferences, false);
+  });
+
+  it("accepts and persists the new themes", () => {
+    const themes = ["modern-light", "modern-dark", "github-dark-dimmed"] as const;
+    for (const theme of themes) {
+      assert.equal(normalizePreferences({ theme }).theme, theme);
+    }
+
+    withStore((store) => {
+      for (const theme of themes) {
+        store.write({ theme });
+        assert.equal(store.read().theme, theme);
+      }
+    });
   });
 
   it("keeps only a recent bounded Claude model cache", () => {
@@ -81,7 +97,7 @@ describe("PreferencesStore", () => {
 
   it("merges, validates and atomically persists patches", () => {
     withStore((store, filePath) => {
-      store.write({ lastWorkspace: "first", theme: "dracula", bossKey: "Alt+Q" });
+      store.write({ lastWorkspace: "first", theme: "dracula", bossKey: "Alt+Q", lastReasoningEfforts: { codex: "xhigh", claude: "high" } });
       const result = store.write({ lastWorkspace: "second", sidebarWidth: 100, baseFontSize: 13 });
 
       assert.equal(result.lastWorkspace, "second");
@@ -89,6 +105,7 @@ describe("PreferencesStore", () => {
       assert.equal(result.bossKey, "Alt+Q");
       assert.equal(result.sidebarWidth, 184);
       assert.equal(result.baseFontSize, 13);
+      assert.deepEqual(result.lastReasoningEfforts, { codex: "xhigh", claude: "high" });
       assert.deepEqual(JSON.parse(readFileSync(filePath, "utf8")), result);
     });
   });

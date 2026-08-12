@@ -8,7 +8,9 @@ async page => {
 
   const sidebar = page.locator("aside.sidebar");
   const activeModel = () => page.locator('.pane-panel select[aria-label="选择模型"]');
+  const activeEffort = () => page.locator('.pane-panel select[aria-label="选择思考等级"]');
   const activeInput = () => page.locator('.pane-panel textarea[aria-label="消息输入"]');
+  const activeConversation = () => page.locator('.pane-panel .conversation');
   const newClaude = () => sidebar.locator("button.provider-new-claude").first();
   const newCodex = () => sidebar.locator("button.provider-new-codex").first();
   const openClaude = async () => {
@@ -22,6 +24,14 @@ async page => {
 
   try {
     await sidebar.waitFor({ state: "visible", timeout: 15_000 });
+    await page.waitForFunction(() => {
+      const workspace = document.querySelector(".current-workspace");
+      return Boolean(
+        workspace?.getAttribute("title")
+        && !workspace.textContent?.includes("正在连接工作区")
+        && document.querySelector(".pane-panel textarea[aria-label='消息输入']"),
+      );
+    }, null, { timeout: 15_000 });
     await page.evaluate(() => { window.confirm = () => true; });
     const hasDevBridge = await page.evaluate(() => Boolean(window.agentDesk?.dev));
     assert(hasDevBridge, "开发版 Electron 没有暴露受控测试夹具。" );
@@ -54,9 +64,37 @@ async page => {
     const settingsPopover = sidebar.locator(".settings-popover");
     await settingsPopover.waitFor({ state: "visible", timeout: 10_000 });
     await settingsPopover.locator(".boss-key-settings").waitFor({ state: "visible", timeout: 10_000 });
+    const themeSelect = settingsPopover.locator("label", { hasText: "主题" }).locator("select");
+    const originalTheme = await page.evaluate(async () => (await window.agentDesk.getPreferences()).theme);
+    const themes = [
+      { id: "modern-light", background: "#ffffff", accent: "#005fb8" },
+      { id: "modern-dark", background: "#1f1f1f", accent: "#3794ff" },
+      { id: "github-dark-dimmed", background: "#22272e", accent: "#539bf5" },
+    ];
+    for (const theme of themes) {
+      await themeSelect.selectOption(theme.id);
+      await page.waitForFunction(async (expectedTheme) => (
+        document.documentElement.dataset.theme === expectedTheme
+        && (await window.agentDesk.getPreferences()).theme === expectedTheme
+      ), theme.id, { timeout: 10_000 });
+      const colors = await page.evaluate(() => {
+        const style = getComputedStyle(document.documentElement);
+        return {
+          background: style.getPropertyValue("--background").trim(),
+          accent: style.getPropertyValue("--accent").trim(),
+        };
+      });
+      assert(colors.background === theme.background, `${theme.id} 背景色未生效：${colors.background}`);
+      assert(colors.accent === theme.accent, `${theme.id} 强调色未生效：${colors.accent}`);
+    }
+    await themeSelect.selectOption(originalTheme);
+    await page.waitForFunction(async (expectedTheme) => (
+      document.documentElement.dataset.theme === expectedTheme
+      && (await window.agentDesk.getPreferences()).theme === expectedTheme
+    ), originalTheme, { timeout: 10_000 });
     await page.keyboard.press("Escape");
     await settingsPopover.waitFor({ state: "hidden", timeout: 10_000 });
-    results.push("设置弹层和懒加载高级设置可用");
+    results.push("设置弹层、三套新主题和懒加载高级设置可用");
 
     await sidebar.getByRole("tab", { name: "已收藏" }).click({ force: true });
     await sidebar.locator('nav[aria-label="已收藏会话列表"]').waitFor({ state: "visible", timeout: 10_000 });
@@ -75,6 +113,24 @@ async page => {
     await model.selectOption("sonnet");
     assert(await model.inputValue() === "sonnet", "Claude 模型选择没有更新到 sonnet。" );
     results.push("Claude 首条消息前模型可选择");
+
+    const claudeEffort = activeEffort();
+    await claudeEffort.selectOption("high");
+    await page.waitForFunction(async () => (await window.agentDesk.getPreferences()).lastReasoningEfforts?.claude === "high", null, { timeout: 10_000 });
+    await openClaude();
+    assert(await activeEffort().inputValue() === "high", "Claude 新会话没有沿用上次思考等级。" );
+
+    await openCodex();
+    const codexEfforts = await activeEffort().locator("option").evaluateAll((options) => options.map((option) => option.value));
+    const codexEffort = codexEfforts.includes("low") ? "low" : codexEfforts[0];
+    assert(Boolean(codexEffort), "Codex 没有可选思考等级。" );
+    await activeEffort().selectOption(codexEffort);
+    await page.waitForFunction(async (expected) => (await window.agentDesk.getPreferences()).lastReasoningEfforts?.codex === expected, codexEffort, { timeout: 10_000 });
+    await openCodex();
+    assert(await activeEffort().inputValue() === codexEffort, "Codex 新会话没有沿用上次思考等级。" );
+    await openClaude();
+    assert(await activeEffort().inputValue() === "high", "Codex 的选择覆盖了 Claude 思考等级。" );
+    results.push("Claude 和 Codex 分别记住上次思考等级");
 
     const composerPointerStyle = await activeInput().evaluate((element) => {
       const style = getComputedStyle(element);
@@ -133,6 +189,29 @@ async page => {
     }
     await stopButton.click({ force: true });
     await stopButton.waitFor({ state: "hidden", timeout: 15_000 });
+    const questionNavigationState = await activeConversation().evaluate((conversation) => {
+      const containerTop = conversation.getBoundingClientRect().top;
+      const maxTop = conversation.scrollHeight - conversation.clientHeight;
+      return {
+        maxTop,
+        tops: Array.from(conversation.querySelectorAll("[data-user-message-anchor]")).map((anchor) => Math.max(0, Math.min(
+          conversation.scrollTop + anchor.getBoundingClientRect().top - containerTop - 12,
+          maxTop,
+        ))),
+      };
+    });
+    const questionTops = questionNavigationState.tops;
+    assert(questionTops.length >= 2, "提问跳转夹具缺少两条用户消息。" );
+    await page.keyboard.press("Alt+PageUp");
+    const latestQuestionTop = await activeConversation().evaluate((conversation) => conversation.scrollTop);
+    assert(Math.abs(latestQuestionTop - questionTops.at(-1)) <= 3, "Alt+PageUp 没有跳到上一条提问。" );
+    await page.keyboard.press("Alt+PageUp");
+    const previousQuestionTop = await activeConversation().evaluate((conversation) => conversation.scrollTop);
+    assert(Math.abs(previousQuestionTop - questionTops.at(-2)) <= 3, "连续 Alt+PageUp 没有跳到更早提问。" );
+    await page.keyboard.press("Alt+PageDown");
+    const nextQuestionTop = await activeConversation().evaluate((conversation) => conversation.scrollTop);
+    assert(Math.abs(nextQuestionTop - questionTops.at(-1)) <= 3, "Alt+PageDown 没有跳到下一条提问。" );
+    results.push("Alt+PageUp 和 Alt+PageDown 可逐条跳转用户提问");
     results.push("Claude 上下文用量可见，压缩后可恢复并继续回复");
 
     await openClaude();
@@ -151,6 +230,9 @@ async page => {
     await page.evaluate(() => window.agentDesk.dev.setClaudeLifecycleFixture("stream"));
     await activeInput().fill("AgentDesk fixture stream " + Date.now());
     await activeInput().press("Enter");
+    const timestampedUserMessage = activeConversation().locator(".message-row.user").last();
+    await timestampedUserMessage.waitFor({ state: "visible", timeout: 15_000 });
+    assert(/^\d{2}:\d{2}:\d{2}$/.test((await timestampedUserMessage.locator(".message-timestamp").textContent()) || ""), "用户消息没有常显秒级时间。" );
     await page.waitForFunction(() => {
       const messages = Array.from(document.querySelectorAll(".pane-panel .message-row.assistant")).map((entry) => entry.textContent || "");
       return messages.length === 2
@@ -161,10 +243,16 @@ async page => {
     const streamMessages = await page.locator(".pane-panel .message-row.assistant").allTextContents();
     assert(streamMessages.length === 2, `Claude 同一消息的流式片段被错误拆分：${streamMessages.length}`);
     assert(!streamMessages.some((message) => message.includes("[已截断]")), "Claude 长回复仍被 8 KB 上限截断。" );
+    const timestampedAssistantMessage = activeConversation().locator(".message-row.assistant").last();
+    const assistantTimestamp = timestampedAssistantMessage.locator(".message-timestamp");
+    assert(await assistantTimestamp.count() === 1, "AI 消息缺少秒级时间。" );
+    assert(Number(await assistantTimestamp.evaluate((element) => getComputedStyle(element).opacity)) === 0, "AI 消息时间默认可见。" );
+    await timestampedAssistantMessage.locator(".message-content").hover();
+    await page.waitForFunction((element) => Number(getComputedStyle(element).opacity) === 1, await assistantTimestamp.elementHandle(), { timeout: 10_000 });
     await stopButton.click({ force: true });
     await stopButton.waitFor({ state: "hidden", timeout: 15_000 });
     assert(await page.locator(".pane-panel .error-banner").count() === 0, "Claude 流式夹具中断后留下错误状态。" );
-    results.push("Claude 流式片段按 message.id 聚合、长回复完整且中断后收敛");
+    results.push("Claude 流式片段完整，用户时间常显且 AI 时间悬停显示");
 
     await openClaude();
     await page.evaluate(() => window.agentDesk.dev.setClaudeLifecycleFixture("incompleteTool"));
@@ -225,11 +313,12 @@ async page => {
     await activeInput().press("Enter");
     await stopButton.waitFor({ state: "visible", timeout: 15_000 });
     const runningClaudeTab = page.locator(".tab.active:has(.provider-mark.claude)");
-    const claudeTabCount = await page.locator(".tab:has(.provider-mark.claude)").count();
+    const runningClaudeTabHandle = await runningClaudeTab.elementHandle();
+    assert(Boolean(runningClaudeTabHandle), "找不到运行中的 Claude Tab。" );
     await page.evaluate(() => { window.confirm = () => true; });
     await runningClaudeTab.locator(".tab-close").click({ force: true });
     try {
-      await page.waitForFunction((count) => document.querySelectorAll(".tab:has(.provider-mark.claude)").length < count, claudeTabCount, { timeout: 30_000 });
+      await page.waitForFunction((tab) => !tab?.isConnected, runningClaudeTabHandle, { timeout: 30_000 });
     } catch (error) {
       const state = await page.evaluate(() => ({
         claudeTabs: Array.from(document.querySelectorAll(".tab:has(.provider-mark.claude)")).map((tab) => ({

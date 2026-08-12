@@ -87,6 +87,22 @@ describe("protocolAdapter hydration", () => {
     const hydrated = hydrateSession(emptySession("session-1", "C:\\work"), activeThread);
     assert.equal(hydrated.status, "working");
     assert.equal(hydrated.activeTurnId, "turn-1");
+    assert.equal(hydrated.messages[0].timestamp, 100_000);
+  });
+
+  it("uses Codex lifecycle timestamps for realtime messages", () => {
+    const source = emptySession("session-1", "C:\\work");
+    const user = applyServerMessage(source, {
+      method: "item/started",
+      params: { threadId: "thread-1", startedAtMs: 123_456, item: { id: "user-1", type: "userMessage", content: [{ type: "text", text: "问题" }] } },
+    }, 999_999).session;
+    const assistant = applyServerMessage(user, {
+      method: "item/completed",
+      params: { threadId: "thread-1", completedAtMs: 234_567, item: { id: "agent-1", type: "agentMessage", text: "回答" } },
+    }, 999_999).session;
+
+    assert.equal(assistant.messages[0].timestamp, 123_456);
+    assert.equal(assistant.messages[1].timestamp, 234_567);
   });
 
   it("preserves realtime content received while thread/read was pending", () => {

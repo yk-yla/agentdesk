@@ -301,40 +301,40 @@ function upsertActivity(session: SessionState, item: unknown, fallbackStatus: Ac
     : session.activities.map((entry, index) => index === existingIndex ? next : entry);
 }
 
-function ensureAssistantMessage(session: SessionState, id: string, text: string, streaming: boolean) {
+function ensureAssistantMessage(session: SessionState, id: string, text: string, streaming: boolean, timestamp?: number) {
   const existing = session.messages.find((message) => message.id === id);
   if (existing) {
-    session.messages = session.messages.map((message) => message.id === id ? { ...message, text: text || message.text, streaming } : message);
+    session.messages = session.messages.map((message) => message.id === id ? { ...message, text: text || message.text, streaming, timestamp: message.timestamp || timestamp } : message);
   } else if (text) {
-    session.messages = [...session.messages, { id, role: "assistant", text, images: [], streaming }];
+    session.messages = [...session.messages, { id, role: "assistant", text, images: [], streaming, timestamp }];
   }
 }
 
-function messagesFromItem(itemValue: unknown): Message[] {
+function messagesFromItem(itemValue: unknown, timestamp?: number): Message[] {
   const item = asRecord(itemValue);
   const type = stringValue(item.type);
   const id = stringValue(item.id, `item-${Date.now()}`);
   if (type === "agentMessage" || type === "plan") {
     const text = stringValue(item.text);
-    return text ? [{ id, role: "assistant", text, images: [], streaming: false }] : [];
+    return text ? [{ id, role: "assistant", text, images: [], streaming: false, timestamp }] : [];
   }
   if (type === "exitedReviewMode") {
     const review = stringValue(item.review);
-    return review ? [{ id: `review-result-${id}`, role: "assistant", text: review, images: [], streaming: false }] : [];
+    return review ? [{ id: `review-result-${id}`, role: "assistant", text: review, images: [], streaming: false, timestamp }] : [];
   }
-  if (type === "imageView" && typeof item.path === "string") return [{ id, role: "assistant", text: "", images: [{ path: item.path, dataUrl: "", name: item.path.split(/[\\/]/).pop() || "图片" }], streaming: false }];
+  if (type === "imageView" && typeof item.path === "string") return [{ id, role: "assistant", text: "", images: [{ path: item.path, dataUrl: "", name: item.path.split(/[\\/]/).pop() || "图片" }], streaming: false, timestamp }];
   if (type === "imageGeneration") {
     const savedPath = stringValue(item.savedPath);
     const result = stringValue(item.result);
     const image = { path: savedPath, dataUrl: result.startsWith("data:image/") || result.startsWith("http://") || result.startsWith("https://") ? result : "", name: savedPath.split(/[\\/]/).pop() || "生成图片" };
-    return [{ id, role: "assistant", text: stringValue(item.revisedPrompt), images: [image], streaming: false }];
+    return [{ id, role: "assistant", text: stringValue(item.revisedPrompt), images: [image], streaming: false, timestamp }];
   }
   if (type !== "userMessage") return [];
   const content = Array.isArray(item.content) ? item.content : [];
   const text = content.map(textFromContent).filter(Boolean).join("\n");
   const images = content.map(imageFromContent).filter((image): image is ImageAttachment => Boolean(image));
   if (!text && !images.length) return [];
-  return [{ id, clientId: stringValue(item.clientId, stringValue(item.client_id)) || undefined, role: "user", text, images }];
+  return [{ id, clientId: stringValue(item.clientId, stringValue(item.client_id)) || undefined, role: "user", text, images, timestamp }];
 }
 
 function approvalDecisions(value: unknown) {
@@ -498,7 +498,11 @@ export function hydrateSession(session: SessionState, threadValue: unknown, opti
       if (itemRecord.type === "plan" && (!plan || !turnUpdatedAt || turnUpdatedAt >= plan.updatedAt)) {
         plan = { explanation: stringValue(itemRecord.text), steps: [], updatedAt: turnUpdatedAt || Date.now() };
       }
-      const nextMessages = messagesFromItem(item);
+      const role = stringValue(itemRecord.type);
+      const messageTimestamp = role === "userMessage"
+        ? numberValue(turn.startedAt) * 1000 || undefined
+        : numberValue(turn.completedAt, numberValue(turn.startedAt)) * 1000 || undefined;
+      const nextMessages = messagesFromItem(item, messageTimestamp);
       if (nextMessages.length) messages.push(...nextMessages);
       if (!["userMessage", "agentMessage"].includes(stringValue(itemRecord.type))) {
         activities.push(activityFromItem(item));
@@ -550,7 +554,7 @@ export interface AppliedEvent {
  * 未变化的数组保持同一引用，MessageStack 和 DetailsPanel 的 memo 才能拦住重渲染。
  * 原始事件不再进入这里，由 rawEventStore 在 React 状态之外全量保留。
  */
-export function applyServerMessage(source: SessionState, message: JsonRpcMessage): AppliedEvent {
+export function applyServerMessage(source: SessionState, message: JsonRpcMessage, receivedAt = Date.now()): AppliedEvent {
   const session: SessionState = { ...source };
   const params = asRecord(message.params);
   const method = message.method || "";
@@ -617,16 +621,17 @@ export function applyServerMessage(source: SessionState, message: JsonRpcMessage
     const id = stringValue(params.itemId, `assistant-${Date.now()}`);
     const delta = stringValue(params.delta);
     const current = session.messages.find((messageItem) => messageItem.id === id);
-    ensureAssistantMessage(session, id, (current?.text ?? "") + delta, true);
+    ensureAssistantMessage(session, id, (current?.text ?? "") + delta, true, receivedAt);
     if (method === "item/plan/delta") {
       session.plan = { explanation: (session.plan?.explanation || "") + delta, steps: session.plan?.steps || [], updatedAt: Date.now() };
     }
   } else if (method === "item/started" || method === "item/completed") {
     const item = asRecord(params.item);
     const type = stringValue(item.type);
+    const lifecycleTimestamp = numberValue(params.startedAtMs, numberValue(params.completedAtMs, receivedAt));
     if (type === "agentMessage" || type === "plan") {
       const id = stringValue(item.id, `assistant-${Date.now()}`);
-      ensureAssistantMessage(session, id, stringValue(item.text), method === "item/started");
+      ensureAssistantMessage(session, id, stringValue(item.text), method === "item/started", lifecycleTimestamp);
       if (type === "plan") {
         const updatedAt = numberValue(params.completedAtMs, numberValue(params.startedAtMs, Date.now()));
         if (!session.plan || updatedAt >= session.plan.updatedAt) {
@@ -635,10 +640,10 @@ export function applyServerMessage(source: SessionState, message: JsonRpcMessage
         upsertActivity(session, item, method === "item/completed" ? "completed" : "inProgress");
       }
     } else if (type === "exitedReviewMode" && method === "item/completed") {
-      const hydrated = messagesFromItem(item);
-      if (hydrated.length) ensureAssistantMessage(session, hydrated[0].id, hydrated[0].text, false);
+      const hydrated = messagesFromItem(item, lifecycleTimestamp);
+      if (hydrated.length) ensureAssistantMessage(session, hydrated[0].id, hydrated[0].text, false, lifecycleTimestamp);
     } else if ((type === "imageView" || type === "imageGeneration") && method === "item/completed") {
-      const hydrated = messagesFromItem(item);
+      const hydrated = messagesFromItem(item, lifecycleTimestamp);
       if (hydrated.length && !session.messages.some((entry) => entry.id === hydrated[0].id)) {
         session.messages = [...session.messages, ...hydrated];
       }
@@ -646,7 +651,7 @@ export function applyServerMessage(source: SessionState, message: JsonRpcMessage
       session.compactionCount += 1;
       upsertActivity(session, item, method === "item/completed" ? "completed" : "inProgress");
     } else if (item.type === "userMessage") {
-      const hydrated = messagesFromItem(item);
+      const hydrated = messagesFromItem(item, lifecycleTimestamp);
       const duplicate = hydrated.length && session.messages.some((entry) => entry.id === hydrated[0].id
         || (hydrated[0].clientId && entry.clientId === hydrated[0].clientId)
         || (entry.role === "user" && !entry.clientId && entry.text === hydrated[0].text && entry.images.length === hydrated[0].images.length));

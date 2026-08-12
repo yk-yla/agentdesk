@@ -5,11 +5,19 @@ import Composer from "./Composer";
 import { findModelOption, formatCount, type Activity, type CollaborationMode, type ImageAttachment, type ModelOption, type PaneState, type PendingSteerMessage, type QueuedMessage, type SessionState, type SkillOption } from "./domain";
 import ElapsedTimer from "./ElapsedTimer";
 import MessageStack from "./MessageStack";
+import { findQuestionAnchorIndex, QUESTION_ANCHOR_SELECTOR, QUESTION_SCROLL_TOP_PADDING, questionNavigationDirection, type QuestionNavigationDirection } from "./questionNavigation";
 import ServerRequestPanel from "./ServerRequestPanel";
 
 const DetailsPanel = lazy(() => import("./DetailsPanel"));
 
 const NO_VISIBLE_ACTIVITIES: Activity[] = [];
+const NAVIGATION_BLOCKING_SELECTOR = '[aria-modal="true"], [role="menu"], .image-lightbox, .plugin-detail-overlay, .command-suggestions, .composer-more[open]';
+
+function questionNavigationBlocked(event: KeyboardEvent) {
+  const target = event.target;
+  if (target instanceof Element && target.closest('[role="dialog"], [role="menu"], [role="listbox"]')) return true;
+  return Boolean(document.querySelector(NAVIGATION_BLOCKING_SELECTOR));
+}
 
 export interface PaneViewProps {
   pane: PaneState;
@@ -54,6 +62,8 @@ function PaneView(props: PaneViewProps) {
   const conversationRef = useRef<HTMLDivElement>(null);
   const composerMoreRef = useRef<HTMLDetailsElement>(null);
   const followLatestRef = useRef(true);
+  const questionNavigationScrollRef = useRef(false);
+  const questionNavigationFrameRef = useRef<number | null>(null);
   const scrollStatesRef = useRef(new Map<string, { top: number; atBottom: boolean }>());
   const restoringSessionRef = useRef<string | null>(null);
   const model = useMemo(() => findModelOption(models, session.model), [models, session.model]);
@@ -112,6 +122,56 @@ function PaneView(props: PaneViewProps) {
     scrollStatesRef.current.set(session.id, { top: conversation.scrollTop, atBottom: true });
     return undefined;
   }, [session.id, session.messages.length, latestMessageLength, session.activities.length, latestActivityLength]);
+
+  const jumpToQuestion = useCallback((direction: QuestionNavigationDirection, loadAttempts = 0): boolean => {
+    const conversation = conversationRef.current;
+    if (!conversation) return false;
+    const conversationTop = conversation.getBoundingClientRect().top;
+    const anchors = Array.from(conversation.querySelectorAll<HTMLElement>(QUESTION_ANCHOR_SELECTOR));
+    const anchorScrollTops = anchors.map((anchor) => (
+      conversation.scrollTop + anchor.getBoundingClientRect().top - conversationTop - QUESTION_SCROLL_TOP_PADDING
+    ));
+    const anchorIndex = findQuestionAnchorIndex(anchorScrollTops, conversation.scrollTop, direction);
+    if (anchorIndex >= 0) {
+      const top = Math.max(0, Math.min(anchorScrollTops[anchorIndex], conversation.scrollHeight - conversation.clientHeight));
+      followLatestRef.current = false;
+      questionNavigationScrollRef.current = true;
+      conversation.scrollTop = top;
+      scrollStatesRef.current.set(session.id, { top, atBottom: false });
+      questionNavigationFrameRef.current = window.requestAnimationFrame(() => {
+        questionNavigationScrollRef.current = false;
+        questionNavigationFrameRef.current = null;
+      });
+      return true;
+    }
+    if (direction !== "previous" || loadAttempts >= 25) return false;
+    const loadEarlier = conversation.querySelector<HTMLButtonElement>("[data-load-earlier-messages]");
+    if (!loadEarlier) return false;
+    loadEarlier.click();
+    questionNavigationFrameRef.current = window.requestAnimationFrame(() => {
+      questionNavigationFrameRef.current = window.requestAnimationFrame(() => {
+        questionNavigationFrameRef.current = null;
+        jumpToQuestion(direction, loadAttempts + 1);
+      });
+    });
+    return true;
+  }, [session.id]);
+
+  useEffect(() => {
+    if (!props.isActivePane) return undefined;
+    const handleQuestionNavigation = (event: KeyboardEvent) => {
+      const direction = questionNavigationDirection(event);
+      if (!direction || questionNavigationBlocked(event)) return;
+      event.preventDefault();
+      jumpToQuestion(direction);
+    };
+    window.addEventListener("keydown", handleQuestionNavigation);
+    return () => {
+      window.removeEventListener("keydown", handleQuestionNavigation);
+      if (questionNavigationFrameRef.current !== null) window.cancelAnimationFrame(questionNavigationFrameRef.current);
+      questionNavigationFrameRef.current = null;
+    };
+  }, [jumpToQuestion, props.isActivePane]);
 
   const handleDrop = (event: DragEvent<HTMLElement>) => {
     const tabId = event.dataTransfer.getData("text/tab");
@@ -178,6 +238,12 @@ function PaneView(props: PaneViewProps) {
         onScroll={(event) => {
           if (restoringSessionRef.current === session.id) return;
           const element = event.currentTarget;
+          if (questionNavigationScrollRef.current) {
+            questionNavigationScrollRef.current = false;
+            followLatestRef.current = false;
+            scrollStatesRef.current.set(session.id, { top: element.scrollTop, atBottom: false });
+            return;
+          }
           const atBottom = element.scrollHeight - element.scrollTop - element.clientHeight < 80;
           followLatestRef.current = atBottom;
           scrollStatesRef.current.set(session.id, { top: element.scrollTop, atBottom });

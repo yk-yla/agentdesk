@@ -104,17 +104,18 @@ export class SessionMessageController {
     const nextTitle = session.title === "新会话" && !isControlCommand
       ? sessionTitle(titleSource, message.images[0]?.name || "图片会话")
       : session.title;
+    const sentAt = this.now();
     state.updateSession(sessionId, (current) => ({
       ...current,
       errorText: "",
       title: nextTitle,
-      updatedAt: this.now(),
+      updatedAt: sentAt,
       ...(localCommand === "/status" || localCommand === "/mcp"
         ? {}
-        : { status: "working" as const, statusLabel: "正在提交", startedAt: this.now() }),
+        : { status: "working" as const, statusLabel: "正在提交", startedAt: sentAt }),
       messages: current.messages.some((entry) => entry.clientId === clientUserMessageId)
         ? current.messages
-        : [...current.messages, { id: `user-${clientUserMessageId}`, clientId: clientUserMessageId, role: "user", text: message.text, images: message.images }],
+        : [...current.messages, { id: `user-${clientUserMessageId}`, clientId: clientUserMessageId, role: "user", text: message.text, images: message.images, timestamp: sentAt }],
     }));
 
     let threadId = "";

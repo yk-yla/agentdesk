@@ -5,6 +5,7 @@ import type { AgentProvider } from "../shared/agentProtocol";
 import ActivityIcon from "./ActivityIcon";
 import ActivityOutput from "./ActivityOutput";
 import { basename, type Activity, type Message } from "./domain";
+import { formatMessageTimestamp } from "./messageTimestamp";
 
 const MarkdownMessage = lazy(() => import("./MarkdownMessage"));
 
@@ -51,6 +52,7 @@ interface MessageItemProps {
 
 function MessageItem({ message, bridge, provider }: MessageItemProps) {
   const [copied, setCopied] = useState(false);
+  const formattedTimestamp = formatMessageTimestamp(message.timestamp || 0);
 
   const copyMessage = async () => {
     try {
@@ -63,7 +65,11 @@ function MessageItem({ message, bridge, provider }: MessageItemProps) {
   };
 
   return (
-    <article className={`message-row ${message.role}`} aria-label={message.role === "user" ? "你的消息" : message.role === "assistant" ? `${provider === "codex" ? "Codex" : "Claude Code"} 消息` : "系统消息"}>
+    <article
+      className={`message-row ${message.role}`}
+      aria-label={message.role === "user" ? "你的消息" : message.role === "assistant" ? `${provider === "codex" ? "Codex" : "Claude Code"} 消息` : "系统消息"}
+      data-user-message-anchor={message.role === "user" ? "" : undefined}
+    >
       <div className="message-content">
         <div className="message-text">
           <Suspense fallback={<span className="markdown-loading" aria-busy="true">正在加载消息</span>}>
@@ -78,6 +84,9 @@ function MessageItem({ message, bridge, provider }: MessageItemProps) {
           </Suspense>
           {message.streaming ? <span className="stream-caret" /> : null}
         </div>
+        {formattedTimestamp && message.role !== "system" ? (
+          <time className="message-timestamp" dateTime={new Date(message.timestamp || 0).toISOString()}>{formattedTimestamp}</time>
+        ) : null}
         <button
           type="button"
           className="message-copy-button"
@@ -144,7 +153,7 @@ function MessageStackBase({ messages, visibleActivities, displayMode, bridge, cw
   const hiddenActivities = visibleActivities.length - shownActivities.length;
   return (
     <div className="message-stack">
-      {hidden > 0 ? <button className="history-more" onClick={() => setVisibleCount((count) => count + MESSAGE_WINDOW)}>加载更早消息 · 剩余 {hidden}</button> : null}
+      {hidden > 0 ? <button className="history-more" data-load-earlier-messages onClick={() => setVisibleCount((count) => count + MESSAGE_WINDOW)}>加载更早消息 · 剩余 {hidden}</button> : null}
       {shown.map((message, index) => (
         <MemoMessageItem key={`${message.id}:${index}`} message={message} bridge={bridge} provider={provider} />
       ))}

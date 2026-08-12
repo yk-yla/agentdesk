@@ -4,7 +4,7 @@ import type { AppLogger } from "../logger";
 import { logErrorDetails } from "../logger";
 import { randomUUID } from "node:crypto";
 import { normalizeFavoriteSessionSummaries } from "../../shared/favoriteSessions";
-import { normalizeBaseFontSize, normalizeClaudeModelCache, normalizeDisplayMode, normalizeModelContextWindows, normalizeSidebarWidth, normalizeTheme } from "../preferencesStore";
+import { normalizeBaseFontSize, normalizeClaudeModelCache, normalizeDisplayMode, normalizeLastReasoningEfforts, normalizeModelContextWindows, normalizeSidebarWidth, normalizeTheme } from "../preferencesStore";
 
 const AGENT_PROVIDERS = new Set<AgentProvider>(["codex", "claude"]);
 const AGENT_OPERATIONS = new Set<AgentOperation>([
@@ -119,6 +119,7 @@ export function sanitizePreferencesPatch(value: unknown): Partial<DesktopPrefere
       const cache = normalizeClaudeModelCache(patch.claudeModelCache);
       return cache ? { claudeModelCache: cache } : {};
     })() : {}),
+    ...(objectRecord(patch.lastReasoningEfforts) ? { lastReasoningEfforts: normalizeLastReasoningEfforts(patch.lastReasoningEfforts) } : {}),
     ...(objectRecord(patch.workspaceState) ? { workspaceState: patch.workspaceState as JsonObject } : {}),
   };
 }

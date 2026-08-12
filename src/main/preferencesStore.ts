@@ -20,6 +20,7 @@ export const DEFAULT_PREFERENCES: DesktopPreferences = {
   favoriteSessions: [],
   favoriteSessionSummaries: {},
   modelContextWindows: {},
+  lastReasoningEfforts: {},
   theme: "github-dark",
   displayMode: "simple",
   bossKey: DEFAULT_BOSS_KEY,
@@ -27,8 +28,8 @@ export const DEFAULT_PREFERENCES: DesktopPreferences = {
 };
 
 const THEME_IDS: ThemeId[] = [
-  "github-light", "light-owl", "catppuccin-latte", "rose-pine-dawn",
-  "github-dark", "one-dark-pro", "dracula", "tokyo-night", "night-owl", "catppuccin-mocha",
+  "github-light", "modern-light", "light-owl", "catppuccin-latte", "rose-pine-dawn",
+  "github-dark", "modern-dark", "github-dark-dimmed", "one-dark-pro", "dracula", "tokyo-night", "night-owl", "catppuccin-mocha",
 ];
 
 export function normalizeTheme(value: unknown): ThemeId {
@@ -52,6 +53,15 @@ export function normalizeBaseFontSize(value: unknown) {
   return typeof value === "number" && Number.isFinite(value)
     ? Math.max(MIN_BASE_FONT_SIZE, Math.min(MAX_BASE_FONT_SIZE, Math.round(value)))
     : DEFAULT_BASE_FONT_SIZE;
+}
+
+export function normalizeLastReasoningEfforts(value: unknown): NonNullable<DesktopPreferences["lastReasoningEfforts"]> {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return {};
+  const record = value as Record<string, unknown>;
+  return Object.fromEntries((["codex", "claude"] as const).flatMap((provider) => {
+    const effort = typeof record[provider] === "string" ? record[provider].trim() : "";
+    return effort && effort.length <= 32 ? [[provider, effort]] : [];
+  }));
 }
 
 export function normalizeModelContextWindows(value: unknown): NonNullable<DesktopPreferences["modelContextWindows"]> {
@@ -124,6 +134,7 @@ export function normalizePreferences(value: unknown): DesktopPreferences {
     favoriteSessionSummaries: normalizeFavoriteSessionSummaries(parsed.favoriteSessionSummaries),
     modelContextWindows: normalizeModelContextWindows(parsed.modelContextWindows),
     ...(claudeModelCache ? { claudeModelCache } : {}),
+    lastReasoningEfforts: normalizeLastReasoningEfforts(parsed.lastReasoningEfforts),
     trustedClaudeWorkspaces: Array.isArray(parsed.trustedClaudeWorkspaces) ? parsed.trustedClaudeWorkspaces.filter((item): item is string => typeof item === "string").slice(0, 256) : [],
   };
   if (parsed.workspaceState && typeof parsed.workspaceState === "object" && !Array.isArray(parsed.workspaceState)) {

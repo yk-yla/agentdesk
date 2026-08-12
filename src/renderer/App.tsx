@@ -372,7 +372,7 @@ export default function App() {
   const createSessionState = useCallback((cwd: string, options?: { threadId?: string; title?: string; provider?: AgentProvider }) => {
     const id = `session-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
     const provider = options?.provider || "codex";
-    const defaults = newSessionDefaults(provider, providerModelsRef.current[provider], defaultsRef.current, providerCapabilitiesRef.current[provider]);
+    const defaults = newSessionDefaults(provider, providerModelsRef.current[provider], defaultsRef.current, providerCapabilitiesRef.current[provider], preferencesRef.current.lastReasoningEfforts?.[provider]);
     const session = emptySession(id, cwd, defaults.model, defaults.effort, provider);
     session.capabilities = defaults.capabilities;
     session.tokenUsage.total = cachedModelContextWindow(preferencesRef.current, session.model);
@@ -508,6 +508,14 @@ export default function App() {
     const next = await bridge.savePreferences(patch);
     setPreferences((current) => ({ ...current, ...next }));
     setHistory((current) => applyLocalSessionMetadata(current, next));
+  }, [bridge]);
+
+  const rememberProviderEffort = useCallback((provider: AgentProvider, effort: string) => {
+    if (!effort || preferencesRef.current.lastReasoningEfforts?.[provider] === effort) return;
+    const lastReasoningEfforts = { ...preferencesRef.current.lastReasoningEfforts, [provider]: effort };
+    preferencesRef.current = { ...preferencesRef.current, lastReasoningEfforts };
+    setPreferences((current) => ({ ...current, lastReasoningEfforts }));
+    void bridge.savePreferences({ lastReasoningEfforts }).catch(() => undefined);
   }, [bridge]);
 
   const setBossKey = useCallback(async (accelerator: string) => {
@@ -772,6 +780,7 @@ export default function App() {
     });
     if (!session.threadId) {
       settingsCoordinatorRef.current.setConfirmed(sessionId, requested);
+      if (field === "effort") rememberProviderEffort(session.provider, requested.effort);
       return;
     }
     const request = settingsCoordinatorRef.current.enqueue(sessionId, requested, async (target) => {
@@ -791,6 +800,7 @@ export default function App() {
           tokenUsage: tokenUsageForModel(current, requested.model, preferencesRef.current),
           errorText: "",
         }));
+        if (field === "effort") rememberProviderEffort(session.provider, requested.effort);
       }
     } catch (error) {
       if (request.isLatest()) {
@@ -804,7 +814,7 @@ export default function App() {
         }));
       }
     }
-  }, [requestForSession, updateSession]);
+  }, [rememberProviderEffort, requestForSession, updateSession]);
 
   const setCollaborationMode = useCallback((sessionId: string, mode: CollaborationMode) => {
     updateSession(sessionId, (current) => ({ ...current, collaborationMode: mode }));
@@ -1492,7 +1502,8 @@ export default function App() {
       const launchProvider = launchProviderResult.status === "fulfilled" ? launchProviderResult.value : null;
       const value = preferencesResult.status === "fulfilled" ? preferencesResult.value : preferencesRef.current;
       setWorkspace(currentWorkspace);
-      setPreferences((current) => ({ ...current, ...value }));
+      preferencesRef.current = { ...preferencesRef.current, ...value };
+      setPreferences(preferencesRef.current);
       const startupModels = initialProviderModels(value.claudeModelCache, claudeVersionForCache(claudeRuntimeStatusRef.current));
       setProviderModels((current) => ({ ...current, claude: startupModels.claude }));
       setHistory((current) => applyLocalSessionMetadata(current, value));
@@ -1669,7 +1680,7 @@ export default function App() {
 
   useEffect(() => {
     setSessions((current) => Object.fromEntries(Object.entries(current).map(([id, session]) => {
-      const withDefaults = applyProviderModelDefaults(session, providerModels[session.provider], codexDefaults);
+      const withDefaults = applyProviderModelDefaults(session, providerModels[session.provider], codexDefaults, preferences.lastReasoningEfforts?.[session.provider]);
       const model = withDefaults.model;
       if (!model) return [id, session];
       const tokenUsage = tokenUsageForModel(session, model, preferences);

@@ -6,10 +6,13 @@ const SettingsAdvanced = lazy(() => import("./SettingsAdvanced"));
 
 const THEME_OPTIONS: Array<{ id: ThemeId; label: string; swatch: string }> = [
   { id: "github-light", label: "GitHub Light", swatch: "#e8f4ee" },
+  { id: "modern-light", label: "Modern Light", swatch: "#ffffff" },
   { id: "light-owl", label: "Light Owl", swatch: "#fbfbfb" },
   { id: "catppuccin-latte", label: "Catppuccin Latte", swatch: "#eff1f5" },
   { id: "rose-pine-dawn", label: "Rosé Pine Dawn", swatch: "#faf4ed" },
   { id: "github-dark", label: "GitHub Dark", swatch: "#0d1117" },
+  { id: "modern-dark", label: "Modern Dark", swatch: "#1f1f1f" },
+  { id: "github-dark-dimmed", label: "GitHub Dark Dimmed", swatch: "#22272e" },
   { id: "one-dark-pro", label: "One Dark Pro", swatch: "#282c34" },
   { id: "dracula", label: "Dracula", swatch: "#282a36" },
   { id: "tokyo-night", label: "Tokyo Night", swatch: "#1a1b26" },

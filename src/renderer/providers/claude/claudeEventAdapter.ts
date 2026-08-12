@@ -1,6 +1,7 @@
 import type { AgentEventEnvelope, AgentProvider } from "../../../shared/agentProtocol";
 import type { Activity, Message, ModelOption, PendingApproval, SessionState, UserInputQuestion } from "../../domain";
 import { asRecord, numberValue, stringValue } from "../../domain";
+import { timestampFromUnknown } from "../../messageTimestamp";
 
 export interface RoutedClaudeEvent {
   provider: AgentProvider;
@@ -93,13 +94,13 @@ function mergeMessages(snapshot: Message[], current: Message[], preferCurrent: b
   return result;
 }
 
-function upsertAssistant(session: SessionState, id: string, text: string, streaming: boolean) {
+function upsertAssistant(session: SessionState, id: string, text: string, streaming: boolean, timestamp?: number) {
   const existing = session.messages.find((message) => message.id === id);
   if (existing) {
-    if (existing.text === text && existing.streaming === streaming) return;
-    session.messages = session.messages.map((message) => message.id === id ? { ...message, text, streaming } : message);
+    if (existing.text === text && existing.streaming === streaming && (existing.timestamp || !timestamp)) return;
+    session.messages = session.messages.map((message) => message.id === id ? { ...message, text, streaming, timestamp: message.timestamp || timestamp } : message);
   } else if (text) {
-    session.messages = [...session.messages, { id, role: "assistant", text, images: [], streaming }];
+    session.messages = [...session.messages, { id, role: "assistant", text, images: [], streaming, timestamp }];
   }
 }
 
@@ -111,12 +112,12 @@ function lastStreamingAssistantIndex(messages: Message[]) {
   return -1;
 }
 
-function startStreamingAssistant(session: SessionState, id: string) {
+function startStreamingAssistant(session: SessionState, id: string, timestamp?: number) {
   if (!id || session.messages.some((message) => message.id === id)) return;
-  session.messages = [...session.messages, { id, role: "assistant", text: "", images: [], streaming: true }];
+  session.messages = [...session.messages, { id, role: "assistant", text: "", images: [], streaming: true, timestamp }];
 }
 
-function appendStreamingAssistant(session: SessionState, text: string) {
+function appendStreamingAssistant(session: SessionState, text: string, timestamp?: number) {
   if (!text) return;
   const index = lastStreamingAssistantIndex(session.messages);
   if (index >= 0) {
@@ -127,15 +128,15 @@ function appendStreamingAssistant(session: SessionState, text: string) {
     return;
   }
   const id = `claude-stream-${session.activeTurnId || "current"}-${session.messages.length}`;
-  session.messages = [...session.messages, { id, role: "assistant", text, images: [], streaming: true }];
+  session.messages = [...session.messages, { id, role: "assistant", text, images: [], streaming: true, timestamp }];
 }
 
-function finalizeAssistant(session: SessionState, id: string, text: string) {
+function finalizeAssistant(session: SessionState, id: string, text: string, timestamp?: number) {
   const existingIndex = session.messages.findIndex((message) => message.id === id);
   if (existingIndex >= 0) {
     const existing = session.messages[existingIndex];
     if (text) {
-      session.messages = session.messages.map((message, messageIndex) => messageIndex === existingIndex ? { ...message, text, streaming: false } : message);
+      session.messages = session.messages.map((message, messageIndex) => messageIndex === existingIndex ? { ...message, text, streaming: false, timestamp: message.timestamp || timestamp } : message);
     } else if (!existing.text && existing.streaming) {
       session.messages = session.messages.filter((_message, messageIndex) => messageIndex !== existingIndex);
     }
@@ -145,11 +146,11 @@ function finalizeAssistant(session: SessionState, id: string, text: string) {
   const streamingIndex = lastStreamingAssistantIndex(session.messages);
   if (streamingIndex >= 0) {
     session.messages = session.messages.map((message, messageIndex) => messageIndex === streamingIndex
-      ? { ...message, id, text, streaming: false }
+      ? { ...message, id, text, streaming: false, timestamp: message.timestamp || timestamp }
       : message);
     return;
   }
-  upsertAssistant(session, id, text, false);
+  upsertAssistant(session, id, text, false, timestamp);
 }
 
 function upsertActivity(session: SessionState, activity: Activity) {
@@ -322,15 +323,16 @@ export function applyClaudeEvent(source: SessionState, routed: RoutedClaudeEvent
   } else if (routed.envelope.type === "claude/sdkMessage") {
     const type = stringValue(payload.type);
     const subtype = stringValue(payload.subtype);
+    const messageTimestamp = timestampFromUnknown(payload.timestamp) || routed.envelope.receivedAt;
     if (type === "stream_event") {
       const stream = asRecord(payload.event);
       const delta = asRecord(stream.delta);
       if (stream.type === "message_start") {
         const message = asRecord(stream.message);
         const messageId = stringValue(message.id);
-        if (messageId) startStreamingAssistant(session, `claude-message-${messageId}`);
+        if (messageId) startStreamingAssistant(session, `claude-message-${messageId}`, messageTimestamp);
       } else if (stream.type === "content_block_delta" && delta.type === "text_delta") {
-        appendStreamingAssistant(session, stringValue(delta.text));
+        appendStreamingAssistant(session, stringValue(delta.text), messageTimestamp);
       } else if (stream.type === "content_block_start") {
         const block = asRecord(stream.content_block);
         const id = stringValue(block.id);
@@ -349,7 +351,7 @@ export function applyClaudeEvent(source: SessionState, routed: RoutedClaudeEvent
     } else if (type === "assistant") {
       const id = claudeMessageId(payload, `claude-turn-${session.activeTurnId || "current"}`);
       const text = textBlocks(payload.message);
-      finalizeAssistant(session, id, text);
+      finalizeAssistant(session, id, text, messageTimestamp);
       const message = asRecord(payload.message);
       for (const blockValue of Array.isArray(message.content) ? message.content : []) {
         const block = asRecord(blockValue);
@@ -416,7 +418,7 @@ export function hydrateClaudeSession(
       if ((role !== "user" && role !== "assistant") || !text) return;
       const id = claudeMessageId(item, `claude-history-${role}-${index}`);
       if (!byId.has(id)) order.push(id);
-      byId.set(id, { id, role, text, images: [] });
+      byId.set(id, { id, role, text, images: [], timestamp: timestampFromUnknown(item.timestamp) });
     });
     return order.flatMap((id) => byId.get(id) || []);
   })() : session.messages;

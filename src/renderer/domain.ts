@@ -43,6 +43,7 @@ export interface Message {
   role: Role;
   text: string;
   images: ImageAttachment[];
+  timestamp?: number;
   streaming?: boolean;
 }
 

@@ -16,6 +16,10 @@ describe("renderer provider registry", () => {
       effort: "medium",
       capabilities: capabilities.claude,
     });
+    assert.equal(newSessionDefaults("claude", models.claude, { model: "", effort: "" }, capabilities.claude, "xhigh").effort, "xhigh");
+    const configurableCodexModel = { ...model, efforts: ["medium", "high", "xhigh"] };
+    assert.equal(newSessionDefaults("codex", [configurableCodexModel], { model: "codex-test", effort: "medium" }, capabilities.codex, "xhigh").effort, "xhigh");
+    assert.equal(newSessionDefaults("codex", [configurableCodexModel], { model: "codex-test", effort: "medium" }, capabilities.codex, "max").effort, "medium");
     assert.equal(capabilities.claude.images, "supported");
     assert.equal(capabilities.claude.history, "supported");
     assert.equal(capabilities.claude.compact, "temporarilyUnavailable");

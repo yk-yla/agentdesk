@@ -63,7 +63,7 @@ interface RendererProviderAdapter {
 const adapters: Record<AgentProvider, RendererProviderAdapter | undefined> = {
   codex: {
     route: (event) => adaptCodexEvent(event) as RoutedAgentEvent,
-    apply: (session, event) => applyCodexEvent(session, (event.providerEvent as RoutedCodexEvent).message),
+    apply: (session, event) => applyCodexEvent(session, (event.providerEvent as RoutedCodexEvent).message, event.envelope.receivedAt),
     applySubagent: (session, event, nativeSessionId) => applyCodexSubagentEvent(session, (event.providerEvent as RoutedCodexEvent).message, nativeSessionId),
     hydrate: hydrateCodexSession,
     normalizeModel: normalizeCodexModel,
