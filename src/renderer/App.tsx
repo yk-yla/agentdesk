@@ -2073,6 +2073,7 @@ export default function App() {
               {pane.tabIds.map((id) => sessions[id]).filter(Boolean).map((session) => (
                 <button
                   className={`tab ${session.id === pane.activeTabId ? "active" : ""} ${draggingTabId === session.id ? "dragging" : ""} ${tabDropTarget?.paneId === pane.id && tabDropTarget.sessionId === session.id ? `drop-${tabDropTarget.position}` : ""}`}
+                  data-session-id={session.id}
                   draggable
                   title={`${session.title}\n${session.cwd}`}
                   onDragStart={(event: DragEvent<HTMLButtonElement>) => {

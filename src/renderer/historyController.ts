@@ -133,6 +133,14 @@ export class HistoryController {
   }
 
   loadInitial(workspace: string) {
+    if (!workspace.trim() || workspace === "正在连接工作区" || workspace === "工作区不可用") {
+      this.workspace = "";
+      this.historyCursor = null;
+      this.state.setCursor(null);
+      this.historyLoading = false;
+      this.state.setLoading(false);
+      return () => undefined;
+    }
     this.services.log?.("info", "renderer.history_load.started", { workspace });
     this.workspace = workspace;
     this.historyCursor = null;

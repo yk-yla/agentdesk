@@ -93,6 +93,21 @@ describe("history helpers", () => {
 });
 
 describe("HistoryController", () => {
+  it("does not request history before the startup workspace is ready", async () => {
+    let calls = 0;
+    const harness = createHarness(async (provider) => {
+      calls += 1;
+      return listValue(`${provider}-thread`, provider);
+    });
+
+    harness.controller.loadInitial("正在连接工作区");
+    await new Promise<void>((resolve) => setImmediate(resolve));
+
+    assert.equal(calls, 0);
+    assert.equal(harness.loading, false);
+    assert.equal(harness.cursor, null);
+  });
+
   it("loads both Providers and publishes the combined continuation cursor", async () => {
     const harness = createHarness(async (provider) => listValue(`${provider}-thread`, provider, `${provider}-next`));
 

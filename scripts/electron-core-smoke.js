@@ -13,13 +13,26 @@ async page => {
   const activeConversation = () => page.locator('.pane-panel .conversation');
   const newClaude = () => sidebar.locator("button.provider-new-claude").first();
   const newCodex = () => sidebar.locator("button.provider-new-codex").first();
+  const openProvider = async (provider, button) => {
+    const previousSessionId = await page.locator(".tab.active").getAttribute("data-session-id");
+    await button().click({ force: true });
+    await page.waitForFunction(({ expectedProvider, previousId }) => {
+      const activeTab = document.querySelector(".tab.active");
+      const activeInput = document.querySelector('.pane-panel textarea[aria-label="消息输入"]');
+      return Boolean(
+        activeTab?.querySelector(`.provider-mark.${expectedProvider}`)
+        && activeTab.getAttribute("data-session-id")
+        && activeTab.getAttribute("data-session-id") !== previousId
+        && activeInput instanceof HTMLTextAreaElement
+        && !activeInput.disabled,
+      );
+    }, { expectedProvider: provider, previousId: previousSessionId }, { timeout: 10_000 });
+  };
   const openClaude = async () => {
-    await newClaude().click({ force: true });
-    await page.waitForFunction(() => Boolean(document.querySelector(".tab.active .provider-mark.claude")), null, { timeout: 10_000 });
+    await openProvider("claude", newClaude);
   };
   const openCodex = async () => {
-    await newCodex().click({ force: true });
-    await page.waitForFunction(() => Boolean(document.querySelector(".tab.active .provider-mark.codex")), null, { timeout: 10_000 });
+    await openProvider("codex", newCodex);
   };
 
   try {
@@ -243,8 +256,6 @@ async page => {
     assert(/^\d{2}:\d{2}:\d{2}$/.test((await userTimestamp.textContent()) || ""), "用户消息时间格式不正确。" );
     assert(Number(await userTimestamp.evaluate((element) => getComputedStyle(element).opacity)) === 1, "用户消息时间没有常显。" );
     assert(Number(await userCopyButton.evaluate((element) => getComputedStyle(element).opacity)) === 0, "用户消息复制按钮默认可见。" );
-    await userCopyButton.focus();
-    await page.waitForFunction((element) => Number(getComputedStyle(element).opacity) === 1, await userCopyButton.elementHandle(), { timeout: 10_000 });
     await page.waitForFunction(() => {
       const messages = Array.from(document.querySelectorAll(".pane-panel .message-row.assistant")).map((entry) => entry.textContent || "");
       return messages.length === 2
@@ -255,6 +266,12 @@ async page => {
     const streamMessages = await page.locator(".pane-panel .message-row.assistant").allTextContents();
     assert(streamMessages.length === 2, `Claude 同一消息的流式片段被错误拆分：${streamMessages.length}`);
     assert(!streamMessages.some((message) => message.includes("[已截断]")), "Claude 长回复仍被 8 KB 上限截断。" );
+    const stableUserCopyButton = activeConversation().locator(".message-row.user").last().locator(".message-copy-button");
+    await stableUserCopyButton.focus();
+    await page.waitForFunction(() => {
+      const button = document.querySelector(".pane-panel .message-row.user .message-copy-button:focus");
+      return button instanceof HTMLButtonElement && Number(getComputedStyle(button).opacity) === 1;
+    }, null, { timeout: 10_000 });
     const timestampedAssistantMessage = activeConversation().locator(".message-row.assistant").last();
     const assistantTimestamp = timestampedAssistantMessage.locator(".message-timestamp");
     const assistantCopyButton = timestampedAssistantMessage.locator(".message-copy-button");
