@@ -85,6 +85,15 @@ export interface FavoriteSessionSummary {
   updatedAt: number;
 }
 
+export interface CompactionRecord {
+  count: number;
+  eventIds: string[];
+  updatedAt: number;
+}
+
+/** @deprecated 仅用于兼容旧版偏好字段。 */
+export type CodexCompactionRecord = CompactionRecord;
+
 export type ThemeId =
   | "github-light"
   | "modern-dark"
@@ -105,6 +114,11 @@ export interface DesktopPreferences {
   modelContextWindows?: Record<string, ModelContextWindowCacheEntry>;
   claudeModelCache?: ClaudeModelCache;
   lastReasoningEfforts?: Partial<Record<AgentProvider, string>>;
+  /** 斜杠命令和 Skill 的最近使用时间，键为 command:name 或 skill:name。 */
+  recentCommandUsage?: Record<string, number>;
+  compactionCounts?: Record<string, CompactionRecord>;
+  /** @deprecated 旧版本 Codex 专用字段，读取时会合并到 compactionCounts。 */
+  codexCompactionCounts?: Record<string, CodexCompactionRecord>;
   trustedClaudeWorkspaces?: string[];
   workspaceState?: JsonObject;
 }
@@ -219,6 +233,7 @@ export interface CodexBridge {
   getWorkspace(): Promise<string>;
   getLaunchProvider(): Promise<AgentProvider | null>;
   chooseWorkspace(defaultPath?: string): Promise<string | null>;
+  authorizeWorkspace(cwd: string): Promise<string | null>;
   getPreferences(): Promise<DesktopPreferences>;
   getCodexDefaults(): Promise<CodexDefaults>;
   savePreferences(preferences: Partial<DesktopPreferences>): Promise<DesktopPreferences>;
@@ -252,6 +267,7 @@ export interface CodexBridge {
   checkClaudeCodeUpdates(): Promise<ClaudeRuntimeStatus>;
   updateClaudeCode(allowUnverified: boolean): Promise<ClaudeRuntimeStatus>;
   revokeClaudeWorkspace(cwd: string): Promise<ClaudeRuntimeStatus>;
+  trustClaudeWorkspace(cwd: string, purpose: "session" | "plugin"): Promise<ClaudeRuntimeStatus | null>;
   onClaudeRuntimeStatus(listener: (status: ClaudeRuntimeStatus) => void): () => void;
   onMessage(listener: (message: JsonRpcMessage) => void): () => void;
 }

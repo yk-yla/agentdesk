@@ -23,6 +23,7 @@
     "build:renderer": "tsc -p src/tsconfig.json --noEmit && vite build --config src/vite.config.ts",
     "build": "npm run build:main && npm run build:renderer && npm run test",
     "test": "tsc -p src/tsconfig.test.json && node --test build/tests/main/*.test.js build/tests/main/agent/*.test.js build/tests/main/ipc/*.test.js build/tests/main/providers/codex/*.test.js build/tests/main/providers/claude/*.test.js build/tests/renderer/*.test.js build/tests/renderer/agent/*.test.js",
+    "test:claude-plugin-isolated": "npm run build:main && node scripts/claude-plugin-isolated-smoke.js",
     "package": "npm run build && cross-env ELECTRON_MIRROR=https://npmmirror.com/mirrors/electron/ ELECTRON_BUILDER_BINARIES_MIRROR=https://npmmirror.com/mirrors/electron-builder-binaries/ electron-builder --win nsis --publish never",
     "release:github": "npm run build && cross-env ELECTRON_MIRROR=https://npmmirror.com/mirrors/electron/ ELECTRON_BUILDER_BINARIES_MIRROR=https://npmmirror.com/mirrors/electron-builder-binaries/ electron-builder --win nsis --publish always",
     "preview": "vite build --config src/vite.config.ts --mode browser-preview && vite preview --config src/vite.config.ts --mode browser-preview --host 127.0.0.1 --port 4174"

@@ -22,7 +22,7 @@ function formatTime(value: Date, includeSeconds: boolean) {
 export function formatMessageTimestamp(timestamp: number) {
   if (!Number.isFinite(timestamp) || timestamp <= 0) return "";
   const value = new Date(timestamp);
-  return `${value.getFullYear()}-${twoDigits(value.getMonth() + 1)}-${twoDigits(value.getDate())} ${formatTime(value, true)}`;
+  return formatTime(value, true);
 }
 
 export type MessageTimeDivider = { kind: "date" | "time"; label: string };

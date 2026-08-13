@@ -19,10 +19,10 @@ function createHarness(initialLayout: LayoutState = { panes: [{ id: "pane-1", ta
     updateLayout: (updater) => { layout = updater(layout); },
     getSession: (sessionId) => sessions[sessionId],
   }, {
-    createSession: (cwd) => {
+    createSession: (cwd, options) => {
       created += 1;
       const id = `created-${created}`;
-      sessions[id] = emptySession(id, cwd);
+      sessions[id] = emptySession(id, cwd, "", "", options?.provider);
       return id;
     },
     confirmClose: () => true,
@@ -42,6 +42,34 @@ function createHarness(initialLayout: LayoutState = { panes: [{ id: "pane-1", ta
 }
 
 describe("LayoutController", () => {
+  it("activates a target tab in a single pane", () => {
+    const harness = createHarness({
+      panes: [{ id: "pane-1", tabIds: ["s1", "s2"], activeTabId: "s1" }],
+      activePaneId: "pane-1",
+    });
+
+    harness.controller.activateSession("s2");
+
+    assert.equal(harness.layout.activePaneId, "pane-1");
+    assert.equal(harness.layout.panes[0].activeTabId, "s2");
+  });
+
+  it("activates a target tab and its owning pane in a split layout", () => {
+    const harness = createHarness({
+      panes: [
+        { id: "pane-1", tabIds: ["s1"], activeTabId: "s1" },
+        { id: "pane-2", tabIds: ["s2", "s3"], activeTabId: "s2" },
+      ],
+      activePaneId: "pane-1",
+    });
+
+    harness.controller.activateSession("s3");
+
+    assert.equal(harness.layout.activePaneId, "pane-2");
+    assert.equal(harness.layout.panes[1].activeTabId, "s3");
+    assert.equal(harness.layout.panes[0].activeTabId, "s1");
+  });
+
   it("adds and activates tabs only inside their owning pane", () => {
     const harness = createHarness({
       panes: [
@@ -58,6 +86,24 @@ describe("LayoutController", () => {
     assert.equal(harness.layout.panes[0].tabIds.at(-1), created);
     assert.equal(harness.layout.activePaneId, "pane-2");
     assert.equal(harness.layout.panes[0].activeTabId, created);
+  });
+
+  it("adds a same-directory session beside the source tab in its owning pane", () => {
+    const harness = createHarness({
+      panes: [
+        { id: "pane-1", tabIds: ["s1"], activeTabId: "s1" },
+        { id: "pane-2", tabIds: ["s2", "s3"], activeTabId: "s3" },
+      ],
+      activePaneId: "pane-1",
+    });
+
+    const created = harness.controller.addSessionToPane("pane-2", "D:\\two", { provider: "claude" }, "s2");
+
+    assert.deepEqual(harness.layout.panes[1].tabIds, ["s2", created, "s3"]);
+    assert.equal(harness.layout.panes[1].activeTabId, created);
+    assert.equal(harness.layout.activePaneId, "pane-2");
+    assert.equal(harness.sessions[created].cwd, "D:\\two");
+    assert.equal(harness.sessions[created].provider, "claude");
   });
 
   it("reorders a tab and moves it across panes without duplication", () => {
@@ -92,6 +138,16 @@ describe("LayoutController", () => {
     assert.ok(harness.layout.panes.some((pane) => pane.tabIds.includes(closingPane.activeTabId)));
   });
 
+  it("inherits the active Claude Provider when creating split panes", () => {
+    const harness = createHarness();
+    harness.sessions.s1.provider = "claude";
+
+    harness.controller.splitPane("pane-1", 2);
+
+    const created = harness.layout.panes[1].activeTabId;
+    assert.equal(harness.sessions[created].provider, "claude");
+  });
+
   it("keeps a tab whose backend close failed during a batch close", async () => {
     const harness = createHarness({ panes: [{ id: "pane-1", tabIds: ["s1", "s2", "s3"], activeTabId: "s2" }], activePaneId: "pane-1" });
     harness.closeFailures.add("s2");
@@ -113,5 +169,14 @@ describe("LayoutController", () => {
     assert.deepEqual(harness.layout.panes[0].tabIds, ["created-1"]);
     assert.deepEqual(harness.released, ["s1"]);
     assert.equal(harness.sessions["created-1"].cwd, "D:\\one");
+  });
+
+  it("inherits the closed final tab Provider for its replacement", async () => {
+    const harness = createHarness();
+    harness.sessions.s1.provider = "claude";
+
+    assert.equal(await harness.controller.closeActiveTab(), true);
+
+    assert.equal(harness.sessions["created-1"].provider, "claude");
   });
 });

@@ -1,4 +1,4 @@
-import { app, BrowserWindow, dialog, globalShortcut, ipcMain, Menu, net, Notification, safeStorage, shell, Tray } from "electron";
+import { app, BrowserWindow, dialog, globalShortcut, ipcMain, Menu, net, Notification, safeStorage, shell, Tray, type NotificationConstructorOptions } from "electron";
 import { autoUpdater } from "electron-updater";
 import { spawnSync } from "node:child_process";
 import { existsSync, mkdirSync, promises as fsPromises, readFileSync, statSync, writeFileSync } from "node:fs";
@@ -11,7 +11,7 @@ import type { CodexDefaults, HandoffPackage, JsonRpcMessage, SavedImage, SavedTe
 import { createBackendRegistry } from "./agent/backendRegistry";
 import { prepareAgentRequest } from "./agent/requestAdapterRegistry";
 import { writeTextFileAtomic } from "./atomicFile";
-import { normalizeDesktopNotification } from "./desktopNotification";
+import { DesktopNotificationRetention, normalizeDesktopNotification } from "./desktopNotification";
 import { CoalescingAsyncTask } from "./asyncOperation";
 import { canonicalPath, isExecutableLocalPath, isWithinDirectory } from "./localPathPolicy";
 import { CodexBackend } from "./providers/codex/CodexBackend";
@@ -21,7 +21,7 @@ import type { ClaudeGatewayFixtureKind, ClaudeLifecycleFixtureKind } from "./pro
 import { prepareClaudeTurnParams } from "./providers/claude/claudeImageInput";
 import { ClaudeWorkerHost } from "./providers/claude/claudeWorkerHost";
 import { readClaudeCredentials } from "./providers/claude/claudeCredentials";
-import { replaceTrustedWorkspaces, revokeWorkspace, trustedWorkspaces } from "./providers/claude/claudeWorkspaceTrust";
+import { replaceTrustedWorkspaces, revokeWorkspace, trustedWorkspaces, trustWorkspace } from "./providers/claude/claudeWorkspaceTrust";
 import { managedClaudeExecutablePath } from "./providers/claude/claudeUpdater";
 import { trustedThreadWorkspaces } from "./threadWorkspaceAuthorization";
 import { resolveExecutableFromPath } from "./executablePath";
@@ -36,12 +36,13 @@ import { registerDesktopIpc } from "./ipc/registerDesktopIpc";
 import { FileLogger, logErrorDetails } from "./logger";
 import { launchWindowsTerminal } from "./windowsTerminal";
 import { requestedProviderFromArgs, requestedWorkspaceFromArgs } from "./workspaceArgs";
+import { WorkspaceAuthorizationRegistry, type WorkspaceAuthorizationSource } from "./workspaceAuthorizationRegistry";
 
 const MAX_AUTHORIZED_LOCAL_PATHS = 4_096;
 const MAX_AUTHORIZED_WORKSPACE_PATHS = 64;
 const MAX_ATTACHMENT_FILES = 10_000;
 const MAX_ATTACHMENT_STORAGE_BYTES = 1024 * 1024 * 1024;
-const backendShutdownCoordinator = new ShutdownCoordinator();
+const backendShutdownCoordinator = new ShutdownCoordinator(35_000);
 let workspacePath = resolveWorkspace(process.argv);
 let claudeGatewayFixture: { kind: ClaudeGatewayFixtureKind; baseUrl: string; timeoutMs?: number } | null = null;
 let claudeGatewayFixtureServer: Server | null = null;
@@ -72,6 +73,7 @@ function readCodexDefaults(): CodexDefaults {
 
 const preferencesStore = new PreferencesStore(() => path.join(app.getPath("userData"), "preferences.json"));
 const appLogger = new FileLogger(() => path.join(app.getPath("userData"), "logs"));
+const desktopNotificationRetention = new DesktopNotificationRetention<Notification>();
 
 process.on("uncaughtExceptionMonitor", (error) => appLogger.log("error", "process.uncaught_exception", logErrorDetails(error)));
 process.on("unhandledRejection", (reason) => appLogger.log("error", "process.unhandled_rejection", reason instanceof Error ? logErrorDetails(reason) : { reason: String(reason) }));
@@ -91,6 +93,37 @@ const windowLifecycle = new WindowLifecycle({
   onSecondInstance: (listener) => { app.on("second-instance", (_event, argv) => listener(argv)); },
 });
 
+function showRetainedDesktopNotification(options: NotificationConstructorOptions, onClick?: () => void) {
+  if (!Notification.isSupported()) return false;
+  let notification: Notification | null = null;
+  try {
+    notification = new Notification(options);
+    const release = () => {
+      if (notification) desktopNotificationRetention.release(notification);
+    };
+    notification.on("click", () => {
+      release();
+      onClick?.();
+    });
+    notification.on("failed", (_event, error) => {
+      release();
+      appLogger.log("warn", "notification.failed", { error });
+    });
+    notification.on("close", (event) => {
+      // Windows may keep a timed-out toast in Action Center. Retain it so a
+      // later click still reaches Electron; the bounded retention handles it.
+      if (event.reason !== "timedOut") release();
+    });
+    desktopNotificationRetention.retain(notification);
+    notification.show();
+    return true;
+  } catch (error) {
+    if (notification) desktopNotificationRetention.release(notification);
+    appLogger.log("warn", "notification.show_failed", logErrorDetails(error));
+    return false;
+  }
+}
+
 function attachmentsPath() {
   const directory = path.join(app.getPath("userData"), "attachments");
   mkdirSync(directory, { recursive: true });
@@ -99,18 +132,12 @@ function attachmentsPath() {
 
 const authorizedLocalPaths = new Set<string>();
 const authorizedClaudeImagePaths = new Set<string>();
-const authorizedWorkspacePaths = new Set<string>();
+const authorizedWorkspacePaths = new WorkspaceAuthorizationRegistry(MAX_AUTHORIZED_WORKSPACE_PATHS);
 
-function registerAuthorizedWorkspacePath(directory: string) {
+function registerAuthorizedWorkspacePath(directory: string, source: WorkspaceAuthorizationSource = "explicit") {
   if (!existingDirectory(directory)) return;
   const resolved = canonicalPath(directory);
-  authorizedWorkspacePaths.delete(resolved);
-  authorizedWorkspacePaths.add(resolved);
-  while (authorizedWorkspacePaths.size > MAX_AUTHORIZED_WORKSPACE_PATHS) {
-    const oldest = authorizedWorkspacePaths.values().next().value as string | undefined;
-    if (!oldest) break;
-    authorizedWorkspacePaths.delete(oldest);
-  }
+  authorizedWorkspacePaths.register(resolved, source);
 }
 
 function registerAuthorizedLocalPath(filePath: string) {
@@ -153,13 +180,13 @@ function registerAuthorizedImageReferences(value: unknown) {
 }
 
 function registerAuthorizedThreadWorkspaces(method: string, payload: unknown) {
-  trustedThreadWorkspaces(method, payload).forEach(registerAuthorizedWorkspacePath);
+  trustedThreadWorkspaces(method, payload).forEach((directory) => registerAuthorizedWorkspacePath(directory, "provider"));
 }
 
 function isAllowedLocalPath(filePath: string) {
   const resolved = canonicalPath(filePath);
   return isWithinDirectory(resolved, attachmentsPath())
-    || [...authorizedWorkspacePaths].some((directory) => isWithinDirectory(resolved, directory))
+    || authorizedWorkspacePaths.paths().some((directory) => isWithinDirectory(resolved, directory))
     || authorizedLocalPaths.has(resolved);
 }
 
@@ -171,7 +198,6 @@ async function closeAllBackendsForExit() {
         { name: "Provider", run: () => backendManager.close() },
         { name: "已跟踪进程", run: () => processSupervisor.terminateAll() },
         { name: "Claude 网关夹具", run: () => closeClaudeGatewayFixture() },
-        { name: "Codex app-server 进程树", run: () => codexCliUpdateManager.stopAllAppServers() },
       ]);
       appLogger.log("info", "app.shutdown.completed");
     } catch (error) {
@@ -195,9 +221,56 @@ const desktopUpdateManager = new DesktopUpdateManager({
 });
 
 function rememberWorkspace(directory: string) {
-  const resolved = path.resolve(directory);
-  registerAuthorizedWorkspacePath(resolved);
-  return preferencesStore.write({ lastWorkspace: resolved, recentWorkspaces: [] });
+  return preferencesStore.write({ lastWorkspace: path.resolve(directory), recentWorkspaces: [] });
+}
+
+async function confirmWorkspaceAuthorization(cwdValue: unknown) {
+  if (typeof cwdValue !== "string") throw new Error("工作区无效。");
+  const cwd = canonicalPath(cwdValue);
+  if (!existsSync(cwd) || !statSync(cwd).isDirectory()) throw new Error("工作区不存在。");
+  if (authorizedWorkspacePaths.has(cwd)) return cwd;
+  const result = await dialog.showMessageBox({
+    type: "warning",
+    buttons: ["取消", "允许访问"],
+    defaultId: 0,
+    cancelId: 0,
+    noLink: true,
+    title: "允许访问工作区",
+    message: "AgentDesk 将访问以下目录中的本地文件：",
+    detail: cwd,
+  });
+  if (result.response !== 1) return null;
+  registerAuthorizedWorkspacePath(cwd);
+  rememberWorkspace(cwd);
+  return cwd;
+}
+
+async function confirmClaudeWorkspaceTrust(input: unknown) {
+  const value = input && typeof input === "object" && !Array.isArray(input) ? input as Record<string, unknown> : {};
+  if (typeof value.cwd !== "string" || (value.purpose !== "session" && value.purpose !== "plugin")) throw new Error("Claude 工作区授权参数无效。");
+  const cwd = canonicalPath(value.cwd);
+  if (!existsSync(cwd) || !statSync(cwd).isDirectory()) throw new Error("Claude 工作区不存在。");
+  if (!authorizedWorkspacePaths.has(cwd)) {
+    const authorized = await confirmWorkspaceAuthorization(cwd);
+    if (!authorized) return null;
+  }
+  if (trustedWorkspaces().some((entry) => canonicalPath(entry) === cwd)) return claudeUpdateManager.currentStatus();
+  const purpose = value.purpose === "plugin" ? "插件和市场操作" : "会话";
+  const result = await dialog.showMessageBox({
+    type: "warning",
+    buttons: ["取消", "信任并继续"],
+    defaultId: 0,
+    cancelId: 0,
+    noLink: true,
+    title: "信任 Claude Code 工作区",
+    message: `Claude Code ${purpose}将使用以下目录：`,
+    detail: `${cwd}\n\n项目配置可能启动 Hooks、MCP、插件或其他进程。仅在你信任此目录内容时继续。`,
+  });
+  if (result.response !== 1) return null;
+  trustWorkspace(cwd);
+  const workspaces = trustedWorkspaces();
+  preferencesStore.write({ trustedClaudeWorkspaces: workspaces });
+  return claudeUpdateManager.setStatus({ trustedWorkspaces: workspaces, message: "已信任 Claude 工作区。" });
 }
 
 async function closeClaudeGatewayFixture() {
@@ -470,12 +543,14 @@ function claudeWorkerPath() {
     : path.join(__dirname, "providers", "claude", "claudeWorker.mjs");
 }
 
-const claudeWorkerHost = new ClaudeWorkerHost(claudeWorkerPath);
+const claudeWorkerHost = new ClaudeWorkerHost(claudeWorkerPath, {
+  reportCleanupFailure: (message) => appLogger.log("error", "claude.worker.cleanup_failed", { message }),
+});
 let claudeBackend: ClaudeBackend;
 const backendManager = createBackendRegistry([new CodexBackend(codexAppServer), (claudeBackend = new ClaudeBackend(claudeWorkerHost, undefined, (workspaces) => {
   preferencesStore.write({ trustedClaudeWorkspaces: workspaces });
   claudeUpdateManager?.setStatus({ trustedWorkspaces: workspaces });
-}, readClaudeCredentialsForQuery, () => claudeGatewayFixture || claudeLifecycleFixture ? { kind: claudeGatewayFixture?.kind || "offline", ...(claudeGatewayFixture?.timeoutMs ? { timeoutMs: claudeGatewayFixture.timeoutMs } : {}), ...(claudeLifecycleFixture ? { lifecycle: claudeLifecycleFixture } : {}) } : undefined))], appLogger);
+}, readClaudeCredentialsForQuery, () => claudeGatewayFixture || claudeLifecycleFixture ? { kind: claudeGatewayFixture?.kind || "offline", ...(claudeGatewayFixture?.timeoutMs ? { timeoutMs: claudeGatewayFixture.timeoutMs } : {}), ...(claudeLifecycleFixture ? { lifecycle: claudeLifecycleFixture } : {}) } : undefined))], appLogger, (cwd) => authorizedWorkspacePaths.has(canonicalPath(cwd)));
 
 claudeUpdateManager = new ClaudeUpdateManager({
   appPath: () => app.getAppPath(),
@@ -492,10 +567,7 @@ codexCliUpdateManager = new CodexCliUpdateManager({
   isQuitting: () => windowLifecycle.isQuitting,
   emitStatus: (status) => windowLifecycle.send("agentdesk:cli-update-status-changed", status),
   notify: (title, body) => {
-    if (!Notification.isSupported()) return;
-    const notification = new Notification({ title, body });
-    notification.on("click", () => windowLifecycle.show());
-    notification.show();
+    showRetainedDesktopNotification({ title, body }, () => windowLifecycle.show());
   },
 });
 
@@ -506,6 +578,7 @@ const hasLock = windowLifecycle.acquireSingleInstance((argv) => {
   const nextWorkspace = requestedWorkspace(argv);
   const nextProvider = requestedProviderFromArgs(argv);
   if (nextWorkspace) {
+    registerAuthorizedWorkspacePath(nextWorkspace);
     rememberWorkspace(nextWorkspace);
     emitToRenderer({ method: "client/open-workspace", params: { workspace: nextWorkspace, ...(nextProvider ? { provider: nextProvider } : {}) } });
   }
@@ -516,13 +589,11 @@ if (hasLock) {
     const explicitWorkspace = requestedWorkspace(process.argv);
     const startupPreferences = preferencesStore.read();
     replaceTrustedWorkspaces(startupPreferences.trustedClaudeWorkspaces || []);
-    const previousWorkspace = startupPreferences.lastWorkspace;
-    workspacePath = explicitWorkspace || (previousWorkspace && existingDirectory(previousWorkspace)) || workspacePath;
+    workspacePath = explicitWorkspace || workspacePath;
     authorizedWorkspacePaths.clear();
     registerAuthorizedWorkspacePath(workspacePath);
-    startupPreferences.favoriteWorkspaces.forEach(registerAuthorizedWorkspacePath);
     rememberWorkspace(workspacePath);
-    appLogger.log("info", "workspace.selected", { workspace: workspacePath, explicit: Boolean(explicitWorkspace), restored: Boolean(previousWorkspace) });
+    appLogger.log("info", "workspace.selected", { workspace: workspacePath, explicit: Boolean(explicitWorkspace), restored: false });
     registerDesktopIpc(ipcMain, {
       logger: appLogger,
       workspace: {
@@ -532,9 +603,11 @@ if (hasLock) {
           const result = await dialog.showOpenDialog({ properties: ["openDirectory"], defaultPath: defaultPath || workspacePath });
           if (result.canceled || !result.filePaths[0]) return null;
           const selected = path.resolve(result.filePaths[0]);
+          registerAuthorizedWorkspacePath(selected);
           rememberWorkspace(selected);
           return selected;
         },
+        authorize: confirmWorkspaceAuthorization,
       },
       preferences: preferencesStore,
       bossKey: {
@@ -591,16 +664,13 @@ if (hasLock) {
         },
       },
       showNotification: (input) => {
-        if (!Notification.isSupported()) return false;
         const normalized = normalizeDesktopNotification(input);
         if (!normalized) return false;
-        const notification = new Notification({ title: normalized.title, ...(normalized.body ? { body: normalized.body } : {}) });
-        notification.on("click", () => {
+        return showRetainedDesktopNotification({ title: normalized.title, ...(normalized.body ? { body: normalized.body } : {}) }, () => {
+          appLogger.log("info", "notification.activated", { sessionId: normalized.sessionId, provider: normalized.provider });
           windowLifecycle.show();
           emitToRenderer({ method: "client/activate-session", params: { sessionId: normalized.sessionId } });
         });
-        notification.show();
-        return true;
       },
       window: {
         state: () => windowLifecycle.currentState(),
@@ -624,8 +694,10 @@ if (hasLock) {
         status: () => claudeUpdateManager.currentStatus(),
         checkUpdate: () => claudeUpdateManager.check(),
         installUpdate: (allowUnverified) => claudeUpdateManager.update(allowUnverified),
-        revokeWorkspace: (cwd) => {
+        trustWorkspace: confirmClaudeWorkspaceTrust,
+        revokeWorkspace: async (cwd) => {
           if (typeof cwd !== "string") throw new Error("Claude 工作区无效。");
+          await claudeBackend.revokeWorkspace(cwd);
           revokeWorkspace(cwd);
           const workspaces = trustedWorkspaces();
           preferencesStore.write({ trustedClaudeWorkspaces: workspaces });

@@ -191,6 +191,7 @@ export interface SessionState {
   subagents: SubagentState[];
   tokenUsage: TokenUsage;
   compactionCount: number;
+  compactionEventIds: string[];
   detailsOpen: boolean;
   detailView: "activity" | "raw" | "goal" | "plan" | "agents";
 }
@@ -318,7 +319,7 @@ export function emptySession(id: string, cwd: string, model = "", effort = "", p
   return {
     id, provider, queryGeneration: 0, capabilities: { ...EMPTY_AGENT_CAPABILITIES }, threadId: null, cwd, title: "新会话", createdAt: now, updatedAt: now, messages: [], activities: [],
     model, effort, collaborationMode: "default", status: "idle", statusLabel: "就绪", activeTurnId: null, startedAt: null, errorText: "", retryState: null, pendingApprovals: [], goal: null, plan: null, subagents: [],
-    tokenUsage: { used: 0, total: null }, compactionCount: 0, detailsOpen: false, detailView: "activity",
+    tokenUsage: { used: 0, total: null }, compactionCount: 0, compactionEventIds: [], detailsOpen: false, detailView: "activity",
   };
 }
 

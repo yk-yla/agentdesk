@@ -49,6 +49,11 @@ describe("ClaudeWorkerHost", () => {
       const marker = ${JSON.stringify(marker)};
       let pendingCount = 0;
       parentPort.on("message", message => {
+        if (message.type === "close") {
+          parentPort.postMessage({ type: "cleanupComplete" });
+          parentPort.close();
+          return;
+        }
         if (!existsSync(marker)) {
           pendingCount += 1;
           if (pendingCount === 2) {
@@ -100,5 +105,64 @@ describe("ClaudeWorkerHost", () => {
     }
     assert.equal(existsSync(marker), true);
     await host.close();
+  });
+
+  it("waits for normal cleanup completion before closing", async (test) => {
+    const directory = mkdtempSync(path.join(tmpdir(), "agentdesk-worker-cleanup-"));
+    test.after(() => rmSync(directory, { recursive: true, force: true }));
+    const marker = path.join(directory, "cleanup-complete");
+    const workerFile = path.join(directory, "worker.mjs");
+    writeFileSync(workerFile, `
+      import { parentPort } from "node:worker_threads";
+      import { writeFileSync } from "node:fs";
+      const marker = ${JSON.stringify(marker)};
+      parentPort.on("message", message => {
+        if (message.requestId) parentPort.postMessage({ type: "response", requestId: message.requestId, result: {} });
+        if (message.type !== "close") return;
+        setTimeout(() => {
+          writeFileSync(marker, "done");
+          parentPort.postMessage({ type: "cleanupComplete" });
+          parentPort.close();
+        }, 100);
+      });
+    `);
+    const host = new ClaudeWorkerHost(() => workerFile);
+    await host.request({ type: "listSessions", cwd: directory, limit: 1, offset: 0, includeWorktrees: false });
+    await host.close();
+    assert.equal(existsSync(marker), true);
+  });
+
+  it("reports cleanup failure and timeout before forcing termination", async (test) => {
+    const directory = mkdtempSync(path.join(tmpdir(), "agentdesk-worker-cleanup-failure-"));
+    test.after(() => rmSync(directory, { recursive: true, force: true }));
+    const failures: string[] = [];
+    const createWorker = (name: string, closeBody: string) => {
+      const workerFile = path.join(directory, `${name}.mjs`);
+      writeFileSync(workerFile, `
+        import { parentPort } from "node:worker_threads";
+        parentPort.on("message", message => {
+          if (message.requestId) parentPort.postMessage({ type: "response", requestId: message.requestId, result: {} });
+          if (message.type === "close") { ${closeBody} }
+        });
+      `);
+      return workerFile;
+    };
+    const failureHost = new ClaudeWorkerHost(
+      () => createWorker("failure", `parentPort.postMessage({ type: "cleanupComplete", error: "fixture cleanup failed" });`),
+      { cleanupTimeoutMs: 200, reportCleanupFailure: (message) => failures.push(message) },
+    );
+    await failureHost.request({ type: "listSessions", cwd: directory, limit: 1, offset: 0, includeWorktrees: false });
+    await failureHost.close();
+
+    const timeoutWorker = createWorker("timeout", "");
+    const timeoutHost = new ClaudeWorkerHost(
+      () => timeoutWorker,
+      { cleanupTimeoutMs: 50, reportCleanupFailure: (message) => failures.push(message) },
+    );
+    await timeoutHost.request({ type: "listSessions", cwd: directory, limit: 1, offset: 0, includeWorktrees: false });
+    await timeoutHost.close();
+
+    assert.match(failures[0] || "", /fixture cleanup failed/);
+    assert.match(failures[1] || "", /清理超时/);
   });
 });

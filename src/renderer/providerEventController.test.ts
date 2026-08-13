@@ -19,6 +19,9 @@ function createHarness(initialSessions?: Record<string, SessionState>) {
   const openedWorkspaces: Array<{ workspace: string; provider?: AgentProvider }> = [];
   const rejectedStarts: string[] = [];
   const resolvedStarts: string[] = [];
+  const rememberedCompactions: string[] = [];
+  const skillReloadProviders: AgentProvider[] = [];
+  const activatedSessions: string[] = [];
   let frame: (() => void) | null = null;
   let frameRequests = 0;
 
@@ -51,13 +54,14 @@ function createHarness(initialSessions?: Record<string, SessionState>) {
       clearSession: () => undefined,
       recoverProvider: (provider) => { recovered.push(provider); },
       closeActiveTab: () => undefined,
-      reloadSkills: () => undefined,
-      activateSession: () => undefined,
+      reloadSkills: (provider) => { skillReloadProviders.push(provider); },
+      activateSession: (sessionId) => { activatedSessions.push(sessionId); },
       openWorkspace: (workspace, provider) => { openedWorkspaces.push({ workspace, provider }); },
       adoptStartedThread: () => "thread",
       loadSkills: () => undefined,
       updateProviderModels: (provider, models) => { providerModels.push({ provider, ids: models.map((model) => model.id) }); },
       rememberModelContextWindow: () => undefined,
+      rememberCompaction: (_sessionId, routed) => { rememberedCompactions.push(routed.nativeSessionId || ""); },
       appendRawEvent: (sessionId, type) => { raw.push({ sessionId, type }); },
       showNotification: (session) => { notifications.push(session.id); },
       isDocumentFocused: () => true,
@@ -80,6 +84,9 @@ function createHarness(initialSessions?: Record<string, SessionState>) {
     openedWorkspaces,
     rejectedStarts,
     resolvedStarts,
+    rememberedCompactions,
+    skillReloadProviders,
+    activatedSessions,
     get frame() { return frame; },
     get frameRequests() { return frameRequests; },
   };
@@ -109,6 +116,33 @@ describe("ProviderEventController", () => {
     assert.equal(harness.sessions.session.messages.length, 0);
     harness.controller.flush();
     assert.equal(harness.controller.captureVersion("session").event, 2);
+  });
+
+  it("persists completed Codex compactions through the event service", () => {
+    const harness = createHarness();
+
+    harness.controller.handleEnvelope(event("item/completed", {
+      threadId: "thread",
+      item: { id: "compact-1", type: "contextCompaction" },
+    }));
+
+    assert.deepEqual(harness.rememberedCompactions, ["thread"]);
+    assert.equal(harness.sessions.session.compactionCount, 1);
+  });
+
+  it("persists Claude compaction boundaries through the same event service", () => {
+    const session = Object.assign(emptySession("session", "D:\\work", "", "", "claude"), { threadId: "thread" });
+    const harness = createHarness({ session });
+
+    harness.controller.handleEnvelope(event("claude/sdkMessage", {
+      type: "system",
+      subtype: "compact_boundary",
+      uuid: "compact-1",
+      nativeSessionId: "thread",
+    }, { provider: "claude", sessionId: "session", queryGeneration: 1 }));
+
+    assert.deepEqual(harness.rememberedCompactions, ["thread"]);
+    assert.equal(harness.sessions.session.compactionCount, 1);
   });
 
   it("ignores terminal side effects from an older Query generation", () => {
@@ -154,6 +188,14 @@ describe("ProviderEventController", () => {
     assert.deepEqual(harness.providerModels, [{ provider: "claude", ids: ["sonnet"] }]);
   });
 
+  it("reloads skills only for the Provider that reported a change", () => {
+    const harness = createHarness();
+
+    harness.controller.handleEnvelope(event("skills/changed"));
+
+    assert.deepEqual(harness.skillReloadProviders, ["codex"]);
+  });
+
   it("holds an early thread start until the matching client session adopts it", () => {
     const session = Object.assign(emptySession("session", "D:\\work"), { capabilities: { ...CODEX_CAPABILITIES } });
     const harness = createHarness({ session });
@@ -185,5 +227,14 @@ describe("ProviderEventController", () => {
     harness.controller.handleEnvelope(event("client/open-workspace", { workspace: "D:\\target", provider: "claude" }));
 
     assert.deepEqual(harness.openedWorkspaces, [{ workspace: "D:\\target", provider: "claude" }]);
+  });
+
+  it("activates an open session from a desktop notification", () => {
+    const harness = createHarness();
+
+    harness.controller.handleEnvelope(event("client/activate-session", { sessionId: "session" }));
+    harness.controller.handleEnvelope(event("client/activate-session", { sessionId: "closed" }));
+
+    assert.deepEqual(harness.activatedSessions, ["session"]);
   });
 });

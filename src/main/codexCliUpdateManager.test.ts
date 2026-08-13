@@ -42,7 +42,7 @@ describe("CodexCliUpdateManager", () => {
           readInstalledVersion: async () => installed,
           readLatestVersion: async () => "1.1.0",
           installVersion: async (version) => { installed = version; },
-          stopAppServers: async () => 1,
+          readAppServerProcesses: async () => [],
         },
       });
 
@@ -51,6 +51,47 @@ describe("CodexCliUpdateManager", () => {
       assert.equal(restarts, 1);
       assert.deepEqual(notifications, ["Codex CLI 已更新"]);
       assert.equal(manager.active, false);
+      manager.dispose();
+    } finally {
+      rmSync(directory, { recursive: true, force: true });
+    }
+  });
+
+  it("blocks updates without terminating an external app-server", async () => {
+    const directory = mkdtempSync(path.join(tmpdir(), "agentdesk-codex-external-"));
+    let closeCount = 0;
+    let installCount = 0;
+    let installed = "1.0.0";
+    try {
+      const manager = new CodexCliUpdateManager({
+        processSupervisor: new ProcessSupervisor(async () => undefined),
+        appServer: {
+          isRunning: true,
+          close: async () => { closeCount += 1; },
+          ensureStarted: async () => undefined,
+        },
+        userDataPath: () => directory,
+        isQuitting: () => false,
+        emitStatus: () => undefined,
+        notify: () => undefined,
+        environment: {},
+        operations: {
+          readInstalledVersion: async () => installed,
+          readLatestVersion: async () => "1.1.0",
+          installVersion: async (version) => { installCount += 1; installed = version; },
+          readAppServerProcesses: async () => [
+            { pid: 9001, parentPid: 0, name: "codex.exe", commandLine: "codex.exe app-server" },
+          ],
+        },
+      });
+
+      await manager.check(true);
+      const status = await manager.update();
+
+      assert.equal(status.phase, "error");
+      assert.match(status.message, /非 AgentDesk 启动/);
+      assert.equal(closeCount, 1);
+      assert.equal(installCount, 0);
       manager.dispose();
     } finally {
       rmSync(directory, { recursive: true, force: true });

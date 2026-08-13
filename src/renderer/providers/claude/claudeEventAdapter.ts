@@ -23,7 +23,6 @@ function sdkPayload(envelope: AgentEventEnvelope) {
 export function adaptClaudeEvent(envelope: AgentEventEnvelope): RoutedClaudeEvent {
   const payload = sdkPayload(envelope);
   const type = stringValue(payload.type);
-  const subtype = stringValue(payload.subtype);
   const nativeSessionId = stringValue(payload.nativeSessionId, stringValue(payload.session_id)) || undefined;
   const isResult = envelope.type === "claude/sdkMessage" && type === "result";
   const kind: RoutedClaudeEvent["kind"] = envelope.type === "claude/sessionStarted"
@@ -70,6 +69,11 @@ function claudeMessageId(value: ReturnType<typeof asRecord>, fallback: string) {
   if (messageId) return `claude-message-${messageId}`;
   const uuid = stringValue(value.uuid);
   return uuid ? `claude-message-${uuid}` : fallback;
+}
+
+function compactionEventId(payload: ReturnType<typeof asRecord>, fallback = "") {
+  const id = stringValue(payload.uuid, stringValue(payload.id));
+  return id || fallback ? `claude-compaction-${id || fallback}` : "";
 }
 
 function claudeToolKind(name: string): Activity["kind"] {
@@ -266,7 +270,7 @@ export function applyClaudeEvent(source: SessionState, routed: RoutedClaudeEvent
     session.queryGeneration = Number(routed.envelope.queryGeneration);
   }
   const payload = sdkPayload(routed.envelope);
-  if (routed.envelope.type === "claude/queryClosed") {
+  if (routed.envelope.type === "claude/queryClosed" || routed.envelope.type === "claude/queryRestarted") {
     session.status = "idle";
     session.statusLabel = "已断开，可继续恢复";
     session.activeTurnId = null;
@@ -385,7 +389,11 @@ export function applyClaudeEvent(source: SessionState, routed: RoutedClaudeEvent
       session.messages = session.messages.map((message) => message.streaming ? { ...message, streaming: false } : message);
       settleRunningActivities(session, failed ? "failed" : "completed", failed ? "随失败回合结束。" : "随回合结束。");
     } else if (type === "system" && subtype === "compact_boundary") {
-      session.compactionCount += 1;
+      const eventId = compactionEventId(payload, `${routed.envelope.queryGeneration || 0}-${routed.envelope.receivedAt}`);
+      if (!eventId || !session.compactionEventIds.includes(eventId)) {
+        session.compactionCount += 1;
+        if (eventId) session.compactionEventIds = [...session.compactionEventIds, eventId].slice(-64);
+      }
     } else if (type === "system" && subtype === "init") {
       const resolvedModel = stringValue(payload.model);
       if (resolvedModel) {
@@ -401,11 +409,12 @@ export function applyClaudeEvent(source: SessionState, routed: RoutedClaudeEvent
 export function hydrateClaudeSession(
   session: SessionState,
   value: unknown,
-  options: { preserveRealtime?: boolean; preserveLifecycle?: boolean } = {},
+  options: { preserveRealtime?: boolean; preserveLifecycle?: boolean; persistedCompactionCount?: number; persistedCompactionEventIds?: string[] } = {},
 ): SessionState {
   const thread = asRecord(value);
   const historyModel = stringValue(thread.model);
   let compactionCount = session.compactionCount;
+  const historicalCompactionEventIds: string[] = [];
   const snapshotMessages = Array.isArray(thread.messages) ? (() => {
     const order: string[] = [];
     const byId = new Map<string, Message>();
@@ -413,7 +422,11 @@ export function hydrateClaudeSession(
     thread.messages.forEach((entry, index) => {
       const item = asRecord(entry);
       const role = stringValue(item.type);
-      if (role === "system" && stringValue(item.subtype) === "compact_boundary") compactionCount += 1;
+      if (role === "system" && stringValue(item.subtype) === "compact_boundary") {
+        compactionCount += 1;
+        const eventId = compactionEventId(item, `history-${index}`);
+        if (eventId) historicalCompactionEventIds.push(eventId);
+      }
       const text = textBlocks(item.message);
       if ((role !== "user" && role !== "assistant") || !text) return;
       const id = claudeMessageId(item, `claude-history-${role}-${index}`);
@@ -431,7 +444,12 @@ export function hydrateClaudeSession(
     title: stringValue(thread.title, session.title),
     ...(historyModel && !session.resumed ? { model: historyModel, resolvedModel: historyModel } : {}),
     messages: mergeMessages(snapshotMessages, session.messages, preserveRealtime),
-    compactionCount: Math.max(compactionCount, preserveRealtime ? session.compactionCount : 0),
+    compactionCount: Math.max(compactionCount, options.persistedCompactionCount || 0, preserveRealtime ? session.compactionCount : 0),
+    compactionEventIds: [...new Set([
+      ...(options.persistedCompactionEventIds || []),
+      ...(preserveRealtime ? session.compactionEventIds : []),
+      ...historicalCompactionEventIds,
+    ])].slice(-64),
     resumed: true,
     ...(preserveLifecycle ? {} : {
       status: "idle" as const,

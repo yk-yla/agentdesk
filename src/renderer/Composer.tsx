@@ -1,7 +1,7 @@
 import { ChevronDown, Clock3, CornerDownRight, FolderOpen, ImagePlus, X } from "lucide-react";
 import { memo, useEffect, useState, type DragEvent, type FormEvent, type KeyboardEvent, type ReactNode } from "react";
 import CommandSuggestions from "./CommandSuggestionMenu";
-import { useCommandSuggestions, type CommandSuggestion } from "./commandSuggestions";
+import { useCommandSuggestions, type CommandSuggestion, type CommandUsage } from "./commandSuggestions";
 import { type ImageAttachment, type PendingSteerMessage, type QueuedMessage, type SkillOption } from "./domain";
 import type { AgentCapabilities } from "../shared/agentProtocol";
 
@@ -10,6 +10,7 @@ interface Props {
   cwd: string;
   threadId: string | null;
   skills: SkillOption[];
+  recentCommandUsage: CommandUsage;
   capabilities: AgentCapabilities;
   attachments: ImageAttachment[];
   queuedMessages: QueuedMessage[];
@@ -31,7 +32,7 @@ interface Props {
  * 打字不再触发顶层 setSessions，因此不会重渲染消息流。
  */
 function ComposerBase({
-  sessionId, cwd, threadId, skills, capabilities, attachments, queuedMessages, pendingSteers, working, toolbar,
+  sessionId, cwd, threadId, skills, recentCommandUsage, capabilities, attachments, queuedMessages, pendingSteers, working, toolbar,
   getDraft, onDraftChange, onSend, onCycleEffort, onAddImages, onRemoveImage,
   onRemoveQueuedMessage, onChooseDirectory,
 }: Props) {
@@ -39,7 +40,7 @@ function ComposerBase({
   const [dragging, setDragging] = useState(false);
   const [previewSource, setPreviewSource] = useState<string | null>(null);
   const [dismissedSuggestionsFor, setDismissedSuggestionsFor] = useState<string | null>(null);
-  const { suggestions, selectedIndex, moveSelection, selectIndex } = useCommandSuggestions(value, skills, capabilities);
+  const { suggestions, selectedIndex, moveSelection, selectIndex } = useCommandSuggestions(value, skills, capabilities, recentCommandUsage);
   const visibleSuggestions = dismissedSuggestionsFor === value ? [] : suggestions;
 
   useEffect(() => {

@@ -1,7 +1,8 @@
 import type { AgentOperation, AgentProvider } from "../shared/agentProtocol";
 import type { JsonObject } from "../shared/protocol";
-import { resolveComposerInput } from "./commandSuggestions";
+import { commandUsageKey, resolveComposerInput } from "./commandSuggestions";
 import { asRecord, sessionTitle, stringValue, type ImageAttachment, type PendingSteerMessage, type QueuedMessage, type SessionState, type SkillOption } from "./domain";
+import type { TurnTelemetry } from "./turnTelemetry";
 import {
   actualTurnIdFromInterruptMismatch,
   actualTurnIdFromMismatch,
@@ -35,6 +36,9 @@ export interface SessionMessageServices {
   restoreMessagesToDraft(sessionId: string, messages: QueuedMessage[]): void;
   showStatus(sessionId: string): Promise<void>;
   showMcpStatus(sessionId: string): Promise<void>;
+  rememberCommandUse?: (key: string) => void;
+  trackEvent?: (event: string, details?: JsonObject) => void;
+  turnTelemetry?: TurnTelemetry;
   upsertHistory(entry: { id: string; provider: AgentProvider; title: string; cwd: string }): void;
   now?: () => number;
 }
@@ -119,6 +123,9 @@ export class SessionMessageController {
     }));
 
     let threadId = "";
+    const requestMethod: AgentOperation = localCommand === "/review" ? "startReview" : "startTurn";
+    const telemetry = services.turnTelemetry;
+    if (telemetry && localCommand !== "/status" && localCommand !== "/mcp" && localCommand !== "/compact") telemetry.begin(sessionId, session.provider, requestMethod, { mode: "submit" });
     try {
       if (localCommand === "/status") {
         await services.showStatus(sessionId);
@@ -133,7 +140,6 @@ export class SessionMessageController {
         await services.request(sessionId, "compactSession", { threadId });
         return true;
       }
-      const requestMethod: AgentOperation = localCommand === "/review" ? "startReview" : "startTurn";
       const requestParams = localCommand === "/review"
         ? { threadId, target: { type: "uncommittedChanges" }, delivery: "inline" }
         : {
@@ -181,6 +187,7 @@ export class SessionMessageController {
         errorText: error instanceof Error ? error.message : "消息发送失败",
         messages: current.messages.filter((entry) => entry.clientId !== clientUserMessageId),
       }));
+      telemetry?.failed(sessionId, isCodexRequestTimeout(error) ? "timeout" : "request_failed");
       return false;
     }
   };
@@ -267,9 +274,12 @@ export class SessionMessageController {
     if (!session) return;
     const sessionAttachments = state.getAttachments(sessionId);
     if (!text && !sessionAttachments.length) return;
+    services.trackEvent?.("message.send", { provider: session.provider, mode, hasText: Boolean(text), imageCount: sessionAttachments.length });
     const availableSkills = session.capabilities.skills === "supported" ? state.getSkills(session.provider, session.cwd) : [];
     const resolved = resolveComposerInput(text, availableSkills, session.capabilities);
     const commandName = resolved.kind === "command" ? resolved.name : null;
+    if (resolved.kind === "command") services.rememberCommandUse?.(commandUsageKey("command", resolved.name));
+    if (resolved.kind === "skill") services.rememberCommandUse?.(commandUsageKey("skill", resolved.skill.name));
     const skillInputText = resolved.kind === "skill"
       ? `${resolved.skill.path.startsWith("command:") ? "/" : "$"}${resolved.skill.name}${resolved.prompt ? ` ${resolved.prompt}` : ""}`
       : "";
@@ -347,6 +357,7 @@ export class SessionMessageController {
     const { state, services } = this.options;
     const session = state.getSession(sessionId);
     if (!session?.threadId || session.status !== "working") return false;
+    services.trackEvent?.("turn.interrupt", { provider: session.provider });
     if (state.getPendingSteers(sessionId).length) this.submitPendingAfterInterrupt.add(sessionId);
     let turnId = session.activeTurnId || "";
     try {

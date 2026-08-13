@@ -4,7 +4,7 @@ import type { AppLogger } from "../logger";
 import { logErrorDetails } from "../logger";
 import { randomUUID } from "node:crypto";
 import { normalizeFavoriteSessionSummaries } from "../../shared/favoriteSessions";
-import { normalizeBaseFontSize, normalizeClaudeModelCache, normalizeDisplayMode, normalizeLastReasoningEfforts, normalizeModelContextWindows, normalizeSidebarWidth, normalizeTheme } from "../preferencesStore";
+import { normalizeBaseFontSize, normalizeClaudeModelCache, normalizeCompactionCounts, normalizeCodexCompactionCounts, normalizeDisplayMode, normalizeLastReasoningEfforts, normalizeModelContextWindows, normalizeSidebarWidth, normalizeTheme } from "../preferencesStore";
 
 const AGENT_PROVIDERS = new Set<AgentProvider>(["codex", "claude"]);
 const AGENT_OPERATIONS = new Set<AgentOperation>([
@@ -30,6 +30,7 @@ interface DesktopIpcServices {
     current(): string;
     launchProvider(): AgentProvider | null;
     choose(defaultPath?: string): Promise<string | null>;
+    authorize(cwd: unknown): Promise<string | null>;
   };
   preferences: PreferenceService;
   bossKey: {
@@ -70,6 +71,7 @@ interface DesktopIpcServices {
     checkUpdate(): unknown;
     installUpdate(allowUnverified: boolean): unknown;
     revokeWorkspace(cwd: unknown): unknown;
+    trustWorkspace(input: unknown): unknown;
   };
   agent: {
     request(request: ValidatedAgentRequest): unknown;
@@ -120,6 +122,8 @@ export function sanitizePreferencesPatch(value: unknown): Partial<DesktopPrefere
       return cache ? { claudeModelCache: cache } : {};
     })() : {}),
     ...(objectRecord(patch.lastReasoningEfforts) ? { lastReasoningEfforts: normalizeLastReasoningEfforts(patch.lastReasoningEfforts) } : {}),
+    ...(objectRecord(patch.compactionCounts) ? { compactionCounts: normalizeCompactionCounts(patch.compactionCounts) } : {}),
+    ...(objectRecord(patch.codexCompactionCounts) ? { codexCompactionCounts: normalizeCodexCompactionCounts(patch.codexCompactionCounts) } : {}),
     ...(objectRecord(patch.workspaceState) ? { workspaceState: patch.workspaceState as JsonObject } : {}),
   };
 }
@@ -172,16 +176,16 @@ export function registerDesktopIpc(ipc: IpcRegistrar, services: DesktopIpcServic
   ipc = {
     handle(channel, listener) {
       rawHandle(channel, async (event, ...args) => {
+        const logRequest = channel !== "agentdesk:write-log" && channel !== "agent:request" && channel !== "agent:respond";
         const suppliedRequestId = channel === "agent:request" && args[0] && typeof args[0] === "object" && "context" in args[0] && args[0].context && typeof args[0].context === "object" && "requestId" in args[0].context && typeof args[0].context.requestId === "string" ? args[0].context.requestId : undefined;
         const requestId = suppliedRequestId || randomUUID();
         const startedAt = Date.now();
-        services.logger?.log("info", "ipc.request.started", { requestId, channel, args });
         try {
           const result = await listener(event, ...args);
-          services.logger?.log("info", "ipc.request.completed", { requestId, channel, durationMs: Date.now() - startedAt, result });
+          if (logRequest && Date.now() - startedAt >= 1_000) services.logger?.log("info", "ipc.request.slow", { requestId, channel, durationMs: Date.now() - startedAt });
           return result;
         } catch (error) {
-          services.logger?.log("error", "ipc.request.failed", { requestId, channel, durationMs: Date.now() - startedAt, error: logErrorDetails(error) });
+          if (logRequest) services.logger?.log("error", "ipc.request.failed", { requestId, channel, durationMs: Date.now() - startedAt, error: logErrorDetails(error) });
           throw error;
         }
       });
@@ -194,6 +198,7 @@ export function registerDesktopIpc(ipc: IpcRegistrar, services: DesktopIpcServic
   ipc.handle("agentdesk:get-workspace", () => services.workspace.current());
   ipc.handle("agentdesk:get-launch-provider", () => services.workspace.launchProvider());
   ipc.handle("agentdesk:choose-workspace", (_event, defaultPath: unknown) => services.workspace.choose(typeof defaultPath === "string" ? defaultPath : undefined));
+  ipc.handle("agentdesk:authorize-workspace", (_event, cwd: unknown) => services.workspace.authorize(cwd));
   ipc.handle("agentdesk:get-preferences", () => services.preferences.read());
   ipc.handle("agentdesk:save-preferences", (_event, patch: unknown) => services.preferences.write(sanitizePreferencesPatch(patch)));
   ipc.handle("agentdesk:boss-key-status", () => services.bossKey.status());
@@ -226,6 +231,7 @@ export function registerDesktopIpc(ipc: IpcRegistrar, services: DesktopIpcServic
   ipc.handle("claude:update-check", () => services.claude.checkUpdate());
   ipc.handle("claude:update-install", (_event, allowUnverified: unknown) => services.claude.installUpdate(allowUnverified === true));
   ipc.handle("claude:workspace-revoke", (_event, cwd: unknown) => services.claude.revokeWorkspace(cwd));
+  ipc.handle("claude:workspace-trust", (_event, input: unknown) => services.claude.trustWorkspace(input));
   ipc.handle("agent:request", (_event, request: unknown) => services.agent.request(validateAgentRequest(request)));
   ipc.handle("agent:respond", (_event, response: unknown) => services.agent.respond(validateAgentResponse(response)));
 

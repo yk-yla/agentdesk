@@ -1,6 +1,6 @@
 import type { AgentEventEnvelope, AgentOperation, AgentProvider } from "../../../shared/agentProtocol";
 import type { JsonObject, JsonRpcMessage } from "../../../shared/protocol";
-import type { Activity, ActivityKind, ActivityStatus, CollaborationMode, ImageAttachment, Message, PendingApproval, PlanStepStatus, RetryState, SessionGoal, SessionPlan, SessionState, SubagentState, SubagentStatus, UserInputQuestion } from "../../domain";
+import type { Activity, ActivityKind, ActivityStatus, ImageAttachment, Message, PendingApproval, PlanStepStatus, RetryState, SessionGoal, SessionPlan, SessionState, SubagentState, SubagentStatus, UserInputQuestion } from "../../domain";
 import { asRecord, imageFromContent, numberValue, stringValue, textFromContent } from "../../domain";
 
 const ACTIVITY_OUTPUT_LIMIT = 64 * 1024;
@@ -9,6 +9,7 @@ const SESSION_MESSAGE_LIMIT = 5_000;
 const SESSION_ACTIVITY_LIMIT = 5_000;
 const SESSION_SUBAGENT_LIMIT = 1_000;
 const TRUNCATION_MARKER = "\n…输出过长，完整内容请查看原始事件。";
+const BACKGROUND_TIMEOUT_ERROR = "请求超时，任务可能仍在后台执行。";
 
 function limitActivityText(value: string, limit: number) {
   if (value.length <= limit) return value;
@@ -473,12 +474,20 @@ function enforceSessionBudgets(session: SessionState): SessionState {
   return session;
 }
 
-export function hydrateSession(session: SessionState, threadValue: unknown, options: { preserveRealtime?: boolean; preserveLifecycle?: boolean } = {}): SessionState {
+export interface CodexHydrateOptions {
+  preserveRealtime?: boolean;
+  preserveLifecycle?: boolean;
+  persistedCompactionCount?: number;
+  persistedCompactionEventIds?: string[];
+}
+
+export function hydrateSession(session: SessionState, threadValue: unknown, options: CodexHydrateOptions = {}): SessionState {
   const thread = asRecord(threadValue);
   const turns = Array.isArray(thread.turns) ? thread.turns : [];
   const messages: Message[] = [];
   const activities: Activity[] = [];
   let compactionCount = 0;
+  const historicalCompactionEventIds: string[] = [];
   let plan: SessionPlan | null = session.plan;
   let latestTurnUpdatedAt = 0;
   const subagents: SubagentState[] = [];
@@ -489,7 +498,11 @@ export function hydrateSession(session: SessionState, threadValue: unknown, opti
     const items = Array.isArray(turn.items) ? turn.items : [];
     for (const item of items) {
       const itemRecord = asRecord(item);
-      if (itemRecord.type === "contextCompaction") compactionCount += 1;
+      if (itemRecord.type === "contextCompaction") {
+        compactionCount += 1;
+        const id = stringValue(itemRecord.id);
+        if (id) historicalCompactionEventIds.push(id);
+      }
       if (itemRecord.type === "collabAgentToolCall" || itemRecord.type === "subAgentActivity") {
         const draft = { ...session, subagents };
         upsertSubagentFromItem(draft, item);
@@ -519,6 +532,11 @@ export function hydrateSession(session: SessionState, threadValue: unknown, opti
   const mergedMessages = mergeByKey(messages, session.messages, messageKey, preserveRealtime);
   const mergedActivities = mergeByKey(activities, session.activities, (activity) => activity.id, preserveRealtime);
   const mergedSubagents = mergeByKey(subagents, session.subagents, (subagent) => subagent.threadId, preserveRealtime);
+  const compactionEventIds = [...new Set([
+    ...(options.persistedCompactionEventIds || []),
+    ...(preserveRealtime ? session.compactionEventIds : []),
+    ...historicalCompactionEventIds,
+  ])].slice(-64);
   const updatedAt = Math.max(numberValue(thread.updatedAt, 0) * 1000, latestTurnUpdatedAt) || Date.now();
   return enforceSessionBudgets({
     ...session,
@@ -529,7 +547,8 @@ export function hydrateSession(session: SessionState, threadValue: unknown, opti
     updatedAt: Math.max(updatedAt, session.updatedAt),
     messages: mergedMessages,
     activities: mergedActivities,
-    compactionCount: Math.max(compactionCount, preserveRealtime ? session.compactionCount : 0),
+    compactionCount: Math.max(compactionCount, options.persistedCompactionCount || 0, preserveRealtime ? session.compactionCount : 0),
+    compactionEventIds,
     plan: preserveRealtime && session.plan && (!plan || session.plan.updatedAt > plan.updatedAt) ? session.plan : plan,
     subagents: mergedSubagents,
     ...(preserveLifecycle ? {} : {
@@ -537,7 +556,9 @@ export function hydrateSession(session: SessionState, threadValue: unknown, opti
       statusLabel: snapshotWorking ? "工作中" : lastTurnStatus === "interrupted" ? "已中断" : lastTurnStatus === "failed" ? "执行失败" : "就绪",
       activeTurnId: snapshotTurnId,
       startedAt: snapshotWorking ? numberValue(lastTurn.startedAt) * 1000 || Date.now() : null,
-      errorText: lastTurnStatus === "failed" ? stringValue(asRecord(lastTurn.error).message, session.errorText) : session.errorText,
+      errorText: lastTurnStatus === "failed"
+        ? stringValue(asRecord(lastTurn.error).message, session.errorText)
+        : !snapshotWorking && session.errorText === BACKGROUND_TIMEOUT_ERROR ? "" : session.errorText,
       retryState: null,
     }),
   });
@@ -586,6 +607,7 @@ export function applyServerMessage(source: SessionState, message: JsonRpcMessage
       session.messages = session.messages.map((entry) => entry.streaming ? { ...entry, streaming: false } : entry);
     }
     if (status === "failed") session.errorText = stringValue(asRecord(turn.error).message, "任务执行失败");
+    else if (session.errorText === BACKGROUND_TIMEOUT_ERROR) session.errorText = "";
   } else if (method === "error") {
     const willRetry = params.willRetry === true;
     if (willRetry) {
@@ -648,7 +670,11 @@ export function applyServerMessage(source: SessionState, message: JsonRpcMessage
         session.messages = [...session.messages, ...hydrated];
       }
     } else if (type === "contextCompaction" && method === "item/completed") {
-      session.compactionCount += 1;
+      const eventId = stringValue(item.id);
+      if (!eventId || !session.compactionEventIds.includes(eventId)) {
+        session.compactionCount += 1;
+        if (eventId) session.compactionEventIds = [...session.compactionEventIds, eventId].slice(-64);
+      }
       upsertActivity(session, item, method === "item/completed" ? "completed" : "inProgress");
     } else if (item.type === "userMessage") {
       const hydrated = messagesFromItem(item, lifecycleTimestamp);

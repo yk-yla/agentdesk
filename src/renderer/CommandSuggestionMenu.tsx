@@ -1,5 +1,5 @@
 import { Command, Sparkles, Terminal } from "lucide-react";
-import { memo } from "react";
+import { memo, useEffect, useRef } from "react";
 import type { CommandSuggestion } from "./commandSuggestions";
 
 interface Props {
@@ -9,9 +9,16 @@ interface Props {
 }
 
 function CommandSuggestions({ suggestions, selectedIndex, onSelect }: Props) {
+  const menuRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    const selected = menuRef.current?.querySelector<HTMLElement>('[role="option"][aria-selected="true"]');
+    selected?.scrollIntoView({ block: "nearest" });
+  }, [selectedIndex, suggestions]);
+
   if (!suggestions.length) return null;
   return (
-    <div className="command-suggestions" role="listbox" aria-label="命令和 Skill">
+    <div ref={menuRef} className="command-suggestions" role="listbox" aria-label="命令和 Skill">
       {suggestions.map((suggestion, index) => {
         const isSkill = suggestion.kind === "skill";
         return (

@@ -36,6 +36,7 @@ function createHarness(requestHandler?: RequestHandler) {
   const statusCalls: string[] = [];
   const mcpCalls: string[] = [];
   const clearCalls: string[] = [];
+  const commandUseCalls: string[] = [];
   let now = 1_000;
 
   const controller = new SessionMessageController({
@@ -44,7 +45,7 @@ function createHarness(requestHandler?: RequestHandler) {
       getQueued: (sessionId) => queued[sessionId] || [],
       getPendingSteers: (sessionId) => pending[sessionId] || [],
       getAttachments: (sessionId) => attachments[sessionId] || [],
-      getSkills: () => [],
+      getSkills: () => [{ name: "deploy", description: "部署", path: "D:\\skills\\deploy\\SKILL.md", scope: "user", enabled: true }],
       updateSession: (sessionId, updater) => { if (sessions[sessionId]) sessions[sessionId] = updater(sessions[sessionId]); },
       replaceQueued: (sessionId, next) => { queued[sessionId] = typeof next === "function" ? next(queued[sessionId] || []) : next; },
       replacePendingSteers: (sessionId, next) => { pending[sessionId] = typeof next === "function" ? next(pending[sessionId] || []) : next; },
@@ -65,12 +66,13 @@ function createHarness(requestHandler?: RequestHandler) {
       restoreMessagesToDraft: (_sessionId, messages) => { restored.push(messages); },
       showStatus: async (sessionId) => { statusCalls.push(sessionId); },
       showMcpStatus: async (sessionId) => { mcpCalls.push(sessionId); },
+      rememberCommandUse: (key) => { commandUseCalls.push(key); },
       upsertHistory: (entry) => { history.push({ id: entry.id, title: entry.title }); },
       now: () => { now += 1; return now; },
     },
   });
 
-  return { controller, sessions, queued, pending, attachments, requests, restored, history, statusCalls, mcpCalls, clearCalls };
+  return { controller, sessions, queued, pending, attachments, requests, restored, history, statusCalls, mcpCalls, clearCalls, commandUseCalls };
 }
 
 function message(id: string, text: string, queueKind: QueuedMessage["queueKind"] = "explicit"): QueuedMessage {
@@ -103,7 +105,18 @@ describe("SessionMessageController", () => {
 
     assert.deepEqual(harness.statusCalls, ["session"]);
     assert.deepEqual(harness.clearCalls, ["session"]);
+    assert.deepEqual(harness.commandUseCalls, ["command:status", "command:clear"]);
     assert.equal(harness.requests.length, 0);
+  });
+
+  it("records skill use when the skill is submitted", async () => {
+    const harness = createHarness();
+
+    harness.controller.sendMessage("session", "/deploy production");
+    await waitFor(() => harness.requests.length === 1);
+
+    assert.deepEqual(harness.commandUseCalls, ["skill:deploy"]);
+    assert.equal(harness.requests[0].operation, "startTurn");
   });
 
   it("keeps a timed-out start request as an accepted background turn", async () => {

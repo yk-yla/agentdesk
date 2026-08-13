@@ -55,15 +55,29 @@ interface RendererProviderAdapter {
   route(event: AgentEventEnvelope): RoutedAgentEvent;
   apply(session: SessionState, event: RoutedAgentEvent): ReturnType<typeof applyCodexEvent>;
   applySubagent(session: SessionState, event: RoutedAgentEvent, nativeSessionId: string): SessionState;
-  hydrate(session: SessionState, value: unknown, options?: { preserveRealtime?: boolean; preserveLifecycle?: boolean }): SessionState;
+  hydrate(session: SessionState, value: unknown, options?: HydrateAgentSessionOptions): SessionState;
   normalizeModel(value: unknown): ModelOption;
   goal(value: unknown): ReturnType<typeof codexGoalFromValue>;
+}
+
+export interface HydrateAgentSessionOptions {
+  preserveRealtime?: boolean;
+  preserveLifecycle?: boolean;
+  persistedCompactionCount?: number;
+  persistedCompactionEventIds?: string[];
 }
 
 const adapters: Record<AgentProvider, RendererProviderAdapter | undefined> = {
   codex: {
     route: (event) => adaptCodexEvent(event) as RoutedAgentEvent,
-    apply: (session, event) => applyCodexEvent(session, (event.providerEvent as RoutedCodexEvent).message, event.envelope.receivedAt),
+    apply: (session, event) => {
+      const applied = applyCodexEvent(session, (event.providerEvent as RoutedCodexEvent).message, event.envelope.receivedAt);
+      const generation = event.envelope.queryGeneration;
+      if (Number.isSafeInteger(generation) && Number(generation) >= applied.session.queryGeneration) {
+        applied.session.queryGeneration = Number(generation);
+      }
+      return applied;
+    },
     applySubagent: (session, event, nativeSessionId) => applyCodexSubagentEvent(session, (event.providerEvent as RoutedCodexEvent).message, nativeSessionId),
     hydrate: hydrateCodexSession,
     normalizeModel: normalizeCodexModel,
@@ -97,7 +111,7 @@ export function applyAgentSubagentEvent(session: SessionState, event: RoutedAgen
   return adapter(event.provider).applySubagent(session, event, nativeSessionId);
 }
 
-export function hydrateAgentSession(session: SessionState, provider: AgentProvider, value: unknown, options: { preserveRealtime?: boolean; preserveLifecycle?: boolean } = {}) {
+export function hydrateAgentSession(session: SessionState, provider: AgentProvider, value: unknown, options: HydrateAgentSessionOptions = {}) {
   return adapter(provider).hydrate(session, value, options);
 }
 

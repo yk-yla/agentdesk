@@ -9,10 +9,14 @@ import {
 } from "./agent/AgentEventRouter";
 import { asRecord, stringValue, type ModelOption, type SessionState } from "./domain";
 import { notificationActivationTarget } from "./notificationActivation";
+import type { TurnTelemetry } from "./turnTelemetry";
 
 export function nativeSessionKey(provider: AgentProvider, nativeSessionId: string) {
   return `${provider}:${nativeSessionId}`;
 }
+
+const CODEX_FIRST_OUTPUT_ITEM_TYPES = new Set(["agentMessage", "plan", "commandExecution", "fileChange", "mcpToolCall", "reasoning"]);
+const CLAUDE_FIRST_OUTPUT_STREAM_TYPES = new Set(["message_start", "content_block_start", "content_block_delta"]);
 
 export interface ProviderEventVersion {
   event: number;
@@ -49,19 +53,21 @@ export interface ProviderEventServices {
   clearSession(sessionId: string): void;
   recoverProvider(provider: AgentProvider): void;
   closeActiveTab(): void;
-  reloadSkills(): void;
+  reloadSkills(provider: AgentProvider): void;
   activateSession(sessionId: string): void;
   openWorkspace(workspace: string, provider?: AgentProvider): void;
   adoptStartedThread(sessionId: string, value: unknown): string;
   loadSkills(sessionId: string, cwd: string, forceReload: boolean): void;
   updateProviderModels(provider: AgentProvider, models: ModelOption[]): void;
   rememberModelContextWindow(sessionId: string, event: RoutedAgentEvent): void;
+  rememberCompaction(sessionId: string, event: RoutedAgentEvent): void;
   appendRawEvent(sessionId: string, type: string, value: unknown): void;
   showNotification(session: Pick<SessionState, "id" | "provider" | "title">): void;
   isDocumentFocused(): boolean;
   requestFrame(callback: () => void): number;
   cancelFrame(handle: number): void;
   now?: () => number;
+  turnTelemetry?: TurnTelemetry;
 }
 
 export interface ProviderEventControllerOptions {
@@ -118,6 +124,7 @@ export class ProviderEventController {
     }
     this.pendingEvents = this.pendingEvents.filter((entry) => entry.sessionId !== sessionId);
     this.versions.delete(sessionId);
+    this.options.services.turnTelemetry?.release(sessionId);
   }
 
   disconnectProvider(provider: AgentProvider) {
@@ -204,7 +211,7 @@ export class ProviderEventController {
       return;
     }
     if (event.kind === "closeActiveTab") { services.closeActiveTab(); return; }
-    if (event.kind === "skillsChanged") { services.reloadSkills(); return; }
+    if (event.kind === "skillsChanged") { services.reloadSkills(event.provider); return; }
     if (event.kind === "activateSession") {
       const sessionId = notificationActivationTarget(state.getSessions(), event.clientSessionId || "");
       if (sessionId) services.activateSession(sessionId);
@@ -298,15 +305,50 @@ export class ProviderEventController {
       }
     }
     if (event.committedClientId) runtime.messages.commitPendingSteer(sessionId, event.committedClientId);
+    if (envelope.type === "turn/started" || envelope.type === "claude/turnStarted") services.turnTelemetry?.started(sessionId);
+    if (this.isFirstOutput(event)) services.turnTelemetry?.firstOutput(sessionId, this.firstOutputKind(event));
+    if (envelope.type === "error" && agentEventPayload(event).willRetry !== true) services.turnTelemetry?.failed(sessionId, "provider_error");
     if (event.kind === "turnCompleted") {
       const turnStatus = event.turnStatus || "completed";
+      services.turnTelemetry?.completed(sessionId, turnStatus);
       runtime.messages.handleTurnCompleted(sessionId, turnStatus);
       if (turnStatus !== "interrupted" && (!services.isDocumentFocused() || state.getActiveSessionId() !== sessionId)) {
         services.showNotification(session);
       }
     }
     services.rememberModelContextWindow(sessionId, event);
+    const claudeCompaction = event.provider === "claude"
+      && envelope.type === "claude/sdkMessage"
+      && payload.type === "system"
+      && payload.subtype === "compact_boundary";
+    if ((event.provider === "codex" && envelope.type === "item/completed" && asRecord(payload.item).type === "contextCompaction") || claudeCompaction) {
+      services.rememberCompaction(sessionId, event);
+    }
     services.appendRawEvent(sessionId, envelope.type, envelope);
     this.enqueue(sessionId, event);
   };
+
+  private isFirstOutput(event: RoutedAgentEvent) {
+    const payload = agentEventPayload(event);
+    if (event.provider === "codex") {
+      if (event.envelope.type === "item/agentMessage/delta" || event.envelope.type === "item/plan/delta") return true;
+      if (event.envelope.type !== "item/started" && event.envelope.type !== "item/completed") return false;
+      return CODEX_FIRST_OUTPUT_ITEM_TYPES.has(stringValue(asRecord(payload.item).type));
+    }
+    if (event.envelope.type !== "claude/sdkMessage") return false;
+    const type = stringValue(payload.type);
+    if (type === "assistant" || type === "tool_progress") return true;
+    if (type !== "stream_event") return false;
+    return CLAUDE_FIRST_OUTPUT_STREAM_TYPES.has(stringValue(asRecord(payload.event).type));
+  }
+
+  private firstOutputKind(event: RoutedAgentEvent) {
+    const payload = agentEventPayload(event);
+    if (event.provider === "codex") {
+      if (event.envelope.type.includes("agentMessage")) return "message";
+      if (event.envelope.type.includes("plan")) return "plan";
+      return stringValue(asRecord(payload.item).type, "activity");
+    }
+    return stringValue(payload.type) === "tool_progress" ? "activity" : "message";
+  }
 }

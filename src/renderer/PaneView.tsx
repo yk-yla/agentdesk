@@ -8,6 +8,7 @@ import MessageStack from "./MessageStack";
 import { findQuestionAnchorIndex, QUESTION_ANCHOR_SELECTOR, QUESTION_SCROLL_TOP_PADDING, questionNavigationDirection, type QuestionNavigationDirection } from "./questionNavigation";
 import ServerRequestPanel from "./ServerRequestPanel";
 import { activitiesForMainConversation } from "./activityPresentation";
+import type { CommandUsage } from "./commandSuggestions";
 
 const DetailsPanel = lazy(() => import("./DetailsPanel"));
 
@@ -26,6 +27,7 @@ export interface PaneViewProps {
   isActivePane: boolean;
   models: ModelOption[];
   skills: SkillOption[];
+  recentCommandUsage: CommandUsage;
   attachments: ImageAttachment[];
   queuedMessages: QueuedMessage[];
   pendingSteers: PendingSteerMessage[];
@@ -80,7 +82,6 @@ function PaneView(props: PaneViewProps) {
     return session.activities;
   }, [session.activities, displayMode]);
   const emptySession = session.messages.length === 0 && visibleActivities.length === 0;
-  const startPrompt = useCallback((prompt: string) => props.onSend(session.id, prompt), [props.onSend, session.id]);
   const latestMessageLength = session.messages[session.messages.length - 1]?.text.length ?? 0;
   const latestActivityLength = session.activities[session.activities.length - 1]?.output?.length ?? 0;
 
@@ -258,7 +259,6 @@ function PaneView(props: PaneViewProps) {
           bridge={bridge}
           cwd={session.cwd}
           provider={session.provider}
-          onStartPrompt={startPrompt}
         />
       </div>
 
@@ -272,6 +272,7 @@ function PaneView(props: PaneViewProps) {
           cwd={session.cwd}
           threadId={session.threadId}
           skills={props.skills}
+          recentCommandUsage={props.recentCommandUsage}
           capabilities={session.capabilities}
           attachments={attachments}
           queuedMessages={props.queuedMessages}

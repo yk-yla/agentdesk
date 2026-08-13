@@ -1,8 +1,7 @@
-import { FolderOpen, Package, PanelLeftClose, PanelLeftOpen } from "lucide-react";
+import { Columns2, FolderOpen, Package, PanelLeftClose, PanelLeftOpen } from "lucide-react";
 import { memo, type PointerEvent as ReactPointerEvent } from "react";
 import type { CapabilityState } from "../shared/agentProtocol";
 import HistorySidebar, { type HistorySidebarProps } from "./HistorySidebar";
-import ProviderIcon from "./ProviderIcon";
 import SettingsPopover, { type SettingsPopoverConfig } from "./SettingsPopover";
 import WorkspaceNavigation, { type WorkspaceNavigationProps } from "./WorkspaceNavigation";
 
@@ -16,8 +15,10 @@ export interface SidebarLayout {
 
 export interface SidebarToolbar {
   pluginMarketplaceState: CapabilityState;
+  splitDisabled: boolean;
   onChooseWorkspace: () => void;
   onOpenPlugins: () => void;
+  onSplitPane: () => void;
 }
 
 export interface SidebarProps {
@@ -29,15 +30,11 @@ export interface SidebarProps {
 }
 
 function SidebarBase({ layout, toolbar, workspace, history, settings }: SidebarProps) {
-  const { currentCwd } = workspace.viewModel;
   return <aside className={`sidebar ${layout.collapsed ? "collapsed" : ""}`}>
     <div className="sidebar-actions">
-      <div className="provider-new-group">
-        <button className="new-thread-button provider-new-codex" onClick={() => workspace.actions.onNewSession(currentCwd, "codex")} title="新建 Codex 会话" aria-label="新建 Codex 会话"><ProviderIcon provider="codex" /><span className="sidebar-copy">Codex</span></button>
-        <button className="new-thread-button provider-new-claude" onClick={() => workspace.actions.onNewSession(currentCwd, "claude")} title="新建 Claude Code 会话" aria-label="新建 Claude Code 会话"><ProviderIcon provider="claude" /><span className="sidebar-copy">Claude</span></button>
-      </div>
       <button className="icon-button" onClick={toolbar.onChooseWorkspace} title="选择目录" aria-label="选择目录"><FolderOpen size={16} /></button>
       {toolbar.pluginMarketplaceState !== "unsupported" ? <button className="icon-button" disabled={toolbar.pluginMarketplaceState !== "supported"} onClick={toolbar.onOpenPlugins} title={toolbar.pluginMarketplaceState === "supported" ? "插件市场" : "当前 Provider 的插件市场暂不可用"} aria-label="插件市场"><Package size={15} /></button> : null}
+      <button className="icon-button" disabled={toolbar.splitDisabled} onClick={toolbar.onSplitPane} title="分成两列" aria-label="分成两列"><Columns2 size={16} /></button>
       <SettingsPopover collapsed={layout.collapsed} {...settings} />
       <button className="icon-button sidebar-toggle" onClick={layout.onToggleCollapsed} title={layout.collapsed ? "展开左侧面板" : "收起左侧面板"} aria-label={layout.collapsed ? "展开左侧面板" : "收起左侧面板"} aria-expanded={!layout.collapsed}>{layout.collapsed ? <PanelLeftOpen size={16} /> : <PanelLeftClose size={16} />}</button>
     </div>

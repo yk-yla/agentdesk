@@ -6,6 +6,7 @@ import path from "node:path";
 import { ClaudeBackend, CLAUDE_TRUST_REQUIRED_PREFIX, type ClaudeWorkerRuntime } from "./ClaudeBackend";
 import type { ClaudeWorkerCommand, ClaudeWorkerEvent } from "./claudeWorkerProtocol";
 import type { AgentEventEnvelope } from "../../../shared/agentProtocol";
+import { replaceTrustedWorkspaces, revokeWorkspace, trustWorkspace } from "./claudeWorkspaceTrust";
 
 class FakeRuntime implements ClaudeWorkerRuntime {
   commands: ClaudeWorkerCommand[] = [];
@@ -51,6 +52,7 @@ class FakeRuntime implements ClaudeWorkerRuntime {
 const fixtureCredentials = () => ({ source: "settings" as const, baseUrl: "https://example.invalid", authToken: "fixture-token" });
 
 function testBackend(runtime: FakeRuntime, timeoutMs = 300_000, toolArgumentStallTimeoutMs = 90_000) {
+  replaceTrustedWorkspaces([]);
   return new ClaudeBackend(runtime, timeoutMs, undefined, fixtureCredentials, undefined, toolArgumentStallTimeoutMs);
 }
 
@@ -58,7 +60,8 @@ async function activeBackend(timeoutMs = 300_000, toolArgumentStallTimeoutMs = 9
   const runtime = new FakeRuntime();
   const backend = testBackend(runtime, timeoutMs, toolArgumentStallTimeoutMs);
   const sessionId = `client-${Math.random().toString(36).slice(2)}`;
-  await backend.request("startSession", { cwd: process.cwd(), trustWorkspace: true }, { sessionId, canonicalCwd: process.cwd() });
+  trustWorkspace(process.cwd());
+  await backend.request("startSession", { cwd: process.cwd() }, { sessionId, canonicalCwd: process.cwd() });
   await backend.request("startTurn", { input: [{ type: "text", text: "test" }] }, { sessionId, canonicalCwd: process.cwd() });
   const start = runtime.commands.find((command): command is Extract<ClaudeWorkerCommand, { type: "start" }> => command.type === "start");
   assert.ok(start);
@@ -66,13 +69,14 @@ async function activeBackend(timeoutMs = 300_000, toolArgumentStallTimeoutMs = 9
 }
 
 describe("ClaudeBackend", () => {
-  it("requires explicit workspace trust before creating a session", async () => {
+  it("ignores forged request trust and requires the trusted workspace service", async () => {
     const backend = testBackend(new FakeRuntime());
     await assert.rejects(
-      backend.request("startSession", { cwd: process.cwd() }, { sessionId: "client-1", canonicalCwd: process.cwd() }),
+      backend.request("startSession", { cwd: process.cwd(), trustWorkspace: true }, { sessionId: "client-1", canonicalCwd: process.cwd() }),
       (error: Error) => error.message.startsWith(CLAUDE_TRUST_REQUIRED_PREFIX),
     );
-    const result = await backend.request("startSession", { cwd: process.cwd(), trustWorkspace: true }, { sessionId: "client-1", canonicalCwd: process.cwd() });
+    trustWorkspace(process.cwd());
+    const result = await backend.request("startSession", { cwd: process.cwd() }, { sessionId: "client-1", canonicalCwd: process.cwd() });
     assert.ok((result as { thread: { id: string } }).thread.id);
     await backend.close();
   });
@@ -86,7 +90,9 @@ describe("ClaudeBackend", () => {
     });
     const sessionId = "credential-retry";
     const cwd = process.cwd();
-    await backend.request("startSession", { cwd, trustWorkspace: true }, { sessionId, canonicalCwd: cwd });
+    replaceTrustedWorkspaces([]);
+    trustWorkspace(cwd);
+    await backend.request("startSession", { cwd }, { sessionId, canonicalCwd: cwd });
     await assert.rejects(backend.request("startTurn", { input: [{ type: "text", text: "first" }] }, { sessionId, canonicalCwd: cwd }), /fixture credentials rejected/);
     rejectCredentials = false;
     await backend.request("startTurn", { input: [{ type: "text", text: "retry" }] }, { sessionId, canonicalCwd: cwd });
@@ -99,7 +105,8 @@ describe("ClaudeBackend", () => {
     const backend = testBackend(runtime);
     const sessionId = "settings-before-query";
     const cwd = process.cwd();
-    await backend.request("startSession", { cwd, trustWorkspace: true }, { sessionId, canonicalCwd: cwd });
+    trustWorkspace(cwd);
+    await backend.request("startSession", { cwd }, { sessionId, canonicalCwd: cwd });
     await backend.request("updateSessionSettings", { model: "sonnet", effort: "high" }, { sessionId, canonicalCwd: cwd });
     assert.equal(runtime.requests.filter((command) => command.type === "control").length, 0);
 
@@ -107,6 +114,32 @@ describe("ClaudeBackend", () => {
     const start = runtime.commands.at(-1) as Extract<ClaudeWorkerCommand, { type: "start" }>;
     assert.equal(start.model, "sonnet");
     assert.equal(start.effort, "high");
+    await backend.close();
+  });
+
+  it("stops a revoked workspace and requires trust before the old tab can resume", async () => {
+    const runtime = new FakeRuntime();
+    const backend = testBackend(runtime);
+    const cwd = process.cwd();
+    const sessionId = "revoked-workspace";
+    trustWorkspace(cwd);
+    await backend.request("startSession", { cwd }, { sessionId, canonicalCwd: cwd });
+    await backend.request("startTurn", { input: [{ type: "text", text: "first" }] }, { sessionId, canonicalCwd: cwd });
+    const generation = (runtime.commands.find((command): command is Extract<ClaudeWorkerCommand, { type: "start" }> => command.type === "start"))?.queryGeneration;
+    assert.equal(generation, 1);
+
+    await backend.revokeWorkspace(cwd);
+    revokeWorkspace(cwd);
+    assert.ok(runtime.commands.some((command) => command.type === "closeSession" && command.queryGeneration === generation));
+    await assert.rejects(
+      backend.request("startTurn", { input: [{ type: "text", text: "blocked" }] }, { sessionId, canonicalCwd: cwd, queryGeneration: 2 }),
+      (error: Error) => error.message.startsWith(CLAUDE_TRUST_REQUIRED_PREFIX),
+    );
+
+    trustWorkspace(cwd);
+    await backend.request("startTurn", { input: [{ type: "text", text: "resume" }] }, { sessionId, canonicalCwd: cwd, queryGeneration: 2 });
+    const restarted = runtime.commands.filter((command): command is Extract<ClaudeWorkerCommand, { type: "start" }> => command.type === "start").at(-1);
+    assert.equal(restarted?.resumeSessionId, (runtime.commands[0] as Extract<ClaudeWorkerCommand, { type: "start" }>).nativeSessionId);
     await backend.close();
   });
 
@@ -363,7 +396,8 @@ describe("ClaudeBackend", () => {
     const cwd = path.resolve(process.cwd());
     const nativeSessionId = "44444444-4444-4444-8444-444444444444";
     runtime.known.set(nativeSessionId, cwd);
-    await backend.request("resumeSession", { cwd, threadId: nativeSessionId, trustWorkspace: true }, { sessionId: "resume-client", canonicalCwd: cwd });
+    trustWorkspace(cwd);
+    await backend.request("resumeSession", { cwd, threadId: nativeSessionId }, { sessionId: "resume-client", canonicalCwd: cwd });
     await backend.request("startTurn", { input: [{ type: "text", text: "first" }] }, { sessionId: "resume-client", canonicalCwd: cwd });
     const first = runtime.commands.at(-1) as Extract<ClaudeWorkerCommand, { type: "start" }>;
     assert.equal(first.resumeSessionId, nativeSessionId);
@@ -382,8 +416,9 @@ describe("ClaudeBackend", () => {
     const cwd = path.resolve(process.cwd());
     const sourceId = "55555555-5555-4555-8555-555555555555";
     runtime.known.set(sourceId, cwd);
+    trustWorkspace(cwd);
     const fork = await backend.request("forkSession", { cwd, threadId: sourceId }, { canonicalCwd: cwd }) as { thread: { id: string } };
-    await backend.request("resumeSession", { cwd, threadId: fork.thread.id, trustWorkspace: true }, { sessionId: "fork-client", canonicalCwd: cwd });
+    await backend.request("resumeSession", { cwd, threadId: fork.thread.id }, { sessionId: "fork-client", canonicalCwd: cwd });
     await backend.request("startTurn", { input: [{ type: "text", text: "continue fork" }] }, { sessionId: "fork-client", canonicalCwd: cwd });
     const start = runtime.commands.at(-1) as Extract<ClaudeWorkerCommand, { type: "start" }>;
     assert.equal(start.resumeSessionId, fork.thread.id);
@@ -408,7 +443,8 @@ describe("ClaudeBackend", () => {
     const events: AgentEventEnvelope[] = [];
     backend.subscribeEvents((event) => events.push(event));
     const sessionId = "capability-client";
-    await backend.request("startSession", { cwd: process.cwd(), trustWorkspace: true }, { sessionId, canonicalCwd: process.cwd() });
+    trustWorkspace(process.cwd());
+    await backend.request("startSession", { cwd: process.cwd() }, { sessionId, canonicalCwd: process.cwd() });
     await backend.request("startTurn", { input: [{ type: "text", text: "test" }] }, { sessionId, canonicalCwd: process.cwd() });
     const start = runtime.commands.at(-1) as Extract<ClaudeWorkerCommand, { type: "start" }>;
     runtime.listener?.({ type: "ready", sessionId, queryGeneration: start.queryGeneration });
@@ -464,6 +500,7 @@ describe("ClaudeBackend", () => {
   it("rejects unsafe Claude plugin arguments before reaching the Worker", async () => {
     const runtime = new FakeRuntime();
     const backend = testBackend(runtime);
+    trustWorkspace(process.cwd());
     await assert.rejects(
       backend.request("installPlugin", { cwd: process.cwd(), pluginName: "demo; whoami" }, { canonicalCwd: process.cwd() }),
       /Claude 工作区未授权|工作区授权|插件操作缺少|插件名称/,

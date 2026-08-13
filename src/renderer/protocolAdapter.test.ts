@@ -70,6 +70,33 @@ describe("protocolAdapter turn lifecycle", () => {
     assert.equal(applied.activities[0].status, "completed");
   });
 
+  it("clears a temporary timeout warning when the background turn succeeds", () => {
+    const session = emptySession("session-1", "C:\\work");
+    session.status = "working";
+    session.statusLabel = "响应超时，后台状态待确认";
+    session.errorText = "请求超时，任务可能仍在后台执行。";
+
+    const applied = applyServerMessage(session, {
+      method: "turn/completed",
+      params: { threadId: "thread-1", turn: { id: "turn-1", status: "completed" } },
+    }).session;
+
+    assert.equal(applied.statusLabel, "就绪");
+    assert.equal(applied.errorText, "");
+  });
+
+  it("keeps unrelated warnings when a turn succeeds", () => {
+    const session = emptySession("session-1", "C:\\work");
+    session.errorText = "更新恢复数据已截断。";
+
+    const applied = applyServerMessage(session, {
+      method: "turn/completed",
+      params: { threadId: "thread-1", turn: { id: "turn-1", status: "completed" } },
+    }).session;
+
+    assert.equal(applied.errorText, "更新恢复数据已截断。");
+  });
+
   it("clears the main-conversation marker when a tool later completes", () => {
     const session = emptySession("session-1", "C:\\work");
     session.activities = [{ id: "tool-1", kind: "mcpToolCall", title: "工具调用", detail: "docs / fetch", status: "failed", visibleInMain: true }];
@@ -137,6 +164,37 @@ describe("protocolAdapter hydration", () => {
     const hydrated = hydrateSession(session, activeThread, { preserveRealtime: true, preserveLifecycle: true });
     assert.equal(hydrated.status, "idle");
     assert.equal(hydrated.activeTurnId, null);
+  });
+
+  it("keeps the persisted lifetime compaction count when history is trimmed", () => {
+    const hydrated = hydrateSession(emptySession("session-1", "C:\\work"), {
+      id: "thread-1",
+      cwd: "C:\\work",
+      turns: [{ id: "turn-1", items: [{ id: "compact-old", type: "contextCompaction" }] }],
+    }, {
+      persistedCompactionCount: 14,
+      persistedCompactionEventIds: ["compact-old"],
+    });
+
+    assert.equal(hydrated.compactionCount, 14);
+    assert.deepEqual(hydrated.compactionEventIds, ["compact-old"]);
+  });
+
+  it("does not count a replayed compaction event twice", () => {
+    const session = emptySession("session-1", "C:\\work");
+    session.compactionCount = 14;
+    session.compactionEventIds = ["compact-14"];
+    const replayed = applyServerMessage(session, {
+      method: "item/completed",
+      params: { threadId: "thread-1", item: { id: "compact-14", type: "contextCompaction" } },
+    }).session;
+    const next = applyServerMessage(replayed, {
+      method: "item/completed",
+      params: { threadId: "thread-1", item: { id: "compact-15", type: "contextCompaction" } },
+    }).session;
+
+    assert.equal(replayed.compactionCount, 14);
+    assert.equal(next.compactionCount, 15);
   });
 });
 

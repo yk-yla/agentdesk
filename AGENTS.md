@@ -1,108 +1,122 @@
-# AgentDesk 项目规则
+# AgentDesk 开发规则
 
-## 执行边界
+## 回复与执行边界
 
-- 回复使用简短、容易理解的中文；先说结论，再说明影响和未完成事项。
-- 讨论、分析、检查默认只读；只有用户明确要求修改、执行、提交或发布时才改变状态。
-- 进入执行后完成“查明原因、修改、分级验证、说明结果”，不要只给方案。
-- 修改前检查工作区和现有改动；保留用户或其他 AI 的修改，不擅自回滚、覆盖、删除或清理。
+- 使用简短、易懂的中文回复；先说结论，再说明影响、验证结果和未完成事项。
+- “为什么、怎么看、评估、分析、检查”默认只读；只有用户明确要求“改、修、实现、执行、提交或发布”时才改变状态。
+- 进入执行模式后完成：查明原因、修改、验证、交付说明。不要只给方案，也不要在中途把下一步交回用户。
+- 修改前先检查 `git status` 和相关 diff。保留用户或其他 AI 的现有改动，不擅自回滚、覆盖、删除或清理。
 - `git reset --hard`、`git checkout --`、强制推送、批量删除、覆盖安装和其他不可逆操作必须先取得明确授权。
-- 未经明确授权，不提交、不推送、不升版本、不创建 Tag/Release、不安装或覆盖正式版。
-- 本项目不依赖 mini-ide。开发、启停、编译、测试、日志、健康检查、Git、预检和打包均不得使用 mini-ide。
+- 未经明确授权，不执行 `git add`、`git commit`、`git push`、切分支、改写历史、升版本、创建 Tag/Release 或发布正式版。
+- 本项目不使用 mini-ide；开发、启停、编译、测试、日志、回归、Git 和打包直接使用项目脚本与原生工具。
 
-## 项目与事实来源
+## 事实来源
 
-AgentDesk 是 Windows x64 桌面客户端，同时接入 Codex 和 Claude Code。Electron 主进程负责桌面能力和受控 IPC，Renderer 负责会话与界面；两个 Provider 的后端、事件和生命周期彼此隔离。
+- 已实现行为以当前工作区的 `src`、测试、`package.json`、`package-lock.json`、脚本和 `.github/workflows` 为准。
+- 设计稿、路线图、审查文档和交接文档不能证明功能已实现；文档中的一次性结果不能当作长期规则。
+- 依赖、命令、打包入口和版本以 `package.json` 与锁文件为准；不要在本文件复制容易过期的版本号或完整功能清单。
+- 外部 Provider 的协议、能力和错误以运行时响应及适配器为准；不要凭记忆假定某个 Provider 支持某项能力。
 
-- 项目日常分支为 `develop`，远程私有仓库为 `yxb715/agentdesk`。
-- 依赖版本、npm 命令和打包配置以 `package.json`、`package-lock.json` 为准；当前主技术栈为 Node 24、Electron 43、React 19、TypeScript 5.7、Vite 6 和 electron-builder。
-- 已实现行为以 `src`、Provider 能力注册表、测试和真实 Electron 行为为准；设计稿和路线图中的规划不能写成已实现功能。
-- CI 与 Release 行为以 `.github/workflows` 为准；版本和 Release 结果以 Git 与 GitHub 为准。
-- 本文件只记录长期规则、架构边界和操作入口，不记录一次性测试结果、临时交接、精确测试数量或完整功能清单。
+## 项目边界
 
-## 代码地图
+AgentDesk 是 Windows x64 Electron 桌面客户端。Electron 主进程负责窗口、文件、进程、更新和受控 IPC；Renderer 负责会话状态与界面；Codex 和 Claude Code 是彼此隔离的 Provider。
 
-- `src/main/main.ts`：主进程服务组装，以及工作区、附件、本地文件和外部能力的安全策略。
-- `src/main/agent`：Provider 无关的 Backend 接口、注册表、请求适配和事件协议。
-- `src/main/providers/codex`：Codex app-server、JSONL、请求登记和 Codex 能力。
-- `src/main/providers/claude`：Claude Backend、Worker、凭据、工作区信任、历史、图片、进程树和更新校验。
-- `src/main/windowLifecycle.ts`：窗口、托盘、单实例、老板键和安装前窗口生命周期。
-- `src/main/preferencesStore.ts`、`atomicFile.ts`：偏好归一化、容量限制和原子持久化。
-- `src/main/*UpdateManager.ts`、`processSupervisor.ts`：桌面端、Codex CLI、Claude Code 更新与受管进程。
-- `src/main/ipc`：桌面 IPC 注册和输入边界；入口只负责注入依赖。
+- Codex 通过本机 `codex app-server` 的 JSONL 协议通信。
+- Claude Code 通过独立 Worker 使用 Agent SDK；Claude 历史、图片、插件/市场和受管更新也经过该 Worker 或主进程受控路径。
+- Provider 的进程、凭据、会话、Query 代次、交互请求、事件和关闭清理必须隔离；一个 Provider 退出不得清理另一个 Provider 的会话。
+
+## 分层与代码地图
+
+- `src/main/main.ts`：主进程组装、工作区与本地路径授权、附件、外部能力和退出流程。
+- `src/main/agent`：Provider 无关的 Backend 接口、注册表、请求适配、会话登记和交互归属校验。
+- `src/main/providers/codex`：Codex app-server 子进程、RPC 请求登记、超时和事件转换。
+- `src/main/providers/claude`：Claude Backend、Worker、凭据、信任、历史、图片、插件、进程树和更新完整性检查。
+- `src/main/ipc/registerDesktopIpc.ts`：桌面 IPC 注册、操作白名单、参数归一化和输入边界；`main.ts` 只负责注入真实服务。
 - `src/preload/preload.ts`：通过 `contextBridge` 暴露最小 Bridge，不暴露 Node、文件系统或子进程 API。
-- `src/shared`：Bridge、Provider、更新、偏好和 JSON-RPC 共享类型。
-- `src/renderer/App.tsx`：顶层状态和依赖组装、统一会话请求与页面编排，不继续堆入新的生命周期状态机。
-- `src/renderer/*Controller.ts`、`agent`、`providers`：会话、消息、事件、历史、布局和 Provider 差异逻辑。
-- `src/renderer` 中的具体 `.tsx` 组件：界面展示与交互；具体 UI 不回流到 `App.tsx`。
-- 新增桌面能力必须同步更新 shared 类型、preload、主进程 IPC、请求白名单、超时配置和必要测试。
+- `src/shared`：Bridge、Provider 操作/事件、偏好、更新和共享 JSON 类型。
+- `src/renderer/App.tsx`：顶层状态、依赖组装和页面编排；新的会话/事件/历史/布局生命周期逻辑应放入已有 Controller 或独立模块。
+- `src/renderer/agent`、`src/renderer/providers`：Provider 注册、能力、请求错误和事件适配。
+- `src/renderer/*Controller.ts`：会话、消息、事件、历史、布局、设置和生命周期协调。
+- `src/renderer` 中的 `.tsx`：展示和交互；具体组件不得绕过统一请求路径直接调用 Provider Bridge。
+- `scripts`：开发版、真实 Provider、打包版和隔离配置回归入口；脚本启动的进程只能由脚本自己清理。
 
-## 架构与产品边界
+## 关键架构约束
 
-- Codex 只通过本机 `codex app-server` 通信；Claude Code 只通过 Agent SDK 和独立 Worker 通信。
-- 两个 Provider 的进程、凭据、审批、Query 代次、事件和退出清理保持隔离；Provider 退出不得清理另一个 Provider 的会话。
-- Provider 能力由注册表和运行时响应决定；通用组件不得伪造入口，也不得散落成片的 `provider === ...` 判断。
-- 所有会话请求继续经过统一的 Provider 请求路径；具体组件不得绕过该路径直接调用 Bridge。
-- 正式窗口使用无边框 BrowserWindow，加载后最大化；关闭默认隐藏到托盘，并支持 `--cwd` 与单实例唤醒。
-- 偏好保存在 Electron `userData/preferences.json`，包括工作区、主题、展示模式、侧栏宽度、基础字号、老板键、会话元数据、模型缓存、Claude 信任和更新恢复状态。
-- 普通重启不持久化运行中的 Tab/分栏；只有桌面更新安装前保存一次性恢复状态，并在恢复后清理。
-- 软件、Codex CLI 和 Claude Code 更新只能由用户主动触发；软件不自动下载或退出安装，Claude 受管更新不得降低完整性和 Anthropic 官方签名校验。
-- 新依赖必须说明用途、体积、Electron 兼容性和现有依赖能否完成；没有明确必要性时不引入状态管理、路由、UI 组件库或虚拟列表库。
+- 所有 Provider 请求必须经过 `AgentBridge` -> IPC 校验 -> `BackendManager` -> `AgentSessionRegistry` -> Provider Backend；不得新增旁路调用。
+- `AgentSessionRegistry` 是会话安全边界：校验 Provider、已授权工作区、客户端会话 ID、原生会话 ID、Query 代次、请求参数归属和交互响应归属。
+- Provider 能力由注册表和运行时 `getCapabilities` 决定。通用代码不要散落大量 `provider === ...` 分支；Provider 差异集中在 Backend、请求适配器和事件适配器。
+- 迟到响应和旧 Query 事件不能污染新会话或新 Query。新增异步状态必须定义代次、取消、关闭和异常退出行为。
+- 会话关闭要分别处理“停止当前任务”和“释放 Provider 资源”；前一步失败或超时也必须尝试后一步。
+- Renderer 恢复只用于软件更新安装前的一次性状态；普通重启不恢复运行中的 Tab、分栏、活动 Query 或排队任务。
+- 无法从能力注册表确认的入口必须隐藏或禁用，不得伪造 Provider 能力。
 
-## 安全与容量边界
+## Electron 与安全边界
 
-- BrowserWindow 固定使用 `contextIsolation: true`、`nodeIntegration: false`、`sandbox: true`。
-- IPC 只暴露明确方法；Provider 请求必须校验操作白名单、会话、工作区和 Query 归属，迟到响应不得污染新 Query。
-- 外部链接只允许 HTTP(S) 并交给系统浏览器；窗口导航和新窗口必须拦截不安全地址。
-- 本地路径必须经过真实路径、授权集合、工作区或附件根目录和文件类型校验；图片按内容校验，不信任扩展名。
-- Claude 图片在主进程授权后仍由 Worker 二次校验；工作区未经明确信任、凭据冲突或字段不安全时拒绝继续。
-- GitHub 访问令牌只通过进程环境变量或 Electron `safeStorage` 使用，不得写入普通偏好、日志、源码、构建产物、文档或回复。
-- 不读取、修改、删除或重建 Codex SQLite 数据库；历史统一通过 Provider API 获取。
-- JSON 对象和事件解析允许未知字段；Provider 差异集中在 Backend、事件适配器和能力注册表中。
-- 不取消现有容量限制：原始事件每会话 20,000 条，Codex 消息和活动各 5,000 项、子 Agent 1,000 项，JSONL 16 MB，Claude Worker 消息 2 MB，单图 10 MB，附件目录 10,000 文件或 1 GB，偏好文件 4 MB。
+- 正式窗口保持 `frame: false`、`contextIsolation: true`、`nodeIntegration: false`、`sandbox: true`；Renderer 使用 CSP 和受控 preload。
+- 单实例启动支持 `--cwd` 和 `--provider`；第二实例只通过主进程唤醒现有窗口并转发已校验的工作区/Provider。
+- 关闭窗口默认隐藏到托盘；真正退出和更新安装必须先有序关闭 Provider、Worker、受管进程和测试网关。
+- 外部链接只允许 `http:` 或 `https:`，交给系统浏览器；窗口导航和新窗口必须拦截其他协议。
+- 本地路径先规范化/真实路径校验，再检查附件根目录、已授权工作区或显式授权文件；不得仅凭扩展名信任文件。
+- 图片输入必须限制大小、拒绝符号链接，并在主进程和 Claude Worker 分别按内容签名校验 PNG/JPEG/GIF/WebP。
+- 工作区授权和 Claude 信任必须由主进程确认；Renderer、Provider 返回值或偏好字段不得自行扩大授权范围。撤销信任后后续请求必须立即受阻。
+- Claude 凭据按 Query 创建时读取，校验 URL 和凭据冲突；不得把凭据写入普通偏好、日志、源码、构建产物、文档或回复。
+- GitHub 更新令牌只使用进程环境变量或 Electron `safeStorage`；日志对凭据、URL 敏感参数和用户长文本做脱敏/摘要。
+- 不直接读取、修改、删除或重建 Codex SQLite 数据库；历史通过 Provider API 获取。
+- JSON 对象和事件解析应允许未知字段，但必须对类型、大小、操作名和路径做边界校验。
 
-## 原生开发命令
+## 偏好、文件和容量
 
-- 安装或同步依赖：`npm install`。修改 `package.json` 后同步检查 `package-lock.json`；CI 或全新干净目录使用 `npm ci`。
-- 主进程、preload、Worker 和 shared 编译：`npm run build:main`。
-- Renderer 类型检查和产物构建：`npm run build:renderer`。
-- 全部测试：`npm test`。
-- 局部测试先编译测试：`npm exec -- tsc -p src/tsconfig.test.json`；再执行目标文件，例如 `node --test build/tests/renderer/layoutController.test.js`。
-- 完整构建：`npm run build`。它已经包含主进程编译、Renderer 构建和全部测试。
-- 开发模式：`npm run dev`；兼容入口为 `npm run start`。不要手工拼接 Vite、Electron 和端口参数。
-- 浏览器 Mock 预览：`npm run preview`。它只能验证 Renderer 布局和交互，不能证明真实 Provider、IPC 或桌面能力可用。
-- Electron 核心回归：`pwsh -NoProfile -ExecutionPolicy Bypass -File scripts/electron-regression.ps1`。
-- 核心加真实 Provider 回归：在上述命令后加 `-LiveProviders`；只跑真实 Provider 时使用 `-LiveProviders -SkipCore`。
-- 本地打包：`npm run package`。该命令已经包含完整构建并固定 `--publish never`，不得用 `release:github` 代替本地验证。
-- 打包版回归：打包完成后执行 `pwsh -NoProfile -ExecutionPolicy Bypass -File scripts/electron-package-regression.ps1`。
-- `build/release` 是 electron-builder 输出目录，包含 `win-unpacked`、NSIS 安装包、blockmap、`latest.yml` 和构建辅助文件；正式 Release 资产只有安装包、blockmap 和 `latest.yml`。
-- Electron 回归脚本使用项目入口启动和清理进程，Playwright wrapper 默认路径可由 `AGENTDESK_PLAYWRIGHT_WRAPPER` 覆盖；不要手工启动另一套回归流程。
-- 停止服务优先在启动终端发送 `Ctrl+C`；自动化只结束自己记录的进程树，禁止按名称批量结束全部 Node、Electron 或浏览器进程。
-- 日志优先读取命令输出；持久日志只写入 Git 忽略的 `build/logs`，不得记录凭据、完整环境变量或用户内容。
-- 健康检查：开发页面为 `http://127.0.0.1:3000`，Electron CDP 为 `http://127.0.0.1:9223/json/version`；使用有上限的轮询。
-- Git 检查：`git status --short`、`git diff --stat`、`git diff -- <path>`；Git 操作直接使用原生 Git。
+- 偏好写入 Electron `userData/preferences.json`，通过归一化和原子写入保存；新增字段必须同步类型、归一化、IPC 白名单和测试。
+- 偏好包含工作区、主题、展示模式、侧栏/字号、老板键、会话元数据、模型缓存、命令使用记录、压缩记录、Claude 信任和一次性更新恢复状态。
+- 附件写入 `userData/attachments`；导出、交接文件、日志和更新缓存使用各自受控目录，不把用户内容写入源码或构建目录。
+- 现有的事件、消息、活动、子 Agent、Worker/RPC、图片、附件、偏好和日志容量限制是安全不变量。修改限制时必须同时更新实现、测试和受影响的回归脚本，不得用无限增长替代截断/清理。
 
-## 分级与批量验证
+## Provider 特有规则
 
-- 只改文档：检查内容、链接和 Git diff，不运行代码构建、Electron 回归或打包。
-- 纯逻辑或低风险重构：开发中运行相关测试；同一模块、行为链或验收范围内的小改动合并为一个批次。
-- Renderer 批次：先执行 `npm run build:renderer`，再按真实依赖选择 Mock 预览或 Electron 回归；检查桌面布局、长文本、加载、空状态和错误状态。
-- 主进程、preload、shared 批次：先执行相关测试和 `npm run build:main`；涉及真实桌面行为、Provider、IPC、审批、附件、更新、中断、进程或窗口生命周期时，批次结束后执行一次 Electron 回归。
-- Electron 运行时、electron-builder、安装包或更新链路变更：批次结束后执行一次 `npm run package` 和打包版回归；若同时影响开发版桌面行为，再补一次 Electron 核心回归。
-- Worker、子进程入口、`asar` 或 `asarUnpack` 相关改动必须检查打包产物的运行时依赖闭包：入口及其全部相对导入必须在最终加载路径中真实存在，不得跨 `app.asar` 与 `app.asar.unpacked` 引用缺失文件。开发版能够加载不能替代此检查。
-- 打包版回归必须真实启动 `build/release/win-unpacked/AgentDesk.exe`，通过正式 Bridge 使用隔离夹具至少调用 Claude `listSessions`、Claude `readSession` 和 Codex `listSessions`；必须确认 Worker/Provider 能启动、请求成功且没有模块缺失。只验证窗口、Renderer 或 Bridge 存在不算通过。
-- 对 `npm test`、`npm run build`、`npm run package` 这条嵌套构建链，一个批次只选择最终需要的最高入口：`build` 已包含 `test`，`package` 又包含 `build`，代码未变化时不得连续重复执行。
-- Electron 核心、真实 Provider 和打包版回归验证的是不同运行行为，不能因执行了更高构建入口就互相替代；只运行本批次实际影响的场景，并把同类场景集中回归一次。
-- 多个改动覆盖同一套 Electron 场景时统一回归一次；只有失败后修复了相关代码或验收范围变化时才重跑。
-- 测试失败后先定位根因并执行最小相关验证，确认修复后再运行批次最终门禁；不得反复运行整套流程碰运气。
-- 验证结束后停止本轮开发服务、测试窗口和临时进程，确认 3000、9223、9224 及 Playwright 会话没有本轮残留；不得停止用户正在运行的正式版。
+- Codex 请求使用 app-server 的方法映射和按方法超时；Renderer 不能覆盖审批、沙箱或其他危险安全参数。
+- Codex app-server 只关闭 AgentDesk 自己启动并登记的进程；更新 CLI 前必须处理本地服务重启和外部 app-server 检查。
+- Codex CLI 可在启动后按缓存和周期自动检查版本，但安装必须由用户触发；桌面软件和 Claude Code 的检查、下载、安装也必须由用户主动触发。
+- Claude Worker 只接受协议中定义的命令和事件；Worker 异常退出必须拒绝挂起请求、清理其 Query 进程树并让 Renderer 只恢复 Claude 会话。
+- Claude 插件/市场操作通过受控 Worker CLI 执行，必须校验名称、来源、工作区信任和输出大小；隔离测试不得改写用户真实 Claude 配置。
+- Claude 受管更新必须限制下载地址、大小、ZIP 内容、Windows 可执行文件和 Authenticode 签名；未验证签名只能走显式二次确认，不能静默安装。
+- Provider 的历史、模型、能力和事件格式只能在对应适配器中转换，通用 UI 使用统一的 `AgentOperation`、`AgentEventEnvelope` 和能力状态。
 
-## Git 与发布
+## 新增或修改功能
 
-- 未经明确授权，不执行 `git add`、`git commit`、`git push`、切分支、清理、重置或改写历史。
-- 正式发布前确认分支、远程、工作区、版本号和授权；版本号同步修改 `package.json` 与 `package-lock.json`。
-- 正式发布前只执行一次本地 `npm run package` 及必要的打包版回归，不在代码未变化时额外重复 `npm run build`。
-- 发布流程必须遵守“构建一次、验证同一份产物、发布同一份产物”；CI 在上传 Release 资产前必须对本次生成的 `win-unpacked` 执行上述打包版 Provider 回归，失败时禁止发布。
-- 正式发布使用普通推送 `develop`，再在已推送提交上创建并推送对应 `vX.Y.Z` Tag，等待 `.github/workflows/release.yml` 完成。
-- Release 必须同时满足打包版 Provider 回归通过，并包含 `AgentDesk-Setup-X.Y.Z.exe`、对应 blockmap 和 `latest.yml`；全部确认后才能报告发布完成。
-- 发布失败时停在失败步骤；不重复创建 Tag、不修改旧 Tag、不强制推送，修复后重新取得发布授权。
+- 新增桌面能力时同步更新：`src/shared` 类型、`preload` Bridge、主进程 IPC 注册与校验、请求白名单/超时、服务注入、Renderer 调用和必要测试。
+- 新增 Provider 操作时同步更新：共享操作枚举、Backend、能力注册表、请求适配、事件适配、会话登记规则、UI 能力判断和 Provider 测试。
+- 修改 Worker、子进程入口、`asar` 或 `asarUnpack` 时检查最终产物中的入口、相对导入和运行时依赖闭包；开发版能加载不能替代打包版检查。
+- 新依赖必须说明用途、体积、Electron 兼容性和现有依赖为何不足；没有明确必要性时不引入新的状态管理、路由、UI 组件库或虚拟列表库。
+
+## 原生命令
+
+依赖和命令以 `package.json` 为准。常用入口如下：
+
+- 安装依赖：`npm install`；干净 CI 或全新目录使用 `npm ci`。
+- 主进程、preload、Worker、shared：`npm run build:main`；Renderer：`npm run build:renderer`。
+- 全部构建、类型检查和测试：`npm run build`；仅测试：`npm test`。
+- 局部测试：先 `npm exec -- tsc -p src/tsconfig.test.json`，再执行对应 `build/tests/**/*.test.js`。
+- 开发 Electron：`npm run dev`；兼容入口：`npm run start`。不要手工拼接 Vite、Electron 或端口参数。
+- Renderer 浏览器预览：`npm run preview`。它只能验证 Mock Renderer，不能证明真实 Provider、IPC 或桌面能力。
+- Claude 插件隔离回归：`npm run test:claude-plugin-isolated`；它必须使用临时 Claude 配置并确认真实配置指纹不变。
+- 开发版 Electron 回归：`pwsh -NoProfile -ExecutionPolicy Bypass -File scripts/electron-regression.ps1`；按影响范围选择 `-LiveProviders`、`-ClaudeOnly` 或 `-SkipCore`。
+- Windows 打包：`npm run package`，固定不发布；打包后运行 `scripts/electron-package-regression.ps1`。
+- `release:github` 会发布，除非用户明确要求正式发布，否则不要运行。
+
+## 分级验证
+
+- 只改文档：检查内容、链接和 `git diff`，不运行构建、Electron 回归或打包。
+- 纯逻辑或低风险重构：先跑直接相关测试；同一行为链的改动合并验证，失败后先定位根因再重跑。
+- Renderer 改动：先 `npm run build:renderer`，再按风险运行 Mock 预览或开发版 Electron 回归；检查加载、空状态、错误、长文本和布局。
+- 主进程、preload、shared、Provider、IPC、审批、附件、更新、进程或窗口生命周期改动：跑相关测试和 `npm run build:main`，批次末尾补开发版 Electron 回归。
+- Electron 运行时、electron-builder、安装包、Worker 闭包或更新链路改动：批次末尾执行一次 `npm run package` 和打包版回归；不要用开发版回归替代打包版回归。
+- 打包版回归必须真实启动 `build/release/win-unpacked/AgentDesk.exe`，通过正式 Bridge 验证隔离的 Claude `listSessions`、`readSession` 和 Codex `listSessions`，并确认 Worker/Provider 没有模块缺失。
+- `npm run build` 已包含测试，`npm run package` 已包含完整构建；代码未变化时不要重复执行嵌套入口。
+- 回归结束后停止本轮启动的服务、窗口和 Playwright 会话；只结束自己记录的进程树，不按名称批量结束用户进程。
+
+## CI、Git 与发布
+
+- CI 验证和 Release 规则以 `.github/workflows` 为唯一依据；修改工作流时同步检查触发分支、Node/npm、构建入口、产物校验和打包版 Provider 回归。
+- 发布前确认当前分支、远程、工作区、版本号、`package-lock.json` 和授权；版本变更必须同步两个包文件。
+- 发布应遵守“构建一次、验证同一份产物、发布同一份产物”。安装包、blockmap、`latest.yml` 和 Tag 必须与版本一致。
+- Release 或发布步骤失败时停在失败点，不重复创建 Tag、不修改旧 Tag、不强制推送；修复后重新取得发布授权。

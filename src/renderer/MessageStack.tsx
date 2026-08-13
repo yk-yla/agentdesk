@@ -1,4 +1,4 @@
-import { ArrowUpRight, Check, FileSearch, FolderOpen, GitBranch, ListTodo, Copy } from "lucide-react";
+import { Check, FolderOpen, Copy } from "lucide-react";
 import { Fragment, lazy, memo, Suspense, useMemo, useState } from "react";
 import type { AgentBridge, DisplayMode } from "../shared/protocol";
 import type { AgentProvider } from "../shared/agentProtocol";
@@ -20,29 +20,7 @@ interface Props {
   bridge: AgentBridge;
   cwd: string;
   provider: AgentProvider;
-  onStartPrompt: (prompt: string) => void;
 }
-
-const QUICK_STARTS = [
-  {
-    title: "检查当前改动",
-    detail: "找出风险与遗漏",
-    prompt: "检查当前目录的未提交改动，重点找出 bug、风险和遗漏的验证。先只读检查并告诉我结果。",
-    Icon: GitBranch,
-  },
-  {
-    title: "了解这个项目",
-    detail: "梳理结构与关键入口",
-    prompt: "阅读当前项目的关键文件，概括项目用途、技术栈和主要代码结构。",
-    Icon: FileSearch,
-  },
-  {
-    title: "找出待办事项",
-    detail: "定位 TODO 与未完成项",
-    prompt: "扫描当前项目中的 TODO、FIXME 和明显未完成项，按优先级列出建议。",
-    Icon: ListTodo,
-  },
-];
 
 interface MessageItemProps {
   message: Message;
@@ -53,6 +31,7 @@ interface MessageItemProps {
 function MessageItem({ message, bridge, provider }: MessageItemProps) {
   const [copied, setCopied] = useState(false);
   const formattedTimestamp = formatMessageTimestamp(message.timestamp || 0);
+  const showToolbar = message.role !== "system" && Boolean(formattedTimestamp);
 
   const copyMessage = async () => {
     try {
@@ -71,21 +50,20 @@ function MessageItem({ message, bridge, provider }: MessageItemProps) {
       data-user-message-anchor={message.role === "user" ? "" : undefined}
     >
       <div className="message-content">
-        <div className="message-toolbar">
-          {formattedTimestamp && message.role !== "system" ? (
+        {showToolbar ? (
+          <div className="message-toolbar">
             <time className="message-timestamp" dateTime={new Date(message.timestamp || 0).toISOString()}>{formattedTimestamp}</time>
-          ) : null}
-          <button
-            type="button"
-            className="message-copy-button"
-            onClick={() => void copyMessage()}
-            title={copied ? "已复制" : "复制消息"}
-            aria-label={copied ? "已复制" : "复制消息"}
-          >
-            {copied ? <Check size={13} /> : <Copy size={13} />}
-            <span>{copied ? "已复制" : "复制"}</span>
-          </button>
-        </div>
+            <button
+              type="button"
+              className="message-copy-button"
+              onClick={() => void copyMessage()}
+              title={copied ? "已复制" : "复制消息"}
+              aria-label={copied ? "已复制" : "复制消息"}
+            >
+              {copied ? <Check size={13} /> : <Copy size={13} />}
+            </button>
+          </div>
+        ) : null}
         <div className="message-text">
           <Suspense fallback={<span className="markdown-loading" aria-busy="true">正在加载消息</span>}>
             <MarkdownMessage
@@ -110,7 +88,7 @@ const MemoMessageItem = memo(MessageItem);
  * 只渲染最近一段消息，历史更早的部分按需展开。
  * 长会话首次挂载不再一次性解析全部 Markdown。
  */
-function MessageStackBase({ messages, visibleActivities, displayMode, bridge, cwd, provider, onStartPrompt }: Props) {
+function MessageStackBase({ messages, visibleActivities, displayMode, bridge, cwd, provider }: Props) {
   const [visibleCount, setVisibleCount] = useState(MESSAGE_WINDOW);
   const [activityWindow, setActivityWindow] = useState({ mode: displayMode, count: ACTIVITY_WINDOW });
   const visibleActivityCount = activityWindow.mode === displayMode ? activityWindow.count : ACTIVITY_WINDOW;
@@ -138,15 +116,6 @@ function MessageStackBase({ messages, visibleActivities, displayMode, bridge, cw
           <span>当前工作区</span>
           <strong>{basename(cwd)}</strong>
           <code>{cwd}</code>
-        </div>
-        <div className="welcome-actions" role="group" aria-label="快速开始">
-          {QUICK_STARTS.map(({ title, detail, prompt, Icon }) => (
-            <button type="button" className="welcome-action" key={title} onClick={() => onStartPrompt(prompt)}>
-              <span className="welcome-action-icon"><Icon size={16} /></span>
-              <span className="welcome-action-copy"><strong>{title}</strong><small>{detail}</small></span>
-              <ArrowUpRight size={15} className="welcome-action-arrow" />
-            </button>
-          ))}
         </div>
       </div>
     );

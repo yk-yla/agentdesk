@@ -3,7 +3,7 @@ import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { describe, it } from "node:test";
-import { DEFAULT_PREFERENCES, normalizeClaudeModelCache, normalizePreferences, PreferencesStore } from "./preferencesStore";
+import { DEFAULT_PREFERENCES, normalizeClaudeModelCache, normalizePreferences, normalizeRecentCommandUsage, PreferencesStore } from "./preferencesStore";
 
 function withStore(run: (store: PreferencesStore, filePath: string) => void) {
   const directory = mkdtempSync(path.join(tmpdir(), "agentdesk-preferences-"));
@@ -45,6 +45,14 @@ describe("PreferencesStore", () => {
         invalid: { tokens: -1, updatedAt: 1 },
       },
       lastReasoningEfforts: { codex: " xhigh ", claude: "high", unknown: "medium" },
+      recentCommandUsage: { "command:status": 20, "skill:review": 30, invalid: -1, bad: "later" },
+      codexCompactionCounts: {
+        "codex:thread-1": { count: 12, eventIds: ["compact-1", "compact-2", "compact-1"], updatedAt: 100 },
+        invalid: { count: -1, eventIds: [1] },
+      },
+      compactionCounts: {
+        "claude:thread-2": { count: 8, eventIds: ["claude-compaction-1"], updatedAt: 200 },
+      },
       trustedClaudeWorkspaces: [...Array.from({ length: 300 }, (_, index) => `trusted-${index}`), 1],
       workspaceState: [],
       ignored: "field",
@@ -60,9 +68,19 @@ describe("PreferencesStore", () => {
     assert.deepEqual(preferences.sessionAliases, { valid: "Title" });
     assert.deepEqual(preferences.modelContextWindows, { valid: { tokens: 200_000, updatedAt: 2 } });
     assert.deepEqual(preferences.lastReasoningEfforts, { codex: "xhigh", claude: "high" });
+    assert.deepEqual(preferences.recentCommandUsage, { "skill:review": 30, "command:status": 20 });
+    assert.deepEqual(preferences.codexCompactionCounts, { "codex:thread-1": { count: 12, eventIds: ["compact-1", "compact-2"], updatedAt: 100 } });
+    assert.deepEqual(preferences.compactionCounts, {
+      "codex:thread-1": { count: 12, eventIds: ["compact-1", "compact-2"], updatedAt: 100 },
+      "claude:thread-2": { count: 8, eventIds: ["claude-compaction-1"], updatedAt: 200 },
+    });
     assert.equal(preferences.trustedClaudeWorkspaces?.length, 256);
     assert.equal(preferences.workspaceState, undefined);
     assert.equal("ignored" in preferences, false);
+  });
+
+  it("keeps recent command usage sorted and bounded", () => {
+    assert.deepEqual(normalizeRecentCommandUsage({ "command:old": 1, "skill:new": 3, "command:middle": 2, invalid: 4 }), { "skill:new": 3, "command:middle": 2, "command:old": 1 });
   });
 
   it("accepts only the three supported themes and migrates removed themes", () => {

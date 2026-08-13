@@ -1,6 +1,6 @@
 import { mkdirSync, readFileSync, statSync } from "node:fs";
 import path from "node:path";
-import { DEFAULT_BASE_FONT_SIZE, MAX_BASE_FONT_SIZE, MIN_BASE_FONT_SIZE, type ClaudeModelCache, type ClaudeModelCacheModel, type DesktopPreferences, type DisplayMode, type ThemeId } from "../shared/protocol";
+import { DEFAULT_BASE_FONT_SIZE, MAX_BASE_FONT_SIZE, MIN_BASE_FONT_SIZE, type ClaudeModelCache, type ClaudeModelCacheModel, type CompactionRecord, type DesktopPreferences, type DisplayMode, type ThemeId } from "../shared/protocol";
 import { DEFAULT_BOSS_KEY, normalizeBossKeyAccelerator } from "../shared/bossKey";
 import { normalizeFavoriteSessionSummaries } from "../shared/favoriteSessions";
 import { writeTextFileAtomic } from "./atomicFile";
@@ -9,6 +9,9 @@ const MAX_PREFERENCES_BYTES = 4 * 1024 * 1024;
 const MAX_MODEL_CONTEXT_WINDOW_CACHE_ENTRIES = 256;
 const MAX_CLAUDE_MODEL_CACHE_MODELS = 64;
 const CLAUDE_MODEL_CACHE_TTL_MS = 14 * 24 * 60 * 60 * 1000;
+const MAX_COMPACTION_COUNT_ENTRIES = 512;
+const MAX_COMPACTION_EVENT_IDS = 64;
+const MAX_RECENT_COMMAND_USAGE_ENTRIES = 512;
 
 export const DEFAULT_PREFERENCES: DesktopPreferences = {
   recentWorkspaces: [],
@@ -21,6 +24,9 @@ export const DEFAULT_PREFERENCES: DesktopPreferences = {
   favoriteSessionSummaries: {},
   modelContextWindows: {},
   lastReasoningEfforts: {},
+  recentCommandUsage: {},
+  compactionCounts: {},
+  codexCompactionCounts: {},
   theme: "github-light",
   displayMode: "simple",
   bossKey: DEFAULT_BOSS_KEY,
@@ -59,6 +65,34 @@ export function normalizeLastReasoningEfforts(value: unknown): NonNullable<Deskt
     return effort && effort.length <= 32 ? [[provider, effort]] : [];
   }));
 }
+
+export function normalizeRecentCommandUsage(value: unknown): NonNullable<DesktopPreferences["recentCommandUsage"]> {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return {};
+  return Object.fromEntries(Object.entries(value as Record<string, unknown>)
+    .filter(([key, timestamp]) => /^(command|skill):.+$/u.test(key) && key.length <= 512 && typeof timestamp === "number" && Number.isSafeInteger(timestamp) && timestamp > 0)
+    .sort((left, right) => Number(right[1]) - Number(left[1]))
+    .slice(0, MAX_RECENT_COMMAND_USAGE_ENTRIES)) as Record<string, number>;
+}
+
+export function normalizeCompactionCounts(value: unknown): NonNullable<DesktopPreferences["compactionCounts"]> {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return {};
+  return Object.fromEntries(Object.entries(value as Record<string, unknown>)
+    .map(([key, raw]) => {
+      const record = raw && typeof raw === "object" && !Array.isArray(raw) ? raw as Record<string, unknown> : {};
+      const count = typeof record.count === "number" && Number.isSafeInteger(record.count) ? record.count : 0;
+      const eventIds = Array.isArray(record.eventIds)
+        ? [...new Set(record.eventIds.filter((id): id is string => typeof id === "string" && id.length > 0 && id.length <= 240))].slice(-MAX_COMPACTION_EVENT_IDS)
+        : [];
+      const updatedAt = typeof record.updatedAt === "number" && Number.isSafeInteger(record.updatedAt) && record.updatedAt > 0 ? record.updatedAt : 0;
+      return [key, { count: Math.max(count, eventIds.length), eventIds, updatedAt } satisfies CompactionRecord] as const;
+    })
+    .filter(([key, record]) => key.length > 0 && key.length <= 512 && record.count > 0 && record.count <= 10_000_000)
+    .sort((left, right) => right[1].updatedAt - left[1].updatedAt)
+    .slice(0, MAX_COMPACTION_COUNT_ENTRIES));
+}
+
+/** 旧名称保留给 IPC 和已有调用方，实际使用同一套 Provider 无关归一化。 */
+export const normalizeCodexCompactionCounts = normalizeCompactionCounts;
 
 export function normalizeModelContextWindows(value: unknown): NonNullable<DesktopPreferences["modelContextWindows"]> {
   if (!value || typeof value !== "object" || Array.isArray(value)) return {};
@@ -131,6 +165,12 @@ export function normalizePreferences(value: unknown): DesktopPreferences {
     modelContextWindows: normalizeModelContextWindows(parsed.modelContextWindows),
     ...(claudeModelCache ? { claudeModelCache } : {}),
     lastReasoningEfforts: normalizeLastReasoningEfforts(parsed.lastReasoningEfforts),
+    recentCommandUsage: normalizeRecentCommandUsage(parsed.recentCommandUsage),
+    compactionCounts: normalizeCompactionCounts({
+      ...normalizeCompactionCounts(parsed.codexCompactionCounts),
+      ...normalizeCompactionCounts(parsed.compactionCounts),
+    }),
+    codexCompactionCounts: normalizeCompactionCounts(parsed.codexCompactionCounts),
     trustedClaudeWorkspaces: Array.isArray(parsed.trustedClaudeWorkspaces) ? parsed.trustedClaudeWorkspaces.filter((item): item is string => typeof item === "string").slice(0, 256) : [],
   };
   if (parsed.workspaceState && typeof parsed.workspaceState === "object" && !Array.isArray(parsed.workspaceState)) {

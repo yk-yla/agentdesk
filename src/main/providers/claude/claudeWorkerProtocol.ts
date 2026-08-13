@@ -33,6 +33,7 @@ export type ClaudeWorkerEvent =
   | { type: "closed"; sessionId: string; queryGeneration: number }
   | { type: "interactionPending"; sessionId: string; queryGeneration: number; interactionId: string; kind: "permission" | "userQuestion" | "mcpElicitation"; payload: JsonObject }
   | { type: "interactionFinished"; sessionId: string; queryGeneration: number; interactionId: string; status: "resolved" | "cancelled" }
+  | { type: "cleanupComplete"; error?: string }
   | { type: "response"; requestId: string; result?: unknown; error?: string }
   | { type: "error"; sessionId?: string; queryGeneration?: number; message: string; payload?: JsonObject }
   | { type: "fatal"; message: string };

@@ -131,6 +131,7 @@ export function createUpdateWorkspaceState(input: {
       return {
         id: session.id,
         threadId: session.threadId || "",
+        provider: session.provider,
         cwd: session.cwd.slice(0, 2_000),
         title: session.title.slice(0, 500),
         updatedAt: session.updatedAt,
@@ -196,7 +197,8 @@ export function parseUpdateWorkspaceState(value: unknown, currentWorkspace: stri
     const id = stateId(saved.id);
     const cwd = stringValue(saved.cwd, currentWorkspace).slice(0, 32_000);
     if (!id || !cwd || sessions[id]) continue;
-    const session = emptySession(id, cwd, stringValue(saved.model).slice(0, 240), stringValue(saved.effort, "medium").slice(0, 80));
+    const provider = saved.provider === "claude" ? "claude" : "codex";
+    const session = emptySession(id, cwd, stringValue(saved.model).slice(0, 240), stringValue(saved.effort, "medium").slice(0, 80), provider);
     session.threadId = stringValue(saved.threadId).slice(0, 240) || null;
     session.title = stringValue(saved.title, "新会话").slice(0, 500);
     const savedUpdatedAt = numberValue(saved.updatedAt);

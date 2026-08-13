@@ -222,6 +222,7 @@ export function createMockBridge(): CodexBridge {
     getWorkspace: () => Promise.resolve(mockWorkspace),
     getLaunchProvider: () => Promise.resolve(null),
     chooseWorkspace: (defaultPath?: string) => Promise.resolve(defaultPath || mockWorkspace),
+    authorizeWorkspace: (cwd: string) => Promise.resolve(cwd),
     getPreferences: () => Promise.resolve(mockPreferences),
     getCodexDefaults: () => Promise.resolve(mockDefaults),
     savePreferences: (preferences) => { mockPreferences = { ...mockPreferences, ...preferences }; return Promise.resolve(mockPreferences); },
@@ -280,6 +281,12 @@ export function createMockBridge(): CodexBridge {
     revokeClaudeWorkspace: (cwd: string) => {
       mockClaudeRuntimeStatus = { ...mockClaudeRuntimeStatus, trustedWorkspaces: mockClaudeRuntimeStatus.trustedWorkspaces.filter((entry) => entry.toLowerCase() !== cwd.toLowerCase()), message: "已撤销该 Claude 工作区信任。" };
       claudeUpdateListeners.forEach((listener) => listener(mockClaudeRuntimeStatus));
+      return Promise.resolve(mockClaudeRuntimeStatus);
+    },
+    trustClaudeWorkspace: (cwd: string) => {
+      if (!mockClaudeRuntimeStatus.trustedWorkspaces.some((entry) => entry.toLowerCase() === cwd.toLowerCase())) {
+        mockClaudeRuntimeStatus = { ...mockClaudeRuntimeStatus, trustedWorkspaces: [...mockClaudeRuntimeStatus.trustedWorkspaces, cwd], message: "已信任 Claude 工作区。" };
+      }
       return Promise.resolve(mockClaudeRuntimeStatus);
     },
     onClaudeRuntimeStatus(listener) {

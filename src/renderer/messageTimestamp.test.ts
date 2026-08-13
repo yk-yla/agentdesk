@@ -3,9 +3,9 @@ import { describe, it } from "node:test";
 import { formatMessageTimestamp, getMessageTimeDivider, timestampFromUnknown } from "./messageTimestamp";
 
 describe("message timestamps", () => {
-  it("formats the complete timestamp shown in the hover toolbar", () => {
+  it("formats the time shown above the message bubble", () => {
     const sentAt = new Date(2026, 7, 12, 9, 5, 7).getTime();
-    assert.equal(formatMessageTimestamp(sentAt), "2026-08-12 09:05:07");
+    assert.equal(formatMessageTimestamp(sentAt), "09:05:07");
   });
 
   it("uses date dividers for today, yesterday, and earlier dates", () => {

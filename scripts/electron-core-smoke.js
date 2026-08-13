@@ -52,12 +52,15 @@ async page => {
     results.push("Electron 43、窗口安全配置和桌面更新 IPC 可用");
 
     const currentWorkspace = sidebar.locator(".current-workspace");
+    assert(await sidebar.locator(".provider-new-group").count() === 0, "侧栏顶部仍显示 Codex、Claude 大按钮。" );
+    assert(await currentWorkspace.locator(".provider-new-codex").count() === 1, "当前目录缺少 Codex 新建入口。" );
+    assert(await currentWorkspace.locator(".provider-new-claude").count() === 1, "当前目录缺少 Claude Code 新建入口。" );
     assert(await currentWorkspace.locator(".current-workspace-terminal").count() === 1, "当前目录缺少 WT 入口。" );
     const currentWorkspacePin = currentWorkspace.locator(".current-workspace-pin");
     if (await currentWorkspacePin.getAttribute("aria-pressed") !== "true") await currentWorkspacePin.click();
     await sidebar.locator(".shortcut-row .shortcut-terminal").first().waitFor({ state: "visible", timeout: 10_000 });
     assert(await page.locator(".composer-more-menu").getByText("在 WT 打开当前目录", { exact: true }).count() === 0, "会话更多菜单仍包含 WT 入口。" );
-    results.push("WT 入口位于当前目录和固定目录，且已从会话菜单移除");
+    results.push("Codex、Claude 和 WT 入口位于当前目录，固定目录入口保持可用");
 
     const settingsButton = sidebar.locator("button.settings-button");
     await settingsButton.click();
@@ -235,11 +238,13 @@ async page => {
     const timestampedUserMessage = activeConversation().locator(".message-row.user").last();
     await timestampedUserMessage.waitFor({ state: "visible", timeout: 15_000 });
     const userTimestamp = timestampedUserMessage.locator(".message-timestamp");
-    assert(await userTimestamp.count() === 1, "用户消息缺少完整时间。" );
-    assert(/^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}$/.test((await userTimestamp.textContent()) || ""), "用户消息时间格式不正确。" );
-    assert(Number(await userTimestamp.evaluate((element) => getComputedStyle(element.closest(".message-toolbar") || element).opacity)) === 0, "用户消息工具栏默认可见。" );
-    await timestampedUserMessage.locator(".message-content").hover();
-    await page.waitForFunction((element) => Number(getComputedStyle(element.closest(".message-toolbar") || element).opacity) === 1, await userTimestamp.elementHandle(), { timeout: 10_000 });
+    const userCopyButton = timestampedUserMessage.locator(".message-copy-button");
+    assert(await userTimestamp.count() === 1, "用户消息缺少时间。" );
+    assert(/^\d{2}:\d{2}:\d{2}$/.test((await userTimestamp.textContent()) || ""), "用户消息时间格式不正确。" );
+    assert(Number(await userTimestamp.evaluate((element) => getComputedStyle(element).opacity)) === 1, "用户消息时间没有常显。" );
+    assert(Number(await userCopyButton.evaluate((element) => getComputedStyle(element).opacity)) === 0, "用户消息复制按钮默认可见。" );
+    await userCopyButton.focus();
+    await page.waitForFunction((element) => Number(getComputedStyle(element).opacity) === 1, await userCopyButton.elementHandle(), { timeout: 10_000 });
     await page.waitForFunction(() => {
       const messages = Array.from(document.querySelectorAll(".pane-panel .message-row.assistant")).map((entry) => entry.textContent || "");
       return messages.length === 2
@@ -252,15 +257,33 @@ async page => {
     assert(!streamMessages.some((message) => message.includes("[已截断]")), "Claude 长回复仍被 8 KB 上限截断。" );
     const timestampedAssistantMessage = activeConversation().locator(".message-row.assistant").last();
     const assistantTimestamp = timestampedAssistantMessage.locator(".message-timestamp");
-    assert(await assistantTimestamp.count() === 1, "AI 消息缺少完整时间。" );
-    assert(/^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}$/.test((await assistantTimestamp.textContent()) || ""), "AI 消息时间格式不正确。" );
-    assert(Number(await assistantTimestamp.evaluate((element) => getComputedStyle(element.closest(".message-toolbar") || element).opacity)) === 0, "AI 消息工具栏默认可见。" );
-    await timestampedAssistantMessage.locator(".message-content").hover();
-    await page.waitForFunction((element) => Number(getComputedStyle(element.closest(".message-toolbar") || element).opacity) === 1, await assistantTimestamp.elementHandle(), { timeout: 10_000 });
+    const assistantCopyButton = timestampedAssistantMessage.locator(".message-copy-button");
+    assert(await assistantTimestamp.count() === 1, "AI 消息缺少时间。" );
+    assert(/^\d{2}:\d{2}:\d{2}$/.test((await assistantTimestamp.textContent()) || ""), "AI 消息时间格式不正确。" );
+    assert(Number(await assistantTimestamp.evaluate((element) => getComputedStyle(element).opacity)) === 1, "AI 消息时间没有常显。" );
+    assert(Number(await assistantCopyButton.evaluate((element) => getComputedStyle(element).opacity)) === 0, "AI 消息复制按钮默认可见。" );
+    await timestampedAssistantMessage.locator(".message-content").hover({ force: true });
+    await page.waitForFunction((element) => Number(getComputedStyle(element).opacity) === 1, await assistantCopyButton.elementHandle(), { timeout: 10_000 });
+    const alignment = await timestampedAssistantMessage.evaluate((message) => {
+      const bubble = message.querySelector(".message-text")?.getBoundingClientRect();
+      const copy = message.querySelector(".message-copy-button")?.getBoundingClientRect();
+      return bubble && copy ? Math.abs(bubble.right - copy.right) : Number.POSITIVE_INFINITY;
+    });
+    assert(alignment <= 1, `复制按钮没有与消息气泡右边缘对齐：${alignment}px`);
+    await page.evaluate(() => {
+      Object.defineProperty(navigator, "clipboard", {
+        configurable: true,
+        value: { writeText: async (value) => { window.__agentDeskCopiedMessage = value; } },
+      });
+    });
+    const assistantText = await timestampedAssistantMessage.locator(".message-text").innerText();
+    await assistantCopyButton.click({ force: true });
+    await page.waitForFunction((element) => element?.getAttribute("aria-label") === "已复制", await assistantCopyButton.elementHandle(), { timeout: 10_000 });
+    assert(await page.evaluate(() => window.__agentDeskCopiedMessage) === assistantText, "复制按钮没有写入消息正文。" );
     await stopButton.click({ force: true });
     await stopButton.waitFor({ state: "hidden", timeout: 15_000 });
     assert(await page.locator(".pane-panel .error-banner").count() === 0, "Claude 流式夹具中断后留下错误状态。" );
-    results.push("Claude 流式片段完整，消息工具栏可悬停显示完整时间");
+    results.push("Claude 流式片段完整，消息时间常显且复制图标对齐可用");
 
     await openClaude();
     await page.evaluate(() => window.agentDesk.dev.setClaudeLifecycleFixture("incompleteTool"));

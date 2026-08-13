@@ -1,7 +1,6 @@
 import { spawn, type ChildProcess } from "node:child_process";
 
 export type ProcessTreeTerminator = (child: ChildProcess) => Promise<void>;
-export type ProcessIdTerminator = (pid: number) => Promise<void>;
 
 export function terminateWindowsProcessTree(pid: number): Promise<void> {
   return new Promise((resolve) => {
@@ -33,10 +32,7 @@ export function terminateProcessTree(child: ChildProcess): Promise<void> {
 export class ProcessSupervisor {
   private readonly children = new Set<ChildProcess>();
 
-  constructor(
-    private readonly terminateTree: ProcessTreeTerminator = terminateProcessTree,
-    private readonly terminateProcessId: ProcessIdTerminator = terminateWindowsProcessTree,
-  ) {}
+  constructor(private readonly terminateTree: ProcessTreeTerminator = terminateProcessTree) {}
 
   track<T extends ChildProcess>(child: T): T {
     this.children.add(child);
@@ -48,10 +44,6 @@ export class ProcessSupervisor {
 
   terminate(child: ChildProcess) {
     return this.terminateTree(child);
-  }
-
-  terminatePid(pid: number) {
-    return this.terminateProcessId(pid);
   }
 
   async terminateAll() {

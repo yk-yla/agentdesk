@@ -13,6 +13,8 @@ describe("desktop IPC validation", () => {
       recentWorkspaces: ["one", 2],
       claudeModelCache: { schema: 2, claudeVersion: "1.2.3", updatedAt, models: [{ id: "sonnet", displayName: "Sonnet", efforts: [], defaultEffort: "", supportsImage: true }] },
       lastReasoningEfforts: { codex: " xhigh ", claude: "high", unknown: "medium" },
+      codexCompactionCounts: { "codex:thread-1": { count: 12, eventIds: ["compact-1", 2], updatedAt: 100 } },
+      compactionCounts: { "claude:thread-2": { count: 8, eventIds: ["claude-compact-1", 2], updatedAt: 200 } },
       workspaceState: [],
       ignored: true,
     }), {
@@ -22,6 +24,8 @@ describe("desktop IPC validation", () => {
       recentWorkspaces: ["one"],
       claudeModelCache: { schema: 2, claudeVersion: "1.2.3", updatedAt, models: [{ id: "sonnet", displayName: "Sonnet", description: "", efforts: [], defaultEffort: "", supportsImage: true }] },
       lastReasoningEfforts: { codex: "xhigh", claude: "high" },
+      codexCompactionCounts: { "codex:thread-1": { count: 12, eventIds: ["compact-1"], updatedAt: 100 } },
+      compactionCounts: { "claude:thread-2": { count: 8, eventIds: ["claude-compact-1"], updatedAt: 200 } },
     });
     assert.deepEqual(sanitizePreferencesPatch({ theme: "dracula" }), {});
   });

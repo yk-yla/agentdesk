@@ -239,9 +239,36 @@ describe("Claude activity settlement", () => {
     const compacted = applyClaudeEvent(source, event("claude/sdkMessage", {
       type: "system",
       subtype: "compact_boundary",
+      uuid: "compact-1",
       compact_metadata: { trigger: "manual", pre_tokens: 2_000, post_tokens: 800 },
     })).session;
     assert.equal(compacted.compactionCount, 1);
+    assert.deepEqual(compacted.compactionEventIds, ["claude-compaction-compact-1"]);
+
+    const replayed = applyClaudeEvent(compacted, event("claude/sdkMessage", {
+      type: "system",
+      subtype: "compact_boundary",
+      uuid: "compact-1",
+    })).session;
+    assert.equal(replayed.compactionCount, 1);
+
+    const withoutUuid = applyClaudeEvent(source, adaptClaudeEvent({
+      provider: "claude",
+      sessionId: "session",
+      queryGeneration: 2,
+      receivedAt: 123,
+      type: "claude/sdkMessage",
+      payload: { type: "system", subtype: "compact_boundary" },
+    })).session;
+    const replayedWithoutUuid = applyClaudeEvent(withoutUuid, adaptClaudeEvent({
+      provider: "claude",
+      sessionId: "session",
+      queryGeneration: 2,
+      receivedAt: 123,
+      type: "claude/sdkMessage",
+      payload: { type: "system", subtype: "compact_boundary" },
+    })).session;
+    assert.equal(replayedWithoutUuid.compactionCount, 1);
 
     const hydrated = hydrateClaudeSession(source, {
       id: "native-session",
@@ -252,6 +279,19 @@ describe("Claude activity settlement", () => {
     });
     assert.equal(hydrated.compactionCount, 1);
     assert.equal(hydrated.messages[0]?.text, "压缩后回复");
+  });
+
+  it("keeps the persisted Claude lifetime compaction count when history is trimmed", () => {
+    const hydrated = hydrateClaudeSession(emptySession("session", "C:\\workspace", "", "", "claude"), {
+      id: "native-session",
+      messages: [{ type: "system", subtype: "compact_boundary", uuid: "recent" }],
+    }, {
+      persistedCompactionCount: 12,
+      persistedCompactionEventIds: ["claude-compaction-old"],
+    });
+
+    assert.equal(hydrated.compactionCount, 12);
+    assert.deepEqual(hydrated.compactionEventIds, ["claude-compaction-old", "claude-compaction-recent"]);
   });
 
   it("settles unfinished tools on result, interruption and backend exit", () => {

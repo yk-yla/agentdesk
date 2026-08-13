@@ -787,11 +787,40 @@ async function closeSession(sessionId: string, generation?: number) {
   state.cleanupTimers?.forEach((timer) => clearTimeout(timer));
   cancelInteractions(state, "Claude 会话已关闭。");
   state.input.close();
-  try { await state.query.return(); } catch { state.query.close(); }
   state.abortController.abort();
-  await processTrees.close(sessionId, state.generation);
-  await state.settingsSnapshot.dispose();
+  const queryCleanup = Promise.resolve().then(async () => {
+    try { await state.query.return(); } catch { state.query.close(); }
+  });
+  const boundedQueryCleanup = new Promise<void>((resolve, reject) => {
+    const timer = setTimeout(() => reject(new Error("Claude Query 清理超时。")), 12_000);
+    queryCleanup.then(
+      () => { clearTimeout(timer); resolve(); },
+      (error) => { clearTimeout(timer); reject(error); },
+    );
+  });
+  const results = await Promise.allSettled([
+    boundedQueryCleanup,
+    processTrees.close(sessionId, state.generation),
+    state.settingsSnapshot.dispose(),
+  ]);
+  const failures = results.flatMap((result) => result.status === "rejected"
+    ? [result.reason instanceof Error ? result.reason.message : String(result.reason)]
+    : []);
+  if (failures.length) throw new Error(failures.join("；"));
   emit({ type: "closed", sessionId, queryGeneration: state.generation });
+}
+
+async function cleanupWorker() {
+  const results = await Promise.allSettled([...states.keys()].map((sessionId) => closeSession(sessionId)));
+  const failures = results.flatMap((result) => result.status === "rejected"
+    ? [result.reason instanceof Error ? result.reason.message : String(result.reason)]
+    : []);
+  try {
+    await processTrees.closeAll();
+  } catch (error) {
+    failures.push(error instanceof Error ? error.message : String(error));
+  }
+  return failures.length ? failures.join("；") : undefined;
 }
 
 parentPort.on("message", (command: ClaudeWorkerCommand) => {
@@ -847,7 +876,8 @@ parentPort.on("message", (command: ClaudeWorkerCommand) => {
       return;
     }
     if (command.type === "close") {
-      await Promise.all([...states.keys()].map((sessionId) => closeSession(sessionId)));
+      const error = await cleanupWorker();
+      emit({ type: "cleanupComplete", ...(error ? { error } : {}) });
       parentPort!.close();
     }
   })().catch((error) => emit({
@@ -863,11 +893,8 @@ async function fatalShutdown(message: string) {
   if (fatalClosing) return;
   fatalClosing = true;
   emit({ type: "fatal", message });
-  await Promise.race([
-    Promise.allSettled([...states.keys()].map((sessionId) => closeSession(sessionId))),
-    new Promise((resolve) => setTimeout(resolve, 8_000)),
-  ]);
-  await processTrees.closeAll().catch(() => undefined);
+  const error = await cleanupWorker();
+  emit({ type: "cleanupComplete", ...(error ? { error } : {}) });
   parentPort!.close();
   process.exit(1);
 }

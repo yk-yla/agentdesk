@@ -12,6 +12,9 @@ const bridge: Omit<CodexBridge, "request" | "respond" | "onMessage"> = {
   chooseWorkspace(defaultPath?: string) {
     return ipcRenderer.invoke("agentdesk:choose-workspace", defaultPath);
   },
+  authorizeWorkspace(cwd: string) {
+    return ipcRenderer.invoke("agentdesk:authorize-workspace", cwd);
+  },
   getPreferences() {
     return ipcRenderer.invoke("agentdesk:get-preferences");
   },
@@ -117,6 +120,9 @@ const bridge: Omit<CodexBridge, "request" | "respond" | "onMessage"> = {
   revokeClaudeWorkspace(cwd: string) {
     return ipcRenderer.invoke("claude:workspace-revoke", cwd);
   },
+  trustClaudeWorkspace(cwd: string, purpose: "session" | "plugin") {
+    return ipcRenderer.invoke("claude:workspace-trust", { cwd, purpose });
+  },
   onClaudeRuntimeStatus(listener: (status: ClaudeRuntimeStatus) => void) {
     const wrapped = (_event: Electron.IpcRendererEvent, status: ClaudeRuntimeStatus) => listener(status);
     ipcRenderer.on("claude:runtime-status-changed", wrapped);
@@ -139,6 +145,7 @@ const agentBridge: AgentBridge = {
   getWorkspace: bridge.getWorkspace,
   getLaunchProvider: bridge.getLaunchProvider,
   chooseWorkspace: bridge.chooseWorkspace,
+  authorizeWorkspace: bridge.authorizeWorkspace,
   getPreferences: bridge.getPreferences,
   getCodexDefaults: bridge.getCodexDefaults,
   savePreferences: bridge.savePreferences,
@@ -172,6 +179,7 @@ const agentBridge: AgentBridge = {
   checkClaudeCodeUpdates: bridge.checkClaudeCodeUpdates,
   updateClaudeCode: bridge.updateClaudeCode,
   revokeClaudeWorkspace: bridge.revokeClaudeWorkspace,
+  trustClaudeWorkspace: bridge.trustClaudeWorkspace,
   onClaudeRuntimeStatus: bridge.onClaudeRuntimeStatus,
   ...(process.env.ELECTRON_RENDERER_URL ? {
     dev: {

@@ -138,6 +138,24 @@ describe("HistoryController", () => {
     assert.deepEqual(harness.entries.map((entry) => entry.id).sort(), ["claude-one", "claude-two", "codex-one", "codex-two"]);
   });
 
+  it("coalesces concurrent history refreshes", async () => {
+    const pending = deferred<unknown>();
+    let calls = 0;
+    const harness = createHarness(async (provider) => {
+      calls += 1;
+      if (provider === "codex") return pending.promise;
+      return listValue("claude", provider);
+    });
+
+    const first = harness.controller.refresh();
+    const second = harness.controller.refresh();
+    assert.equal(first, second);
+    assert.equal(calls, 1);
+    pending.resolve(listValue("codex", "codex"));
+    await first;
+    assert.equal(calls, 2);
+  });
+
   it("lets the latest search win when responses arrive out of order", async () => {
     const first = deferred<unknown>();
     const harness = createHarness(async (provider, operation, params) => {

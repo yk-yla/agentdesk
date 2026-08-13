@@ -1,9 +1,9 @@
-import { ArrowLeftToLine, ArrowRight, ArrowRightToLine, Columns2, Download, GitFork, Pencil, Pin, PinOff, Star, Trash2, X } from "lucide-react";
+import { ArrowLeftToLine, ArrowRight, ArrowRightToLine, Download, GitFork, Pencil, Pin, PinOff, Plus, Star, Trash2, X } from "lucide-react";
 import { lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState, type CSSProperties, type DragEvent, type MouseEvent, type PointerEvent as ReactPointerEvent } from "react";
 import type { AgentCapabilities, AgentOperation, AgentProvider } from "../shared/agentProtocol";
 import { DEFAULT_BOSS_KEY } from "../shared/bossKey";
 import { providerDisplayName } from "../shared/providerMetadata";
-import { DEFAULT_BASE_FONT_SIZE, type AgentBridge, type BossKeyStatus, type ClaudeRuntimeStatus, type CodexCliUpdateStatus, type CodexDefaults, type DesktopPreferences, type DesktopUpdateStatus, type JsonObject } from "../shared/protocol";
+import { DEFAULT_BASE_FONT_SIZE, type BossKeyStatus, type ClaudeRuntimeStatus, type CodexCliUpdateStatus, type CompactionRecord, type CodexDefaults, type DesktopPreferences, type DesktopUpdateStatus, type JsonObject } from "../shared/protocol";
 import {
   asRecord, basename, DEFAULT_DISPLAY_MODE, DEFAULT_THEME, emptySession, findModelOption,
   EMPTY_CODEX_DEFAULTS, normalizedDirectory, numberValue, sameDirectory, stringValue, upsertHistoryEntry,
@@ -17,7 +17,7 @@ import {
 import { createClaudeModelCache, sameClaudeModelCache } from "./agent/claudeModelCache";
 import { codexRequestMethod, isCodexRequestTimeout, mergeMessages } from "./inputQueue";
 import {
-  applyProviderModelDefaults, initialProviderCapabilities, initialProviderModels, newSessionDefaults, normalizeAgentRequestError, providerAffectsStartupState, retargetEmptySession,
+  applyProviderModelDefaults, initialProviderCapabilities, initialProviderModels, newSessionDefaults, normalizeAgentRequestError, retargetEmptySession,
   providerDisconnectedMessage, trustWorkspaceForRequest, workspaceForProvider,
 } from "./agent/providerRegistry";
 import { createMockAgentBridge } from "./mockBridge";
@@ -36,7 +36,10 @@ import { LayoutController, type TabDropPosition, type TabDropTarget } from "./la
 import WindowTitleBar from "./WindowTitleBar";
 import ProviderIcon from "./ProviderIcon";
 import { closeSessionResources } from "./sessionLifecycle";
-import { installRendererDiagnostics } from "./rendererDiagnostics";
+import { installRendererDiagnostics, trackUiEvent } from "./rendererDiagnostics";
+import { initializeProviders, providerCanRestore, type ProviderStartupState } from "./providerInitialization";
+import type { CommandUsage } from "./commandSuggestions";
+import { TurnTelemetry } from "./turnTelemetry";
 
 const PluginPanel = lazy(() => import("./PluginPanel"));
 
@@ -101,6 +104,32 @@ function tokenUsageForModel(session: SessionState, model: string, preferences: D
   return total === session.tokenUsage.total ? session.tokenUsage : { ...session.tokenUsage, total };
 }
 
+function compactionKey(provider: AgentProvider, nativeSessionId: string) {
+  return `${provider}:${nativeSessionId}`;
+}
+
+function persistedCompaction(preferences: DesktopPreferences, session: Pick<SessionState, "provider" | "threadId">) {
+  if (!session.threadId) return undefined;
+  const key = compactionKey(session.provider, session.threadId);
+  return preferences.compactionCounts?.[key] || preferences.codexCompactionCounts?.[key];
+}
+
+function withPersistedCompaction(session: SessionState, preferences: DesktopPreferences) {
+  const persisted = persistedCompaction(preferences, session);
+  if (!persisted) return session;
+  return {
+    ...session,
+    compactionCount: Math.max(session.compactionCount, persisted.count),
+    compactionEventIds: [...new Set([...persisted.eventIds, ...session.compactionEventIds])].slice(-64),
+  };
+}
+
+function updateCompactionCache(current: NonNullable<DesktopPreferences["compactionCounts"]>, key: string, record: CompactionRecord) {
+  return Object.fromEntries(Object.entries({ ...current, [key]: record })
+    .sort((left, right) => right[1].updatedAt - left[1].updatedAt)
+    .slice(0, 512));
+}
+
 function skillsFromList(value: unknown, cwd: string): SkillOption[] {
   const data = Array.isArray(asRecord(value).data) ? asRecord(value).data as unknown[] : [];
   const requestedKey = normalizedDirectory(cwd);
@@ -129,17 +158,6 @@ function rateWindowLine(label: string, value: unknown) {
   return `${label}：已用 ${usedPercent}%${resetText}`;
 }
 
-function subagentThreadSource(threadValue: unknown) {
-  const thread = asRecord(threadValue);
-  const subagent = asRecord(asRecord(thread.source).subAgent);
-  const spawn = asRecord(subagent.thread_spawn);
-  return {
-    parentThreadId: stringValue(thread.parentThreadId) || stringValue(spawn.parent_thread_id),
-    nickname: stringValue(thread.agentNickname) || stringValue(spawn.agent_nickname),
-    role: stringValue(thread.agentRole) || stringValue(spawn.agent_role),
-  };
-}
-
 export default function App() {
   const bridge = useAgentBridge();
   useEffect(() => installRendererDiagnostics(bridge), [bridge]);
@@ -157,8 +175,9 @@ export default function App() {
   const [providerCapabilities, setProviderCapabilities] = useState<Record<AgentProvider, AgentCapabilities>>(() => initialProviderCapabilities());
   const [skillsByCwd, setSkillsByCwd] = useState<Record<string, SkillOption[]>>({});
   const [codexDefaults, setCodexDefaults] = useState<CodexDefaults>(EMPTY_CODEX_DEFAULTS);
-  const [serverState, setServerState] = useState<"connecting" | "ready" | "error">("connecting");
+  const [providerStartupStates, setProviderStartupStates] = useState<Record<AgentProvider, ProviderStartupState>>({ codex: "connecting", claude: "connecting" });
   const [preferences, setPreferences] = useState<DesktopPreferences>({ recentWorkspaces: [], lastWorkspace: "", favoriteWorkspaces: [], theme: DEFAULT_THEME, displayMode: DEFAULT_DISPLAY_MODE, bossKey: DEFAULT_BOSS_KEY });
+  const recentCommandUsage = (preferences.recentCommandUsage || {}) as CommandUsage;
   const [bossKeyStatus, setBossKeyStatus] = useState<BossKeyStatus>(INITIAL_BOSS_KEY_STATUS);
   const [updateStatus, setUpdateStatus] = useState<DesktopUpdateStatus>(INITIAL_UPDATE_STATUS);
   const [cliUpdateStatus, setCliUpdateStatus] = useState<CodexCliUpdateStatus>(INITIAL_CLI_UPDATE_STATUS);
@@ -207,14 +226,17 @@ export default function App() {
 
   const draftsRef = useRef(new Map<string, string>());
   const skillLoadsRef = useRef(new Map<string, Promise<void>>());
+  const skillReloadTimersRef = useRef(new Map<AgentProvider, number>());
   const workspaceRestoreIdsRef = useRef(new Set<string>());
   const sessionLifecycleRef = useRef(new SessionLifecycleController());
   const sessionMessageRef = useRef<SessionMessageController | null>(null);
   const providerEventRef = useRef<ProviderEventController | null>(null);
+  const turnTelemetryRef = useRef<TurnTelemetry | null>(null);
   const historyControllerRef = useRef<HistoryController | null>(null);
   const layoutControllerRef = useRef<LayoutController | null>(null);
   const settingsCoordinatorRef = useRef(new SessionSettingsCoordinator());
   const workspaceRestoreInProgressRef = useRef(false);
+  if (!turnTelemetryRef.current) turnTelemetryRef.current = new TurnTelemetry(trackUiEvent);
 
   useEffect(() => {
     if (!tabContextMenu) return undefined;
@@ -308,16 +330,17 @@ export default function App() {
       const normalized = normalizeAgentRequestError(provider, operation, error);
       const canonicalCwd = trustWorkspaceForRequest(provider, operation, normalized, session?.cwd);
       if (canonicalCwd) {
-        const accepted = window.confirm(`Claude Code 将在以下目录运行：\n\n${canonicalCwd}\n\n项目配置可能启动 Hooks、MCP 或插件进程。仅在你信任此目录内容时继续。`);
-        if (!accepted) throw new Error("已取消 Claude Code 工作区授权。");
-        const value = await agentClient.request(provider, operation, { ...params, trustWorkspace: true }, context);
+        const status = await bridge.trustClaudeWorkspace(canonicalCwd, "session");
+        if (!status) throw new Error("已取消 Claude Code 工作区授权。");
+        setClaudeRuntimeStatus(status);
+        const value = await agentClient.request(provider, operation, params, context);
         appendRawEvent(sessionId, `response ${operation}`, { provider, payload: value });
         return value;
       }
       appendRawEvent(sessionId, `error ${operation}`, { provider, message: normalized.message, ...(normalized instanceof Error && "payload" in normalized ? { payload: (normalized as { payload: unknown }).payload } : {}) });
       throw normalized;
     }
-  }, [agentClient]);
+  }, [agentClient, bridge]);
 
   const requestForPluginPanel = useCallback((provider: AgentProvider, operation: AgentOperation, params: JsonObject) => {
     const sessionId = Object.keys(sessionsRef.current).find((id) => sessionsRef.current[id]?.provider === provider);
@@ -335,11 +358,12 @@ export default function App() {
       const marker = normalized.message.indexOf("__CLAUDE_WORKSPACE_TRUST_REQUIRED__");
       if (marker < 0) throw normalized;
       const canonicalCwd = normalized.message.slice(marker + "__CLAUDE_WORKSPACE_TRUST_REQUIRED__".length).trim() || cwd;
-      const accepted = window.confirm(`Claude Code 插件管理将使用以下目录：\n\n${canonicalCwd}\n\n插件或市场操作可能下载并加载代码。仅在你信任此目录时继续。`);
-      if (!accepted) throw new Error("已取消 Claude Code 工作区授权。");
-      return agentClient.request(provider, operation, { ...params, cwd, trustWorkspace: true }, context);
+      const status = await bridge.trustClaudeWorkspace(canonicalCwd, "plugin");
+      if (!status) throw new Error("已取消 Claude Code 工作区授权。");
+      setClaudeRuntimeStatus(status);
+      return agentClient.request(provider, operation, { ...params, cwd }, context);
     });
-  }, [agentClient, workspace]);
+  }, [agentClient, bridge, workspace]);
 
   const openPluginPanel = useCallback(() => setPluginPanelOpen(true), []);
   const closePluginPanel = useCallback(() => setPluginPanelOpen(false), []);
@@ -379,12 +403,14 @@ export default function App() {
     session.threadId = options?.threadId ?? null;
     session.title = options?.title || "新会话";
     session.resumed = false;
-    sessionsRef.current = { ...sessionsRef.current, [id]: session };
-    setSessions((current) => ({ ...current, [id]: session }));
+    const initialized = withPersistedCompaction(session, preferencesRef.current);
+    sessionsRef.current = { ...sessionsRef.current, [id]: initialized };
+    setSessions((current) => ({ ...current, [id]: initialized }));
     return id;
   }, []);
 
   const toggleSidebarCollapsed = useCallback(() => {
+    trackUiEvent("sidebar.toggle");
     setSidebarCollapsed((collapsed) => !collapsed);
   }, []);
 
@@ -464,7 +490,7 @@ export default function App() {
   }
   const layoutController = layoutControllerRef.current;
   const {
-    addSession, activateSession, focusPane, setActiveTab, removeTab, closeTabIds,
+    addSession, addSessionToPane, activateSession, focusPane, setActiveTab, removeTab, closeTabIds,
     splitPane, closePane, closeActiveTab, moveTab,
   } = layoutController;
 
@@ -476,9 +502,18 @@ export default function App() {
   const activateTab = useCallback((paneId: string, sessionId: string) => {
     setTabContextMenu(null);
     setActiveTab(paneId, sessionId);
-    const session = sessionsRef.current[sessionId];
+    const selected = sessionsRef.current[sessionId];
+    if (selected) trackUiEvent("tab.switch", { provider: selected.provider });
+    const session = selected;
     if (session?.cwd && !sameDirectory(workspaceRef.current, session.cwd)) setWorkspace(session.cwd);
   }, [setActiveTab]);
+
+  const activateSessionTab = useCallback((sessionId: string) => {
+    setTabContextMenu(null);
+    activateSession(sessionId);
+    const session = sessionsRef.current[sessionId];
+    if (session?.cwd && !sameDirectory(workspaceRef.current, session.cwd)) setWorkspace(session.cwd);
+  }, [activateSession]);
 
   const clearSession = useCallback(async (sessionId: string) => {
     const session = sessionsRef.current[sessionId];
@@ -515,6 +550,18 @@ export default function App() {
     const next = await bridge.savePreferences(patch);
     setPreferences((current) => ({ ...current, ...next }));
     setHistory((current) => applyLocalSessionMetadata(current, next));
+  }, [bridge]);
+
+  const rememberCommandUse = useCallback((key: string) => {
+    const current = preferencesRef.current.recentCommandUsage || {};
+    const latest = Object.values(current).reduce((max, value) => Math.max(max, value), 0);
+    const timestamp = Math.max(Date.now(), latest + 1);
+    const recentCommandUsage = Object.fromEntries(Object.entries({ ...current, [key]: timestamp })
+      .sort((left, right) => right[1] - left[1])
+      .slice(0, 512));
+    preferencesRef.current = { ...preferencesRef.current, recentCommandUsage };
+    setPreferences((currentPreferences) => ({ ...currentPreferences, recentCommandUsage }));
+    void bridge.savePreferences({ recentCommandUsage }).catch(() => undefined);
   }, [bridge]);
 
   const rememberProviderEffort = useCallback((provider: AgentProvider, effort: string) => {
@@ -591,6 +638,50 @@ export default function App() {
     preferencesRef.current = { ...preferencesRef.current, modelContextWindows: nextCache };
     setPreferences((current) => ({ ...current, modelContextWindows: nextCache }));
     void bridge.savePreferences({ modelContextWindows: nextCache }).catch(() => undefined);
+  }, [bridge]);
+
+  const rememberCompaction = useCallback((sessionId: string, event: RoutedAgentEvent) => {
+    const session = sessionsRef.current[sessionId];
+    const payload = agentEventPayload(event);
+    const eventId = event.provider === "codex"
+      ? stringValue(asRecord(payload.item).id)
+      : stringValue(payload.uuid, stringValue(payload.id, `${event.envelope.queryGeneration || 0}-${event.envelope.receivedAt}`));
+    const nativeSessionId = session?.threadId || event.nativeSessionId || "";
+    if (!session || !nativeSessionId || !eventId) return;
+    const normalizedEventId = event.provider === "codex" ? eventId : `claude-compaction-${eventId}`;
+    const key = compactionKey(event.provider, nativeSessionId);
+    const current = preferencesRef.current.compactionCounts || preferencesRef.current.codexCompactionCounts || {};
+    const previous = current[key] || { count: 0, eventIds: [], updatedAt: 0 };
+    if (previous.eventIds.includes(normalizedEventId)) return;
+    const nextRecord: CompactionRecord = {
+      count: Math.max(previous.count, session.compactionCount) + 1,
+      eventIds: [...previous.eventIds, normalizedEventId].slice(-64),
+      updatedAt: Date.now(),
+    };
+    const next = updateCompactionCache(current, key, nextRecord);
+    preferencesRef.current = { ...preferencesRef.current, compactionCounts: next };
+    setPreferences((value) => ({ ...value, compactionCounts: next }));
+    void bridge.savePreferences({ compactionCounts: next }).catch(() => undefined);
+  }, [bridge]);
+
+  const persistCompactionSnapshot = useCallback((sessionId: string) => {
+    const session = sessionsRef.current[sessionId];
+    if (!session?.threadId) return;
+    const key = compactionKey(session.provider, session.threadId);
+    const current = preferencesRef.current.compactionCounts || preferencesRef.current.codexCompactionCounts || {};
+    const previous = current[key] || { count: 0, eventIds: [], updatedAt: 0 };
+    const nextRecord: CompactionRecord = {
+      count: Math.max(previous.count, session.compactionCount),
+      eventIds: [...new Set([...previous.eventIds, ...session.compactionEventIds])].slice(-64),
+      updatedAt: Date.now(),
+    };
+    if (nextRecord.count === previous.count
+      && nextRecord.eventIds.length === previous.eventIds.length
+      && nextRecord.eventIds.every((id, index) => id === previous.eventIds[index])) return;
+    const next = updateCompactionCache(current, key, nextRecord);
+    preferencesRef.current = { ...preferencesRef.current, compactionCounts: next };
+    setPreferences((value) => ({ ...value, compactionCounts: next }));
+    void bridge.savePreferences({ compactionCounts: next }).catch(() => undefined);
   }, [bridge]);
 
   const updateClaudeModelCache = useCallback((models: ModelOption[]) => {
@@ -692,9 +783,19 @@ export default function App() {
     await savePreference({ lastWorkspace: directory, recentWorkspaces: [] });
   }, [savePreference]);
 
-  const createSessionInDirectory = useCallback((directory: string, provider: AgentProvider = "codex") => {
+  const createSessionInDirectory = useCallback(async (
+    directory: string,
+    provider: AgentProvider = "codex",
+    placement?: { paneId: string; afterSessionId?: string },
+  ) => {
+    const authorized = await bridge.authorizeWorkspace(directory);
+    if (!authorized) return undefined;
+    directory = authorized;
     setWorkspace(directory);
-    const sessionId = addSession(directory, { provider });
+    const sessionId = placement
+      ? addSessionToPane(placement.paneId, directory, { provider }, placement.afterSessionId)
+      : addSession(directory, { provider });
+    trackUiEvent("session.create", { provider, placement: placement ? "tab" : "pane" });
     void agentClient.request(provider, "getCapabilities", {}, { sessionId, canonicalCwd: directory })
       .then((value) => {
         const capabilities = value as SessionState["capabilities"];
@@ -703,20 +804,21 @@ export default function App() {
       .catch((error) => setError(sessionId, error, "读取 Provider 能力失败"));
     void savePreference({ lastWorkspace: directory, recentWorkspaces: [] });
     return sessionId;
-  }, [addSession, agentClient, savePreference, setError, updateSession]);
+  }, [addSession, addSessionToPane, agentClient, bridge, savePreference, setError, updateSession]);
 
   useEffect(() => {
     const handleNewSessionShortcut = (event: KeyboardEvent) => {
       if (event.altKey || (!event.ctrlKey && !event.metaKey) || event.key.toLowerCase() !== "n") return;
       event.preventDefault();
       const provider: AgentProvider = event.shiftKey ? "claude" : "codex";
-      createSessionInDirectory(activeSession?.cwd || workspace, provider);
+      void createSessionInDirectory(activeSession?.cwd || workspace, provider);
     };
     window.addEventListener("keydown", handleNewSessionShortcut);
     return () => window.removeEventListener("keydown", handleNewSessionShortcut);
   }, [activeSession?.cwd, createSessionInDirectory, workspace]);
 
   const chooseWorkspace = useCallback(async () => {
+    trackUiEvent("workspace.choose");
     const next = await bridge.chooseWorkspace(workspace);
     if (next) await selectWorkspace(next);
   }, [bridge, selectWorkspace, workspace]);
@@ -752,6 +854,7 @@ export default function App() {
     settingsCoordinatorRef.current.initialize(sessionId, fallback);
     const currentTarget = settingsCoordinatorRef.current.desired(sessionId, fallback);
     if (session.capabilities[field === "model" ? "models" : "effort"] !== "supported") return;
+    trackUiEvent(`session.${field}.change`, { provider: session.provider });
     const availableModels = providerModelsRef.current[session.provider];
     const selectedModel = field === "model" ? findModelOption(availableModels, value) : findModelOption(availableModels, currentTarget.model);
     const nextEffort = field === "model" && selectedModel && !selectedModel.efforts.includes(currentTarget.effort)
@@ -943,6 +1046,9 @@ export default function App() {
         restoreMessagesToDraft,
         showStatus,
         showMcpStatus,
+        rememberCommandUse,
+        trackEvent: trackUiEvent,
+        turnTelemetry: turnTelemetryRef.current,
         upsertHistory: (entry) => setHistory((current) => upsertHistoryEntry(current, entry)),
       },
     });
@@ -1149,12 +1255,13 @@ export default function App() {
         resumed: false,
         tokenUsage: tokenUsageForModel(current, stringValue(result.model) || session.model, preferencesRef.current),
       }));
+      persistCompactionSnapshot(forkedSessionId);
       setHistory((current) => upsertHistoryEntry(current, { id: threadId, provider: session.provider, title, cwd }));
       void requestForSession(forkedSessionId, "renameSession", { threadId, name: title }).catch((error) => setError(forkedSessionId, error, "分支重命名失败"));
     } catch (error) {
       setError(sessionId, error, "创建分支失败");
     }
-  }, [addSession, requestForSession, setError, updateSession]);
+  }, [addSession, persistCompactionSnapshot, requestForSession, setError, updateSession]);
 
   const deleteSession = useCallback(async (sessionId: string) => {
     const session = sessionsRef.current[sessionId];
@@ -1182,17 +1289,29 @@ export default function App() {
       delete aliases[threadId];
       delete favoriteSessionSummaries[key];
       delete favoriteSessionSummaries[threadId];
+      const compactionCounts = { ...(preferencesRef.current.compactionCounts || preferencesRef.current.codexCompactionCounts || {}) };
+      delete compactionCounts[key];
+      delete compactionCounts[threadId];
+      const legacyCodexCompactionCounts = { ...(preferencesRef.current.codexCompactionCounts || {}) };
+      if (session.provider === "codex") {
+        delete legacyCodexCompactionCounts[key];
+        delete legacyCodexCompactionCounts[threadId];
+      }
       await savePreference({
         sessionAliases: aliases,
         favoriteSessions: (preferencesRef.current.favoriteSessions || []).filter((id) => id !== key && id !== threadId),
         favoriteSessionSummaries,
+        compactionCounts,
+        ...(session.provider === "codex" ? { codexCompactionCounts: legacyCodexCompactionCounts } : {}),
       });
       setHistory((current) => current.filter((entry) => entry.provider !== session.provider || entry.id !== threadId));
-      await clearSession(sessionId);
+      const nextSessionId = createSessionState(session.cwd, { provider: session.provider });
+      layoutController.replaceSession(sessionId, nextSessionId);
+      releaseSessionState(sessionId, "会话已删除。");
     } catch (error) {
       setError(sessionId, error, "删除会话失败");
     }
-  }, [clearSession, requestForSession, savePreference, setError]);
+  }, [closeBackendSession, createSessionState, layoutController, releaseSessionState, requestForSession, savePreference, setError]);
 
   const exportSession = useCallback(async (sessionId: string) => {
     const session = sessionsRef.current[sessionId];
@@ -1229,7 +1348,8 @@ export default function App() {
         threadId: session.threadId || "",
         content: handoffMarkdown(session),
       });
-      const nextSessionId = createSessionInDirectory(session.cwd, targetProvider);
+      const nextSessionId = await createSessionInDirectory(session.cwd, targetProvider);
+      if (!nextSessionId) return;
       updateSession(nextSessionId, (current) => ({ ...current, title: `${session.title || "新会话"} 接力` }));
       const handoffMessage = sessionMessages.createQueuedMessage(packageInfo.prompt, "handoff");
       window.setTimeout(() => {
@@ -1264,7 +1384,7 @@ export default function App() {
   const openHistory = useCallback(async (entry: HistoryThread) => {
     const existing = Object.values(sessionsRef.current).find((session) => session.provider === entry.provider && session.threadId === entry.id && sameDirectory(session.cwd, entry.cwd));
     if (existing) {
-      activateSession(existing.id);
+      activateSessionTab(existing.id);
       return existing.id;
     }
     const currentLayout = layoutRef.current;
@@ -1293,7 +1413,7 @@ export default function App() {
           providerCapabilitiesRef.current[entry.provider],
         );
         next.tokenUsage.total = cachedModelContextWindow(preferencesRef.current, next.model);
-        return next;
+        return withPersistedCompaction(next, preferencesRef.current);
       });
     }
     providerEventRef.current?.bindSession(entry.provider, entry.id, sessionId);
@@ -1308,7 +1428,14 @@ export default function App() {
     const readPromise = requestForSession(sessionId, "readSession", { threadId: entry.id, includeTurns: true })
       .then((readValue) => {
         const preserve = providerEventRef.current?.changedSince(sessionId, readVersion) || { preserveRealtime: false, preserveLifecycle: false };
-        updateSession(sessionId, (current) => hydrateAgentSession(current, current.provider, asRecord(readValue).thread, preserve));
+        updateSession(sessionId, (current) => {
+          const persisted = persistedCompaction(preferencesRef.current, current);
+          return hydrateAgentSession(current, current.provider, asRecord(readValue).thread, {
+            ...preserve,
+            ...(persisted ? { persistedCompactionCount: persisted.count, persistedCompactionEventIds: persisted.eventIds } : {}),
+          });
+        });
+        persistCompactionSnapshot(sessionId);
       })
       .catch((error) => setError(sessionId, error, "读取历史会话失败"));
 
@@ -1323,7 +1450,7 @@ export default function App() {
     }
     await readPromise;
     return sessionId;
-  }, [activateSession, addSession, requestForSession, setError, updateSession]);
+  }, [activateSessionTab, addSession, persistCompactionSnapshot, requestForSession, setError, updateSession]);
 
   const isHistoryWorking = useCallback((threadId: string, provider?: AgentProvider) => (
     Object.values(sessionsRef.current).some((session) => session.threadId === threadId && (!provider || session.provider === provider) && session.status === "working")
@@ -1408,20 +1535,27 @@ export default function App() {
       settingsCoordinatorRef.current.delete(sessionId);
     }
     setSessions((current) => recoverProviderSessions(current, provider));
-    if (providerAffectsStartupState(provider)) setServerState("error");
+    setProviderStartupStates((current) => ({ ...current, [provider]: "error" }));
   }, [sessionMessages]);
 
-  const reloadProviderSkills = useCallback(() => {
-    skillsByCwdRef.current = {};
-    setSkillsByCwd({});
-    const requested = new Set<string>();
-    for (const session of Object.values(sessionsRef.current)) {
-      const key = providerDirectoryKey(session.provider, session.cwd);
-      if (!normalizedDirectory(session.cwd) || requested.has(key) || session.capabilities.skills !== "supported") continue;
-      requested.add(key);
-      const pending = skillLoadsRef.current.get(key) || Promise.resolve();
-      void pending.finally(() => loadSkills(session.id, session.cwd, true));
-    }
+  const reloadProviderSkills = useCallback((provider: AgentProvider) => {
+    const currentTimer = skillReloadTimersRef.current.get(provider);
+    if (currentTimer !== undefined) window.clearTimeout(currentTimer);
+    const timer = window.setTimeout(() => {
+      skillReloadTimersRef.current.delete(provider);
+      const nextSkills = Object.fromEntries(Object.entries(skillsByCwdRef.current).filter(([key]) => !key.startsWith(`${provider}:`)));
+      skillsByCwdRef.current = nextSkills;
+      setSkillsByCwd(nextSkills);
+      const requested = new Set<string>();
+      for (const session of Object.values(sessionsRef.current)) {
+        const key = providerDirectoryKey(session.provider, session.cwd);
+        if (session.provider !== provider || !normalizedDirectory(session.cwd) || requested.has(key) || session.capabilities.skills !== "supported") continue;
+        requested.add(key);
+        const pending = skillLoadsRef.current.get(key) || Promise.resolve();
+        void pending.finally(() => loadSkills(session.id, session.cwd, true));
+      }
+    }, 500);
+    skillReloadTimersRef.current.set(provider, timer);
   }, [loadSkills]);
 
   if (!providerEventRef.current) {
@@ -1447,14 +1581,14 @@ export default function App() {
         settings: settingsCoordinatorRef.current,
       },
       services: {
-        setReady: () => setServerState("ready"),
+        setReady: () => setProviderStartupStates((current) => ({ ...current, codex: "ready" })),
         removeHistory: (provider, nativeSessionId) => setHistory((current) => current.filter((entry) => entry.provider !== provider || entry.id !== nativeSessionId)),
         clearSession: (sessionId) => { void clearSession(sessionId); },
         recoverProvider,
         closeActiveTab: () => { void closeActiveTab(); },
         reloadSkills: reloadProviderSkills,
-        activateSession,
-        openWorkspace: (nextWorkspace, provider = "codex") => { createSessionInDirectory(nextWorkspace, provider); },
+        activateSession: activateSessionTab,
+        openWorkspace: (nextWorkspace, provider = "codex") => { void createSessionInDirectory(nextWorkspace, provider); },
         adoptStartedThread,
         loadSkills: (sessionId, cwd, forceReload) => { void loadSkills(sessionId, cwd, forceReload); },
         updateProviderModels: (provider, models) => {
@@ -1462,11 +1596,13 @@ export default function App() {
           if (provider === "claude") updateClaudeModelCache(models);
         },
         rememberModelContextWindow,
+        rememberCompaction,
         appendRawEvent,
         showNotification: (session) => { void bridge.showNotification({ sessionId: session.id, provider: session.provider, sessionTitle: session.title }); },
         isDocumentFocused: () => document.hasFocus(),
         requestFrame: (callback) => window.requestAnimationFrame(callback),
         cancelFrame: (handle) => window.cancelAnimationFrame(handle),
+        turnTelemetry: turnTelemetryRef.current,
       },
     });
   }
@@ -1484,7 +1620,7 @@ export default function App() {
         sessionsRef.current = { "session-1": initial };
         setSessions({ "session-1": initial });
         setWorkspace("工作区不可用");
-        setServerState("error");
+        setProviderStartupStates({ codex: "error", claude: "error" });
         return;
       }
       const currentWorkspace = workspaceResult.value;
@@ -1508,9 +1644,11 @@ export default function App() {
         return;
       }
 
-      const restoredSessions = restored.truncated
+      const restoredSessionsBase = restored.truncated
         ? Object.fromEntries(Object.entries(restored.sessions).map(([id, session]) => [id, { ...session, errorText: "更新恢复数据已按本地大小上限截断，请检查草稿和排队消息。" }]))
         : restored.sessions;
+      const restoredSessions = Object.fromEntries(Object.entries(restoredSessionsBase)
+        .map(([id, session]) => [id, withPersistedCompaction(session, preferencesRef.current)]));
       sessionsRef.current = restoredSessions;
       layoutRef.current = restored.layout;
       draftsRef.current = restored.drafts;
@@ -1567,40 +1705,44 @@ export default function App() {
         workspaceRestoreInProgressRef.current = false;
       }
     });
-    void Promise.all([
-      agentClient.request("codex", "listModels", { limit: 100, includeHidden: false }),
-      bridge.getCodexDefaults().catch(() => EMPTY_CODEX_DEFAULTS),
-      Promise.all([
-        agentClient.request("codex", "getCapabilities") as Promise<AgentCapabilities>,
-        agentClient.request("claude", "getCapabilities") as Promise<AgentCapabilities>,
-      ]),
-    ]).then(([value, defaults, [codexCapabilities, claudeCapabilities]]) => {
-      if (!active) return;
-      setServerState("ready");
-      setCodexDefaults(defaults);
-      setProviderModels((current) => ({ ...current, codex: ((asRecord(value).data as unknown[]) || []).map((model) => normalizeAgentModel("codex", model)) }));
-      setProviderCapabilities({ codex: codexCapabilities, claude: claudeCapabilities });
-      const capabilities = { codex: codexCapabilities, claude: claudeCapabilities };
-      setSessions((current) => Object.fromEntries(Object.entries(current).map(([id, session]) => [id, { ...session, capabilities: capabilities[session.provider] }])));
-    }).catch((error) => {
-      if (!active) return;
-      setServerState("error");
-      setSessions((current) => Object.fromEntries(Object.entries(current).map(([id, session]) => [id, {
-        ...session,
-        errorText: error instanceof Error ? error.message : "Codex 模型列表加载失败。",
-      }])));
+    void initializeProviders({
+      loadCodexModels: async () => {
+        const [value, defaults] = await Promise.all([
+          agentClient.request("codex", "listModels", { limit: 100, includeHidden: false }),
+          bridge.getCodexDefaults().catch(() => EMPTY_CODEX_DEFAULTS),
+        ]);
+        return { value, defaults };
+      },
+      loadCapabilities: (provider) => agentClient.request(provider, "getCapabilities") as Promise<AgentCapabilities>,
+      isActive: () => active,
+      applyCodexModels: ({ value, defaults }) => {
+        setCodexDefaults(defaults);
+        setProviderModels((current) => ({ ...current, codex: ((asRecord(value).data as unknown[]) || []).map((model) => normalizeAgentModel("codex", model)) }));
+      },
+      applyCapabilities: (provider, capabilities) => {
+        setProviderCapabilities((current) => ({ ...current, [provider]: capabilities }));
+        setSessions((current) => Object.fromEntries(Object.entries(current).map(([id, session]) => [id, session.provider === provider ? { ...session, capabilities } : session])));
+      },
+      reportError: (provider, phase, error) => {
+        const providerName = provider === "codex" ? "Codex" : "Claude Code";
+        const phaseName = phase === "models" ? "模型列表" : "能力";
+        const message = error instanceof Error ? `${providerName} ${phaseName}加载失败：${error.message}` : `${providerName} ${phaseName}加载失败。`;
+        setSessions((current) => Object.fromEntries(Object.entries(current).map(([id, session]) => [id, session.provider === provider ? { ...session, errorText: message } : session])));
+      },
+      setProviderState: (provider, state) => setProviderStartupStates((current) => ({ ...current, [provider]: state })),
     });
     return () => { active = false; };
   }, [addSession, agentClient, bridge, updateSession]);
 
   useEffect(() => {
-    if (serverState !== "ready" || !workspaceRestoreIdsRef.current.size) return;
+    if (!workspaceRestoreIdsRef.current.size) return;
     for (const sessionId of [...workspaceRestoreIdsRef.current]) {
       const session = sessions[sessionId];
       if (!session?.threadId) {
         workspaceRestoreIdsRef.current.delete(sessionId);
         continue;
       }
+      if (!providerCanRestore(providerStartupStates, session.provider)) continue;
       workspaceRestoreIdsRef.current.delete(sessionId);
       providerEventRef.current?.bindSession(session.provider, session.threadId, sessionId);
       const resumePromise = sessionLifecycleRef.current.resume(sessionId, () => (
@@ -1619,11 +1761,18 @@ export default function App() {
       void requestForSession(sessionId, "readSession", { threadId: session.threadId, includeTurns: true })
         .then((readValue) => {
           const preserve = providerEventRef.current?.changedSince(sessionId, readVersion) || { preserveRealtime: false, preserveLifecycle: false };
-          updateSession(sessionId, (current) => hydrateAgentSession(current, current.provider, asRecord(readValue).thread, preserve));
+          updateSession(sessionId, (current) => {
+            const persisted = persistedCompaction(preferencesRef.current, current);
+            return hydrateAgentSession(current, current.provider, asRecord(readValue).thread, {
+              ...preserve,
+              ...(persisted ? { persistedCompactionCount: persisted.count, persistedCompactionEventIds: persisted.eventIds } : {}),
+            });
+          });
+          persistCompactionSnapshot(sessionId);
         })
         .catch((error) => setError(sessionId, error, "读取更新前会话失败"));
     }
-  }, [requestForSession, serverState, sessions, setError, updateSession]);
+  }, [persistCompactionSnapshot, providerStartupStates, requestForSession, sessions, setError, updateSession]);
 
   useEffect(() => {
     let active = true;
@@ -1688,7 +1837,7 @@ export default function App() {
 
   useEffect(() => {
     const refresh = () => { void refreshHistory(); };
-    const interval = window.setInterval(refresh, 30_000);
+    const interval = window.setInterval(refresh, 120_000);
     const onFocus = () => refresh();
     const onVisibility = () => { if (document.visibilityState === "visible") refresh(); };
     window.addEventListener("focus", onFocus);
@@ -1767,9 +1916,11 @@ export default function App() {
   }), [sidebarCollapsed, startSidebarResize, toggleSidebarCollapsed]);
   const sidebarToolbar = useMemo<SidebarProps["toolbar"]>(() => ({
     pluginMarketplaceState: providerCapabilities.codex.pluginMarketplace === "supported" || providerCapabilities.claude.pluginMarketplace === "supported" ? "supported" : "temporarilyUnavailable",
+    splitDisabled: layout.panes.length >= 2,
     onChooseWorkspace: chooseWorkspace,
     onOpenPlugins: openPluginPanel,
-  }), [chooseWorkspace, openPluginPanel, providerCapabilities.claude.pluginMarketplace, providerCapabilities.codex.pluginMarketplace]);
+    onSplitPane: () => splitPane(layout.activePaneId || "pane-1", 2),
+  }), [chooseWorkspace, layout.activePaneId, layout.panes.length, openPluginPanel, providerCapabilities.claude.pluginMarketplace, providerCapabilities.codex.pluginMarketplace, splitPane]);
   const sidebarWorkspace = useMemo<SidebarProps["workspace"]>(() => ({
     viewModel: {
       currentCwd: sidebarCurrentCwd,
@@ -1778,7 +1929,7 @@ export default function App() {
       favoriteWorkspaces: preferences.favoriteWorkspaces,
     },
     actions: {
-      onNewSession: createSessionInDirectory,
+      onNewSession: (directory, provider) => { void createSessionInDirectory(directory, provider); },
       onSelectWorkspace: selectWorkspace,
       onToggleFavorite: toggleFavorite,
       onSavePreference: savePreference,
@@ -1848,6 +1999,7 @@ export default function App() {
         isActivePane={pane.id === layout.activePaneId}
         models={providerModels[session.provider]}
         skills={skillsByCwd[providerDirectoryKey(session.provider, session.cwd)] ?? NO_SKILLS}
+        recentCommandUsage={recentCommandUsage}
         attachments={attachments[session.id] ?? NO_ATTACHMENTS}
         queuedMessages={queuedMessages[session.id] ?? NO_QUEUED_MESSAGES}
         pendingSteers={pendingSteers[session.id] ?? NO_PENDING_STEERS}
@@ -1972,11 +2124,6 @@ export default function App() {
             {layout.panes.length > 1 ? <button className="pane-tab-close" onClick={() => closePane(pane.id)} title="关闭此分栏" aria-label="关闭此分栏"><X size={14} /></button> : null}
           </div>)}
         </div>
-        <div className="tab-actions">
-          <button className="icon-button provider-new codex" onClick={() => createSessionInDirectory(activeSession?.cwd || workspace, "codex")} title="新建 Codex 会话" aria-label="新建 Codex 会话"><ProviderIcon provider="codex" size={15} /></button>
-          <button className="icon-button provider-new claude" onClick={() => createSessionInDirectory(activeSession?.cwd || workspace, "claude")} title="新建 Claude Code 会话" aria-label="新建 Claude Code 会话"><ProviderIcon provider="claude" size={15} /></button>
-          <button className="icon-button" disabled={layout.panes.length >= 2} onClick={() => splitPane(activePane?.id || "pane-1", 2)} title="分成两列" aria-label="分成两列"><Columns2 size={16} /></button>
-        </div>
       </div>
       <div className="panes-grid" style={{ gridTemplateColumns: layout.panes.length === 3 ? "repeat(3, minmax(0, 1fr))" : layout.panes.length === 2 ? "repeat(2, minmax(0, 1fr))" : "minmax(0, 1fr)" }}>
         {layout.panes.map(renderPane)}
@@ -1987,10 +2134,12 @@ export default function App() {
       className="tab-context-menu"
       role="menu"
       aria-label={`${contextSession?.title || "当前 Tab"} 会话操作`}
-      style={{ left: Math.min(tabContextMenu.x, Math.max(8, window.innerWidth - 190)), top: Math.min(tabContextMenu.y, Math.max(8, window.innerHeight - 394)) }}
+      style={{ left: Math.min(tabContextMenu.x, Math.max(8, window.innerWidth - 190)), top: Math.min(tabContextMenu.y, Math.max(8, window.innerHeight - 428)) }}
       onMouseDown={(event) => event.stopPropagation()}
       onContextMenu={(event) => event.preventDefault()}
     >
+      <button type="button" role="menuitem" disabled={!contextSession} onClick={() => { if (!contextSession) return; setTabContextMenu(null); void createSessionInDirectory(contextSession.cwd, contextSession.provider, { paneId: contextPane.id, afterSessionId: contextSession.id }); }}><Plus size={14} /><span>新建同目录会话</span></button>
+      <div className="context-menu-separator" />
       <button type="button" role="menuitem" disabled={!contextOthers.length} onClick={() => closeTabIds(contextPane.id, contextOthers)}><X size={14} /><span>关闭其它</span></button>
       <button type="button" role="menuitem" disabled={!contextRight.length} onClick={() => closeTabIds(contextPane.id, contextRight)}><ArrowRightToLine size={14} /><span>关闭右侧</span></button>
       <button type="button" role="menuitem" disabled={!contextLeft.length} onClick={() => closeTabIds(contextPane.id, contextLeft)}><ArrowLeftToLine size={14} /><span>关闭左侧</span></button>

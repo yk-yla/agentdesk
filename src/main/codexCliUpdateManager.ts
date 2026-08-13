@@ -37,7 +37,7 @@ interface CodexCliUpdateOperations {
   readInstalledVersion(): Promise<string>;
   readLatestVersion(): Promise<string>;
   installVersion(version: string): Promise<void>;
-  stopAppServers(): Promise<number>;
+  readAppServerProcesses(): Promise<WindowsProcessSnapshot[]>;
 }
 
 export interface CodexCliUpdateManagerDependencies {
@@ -195,10 +195,10 @@ export class CodexCliUpdateManager {
         this.dispose();
         shouldRestartLocalAppServer = this.dependencies.appServer.isRunning;
         this.suppressExitNotification = shouldRestartLocalAppServer;
-        this.setStatus({ phase: "updating", currentVersion, latestVersion, message: "正在停止所有 Codex app-server。", nextCheckAt: undefined });
-        const stoppedCount = await this.stopAppServers();
+        this.setStatus({ phase: "updating", currentVersion, latestVersion, message: "正在停止 AgentDesk 的 Codex 服务。", nextCheckAt: undefined });
+        await this.prepareAppServerUpdate();
         if (this.dependencies.isQuitting()) return this.currentStatus();
-        this.setStatus({ phase: "updating", currentVersion, latestVersion, message: `已停止 ${stoppedCount} 个 Codex app-server，正在更新到 ${latestVersion}。`, nextCheckAt: undefined });
+        this.setStatus({ phase: "updating", currentVersion, latestVersion, message: `正在更新 Codex CLI 到 ${latestVersion}。`, nextCheckAt: undefined });
         await this.installVersion(latestVersion);
         if (this.dependencies.isQuitting()) return this.currentStatus();
         const installedVersion = await this.readInstalledVersion();
@@ -280,10 +280,6 @@ export class CodexCliUpdateManager {
 
   private installVersion(version: string) {
     return this.dependencies.operations?.installVersion?.(version) || this.installVersionWithNpm(version);
-  }
-
-  private stopAppServers() {
-    return this.dependencies.operations?.stopAppServers?.() || this.stopAllAppServers();
   }
 
   private async readInstalledVersionFromNpm() {
@@ -464,17 +460,16 @@ export class CodexCliUpdateManager {
     });
   }
 
-  async stopAllAppServers() {
-    const initialRoots = findCodexAppServerRoots(await this.readWindowsProcessSnapshot());
-    const stoppedRootPids = new Set(initialRoots.map((entry) => entry.pid));
+  private readAppServerProcesses() {
+    return this.dependencies.operations?.readAppServerProcesses?.() || this.readWindowsProcessSnapshot();
+  }
+
+  async prepareAppServerUpdate() {
     if (this.dependencies.appServer.isRunning) await this.dependencies.appServer.close();
-    for (const root of findCodexAppServerRoots(await this.readWindowsProcessSnapshot())) {
-      stoppedRootPids.add(root.pid);
-      await this.dependencies.processSupervisor.terminatePid(root.pid);
+    const external = findCodexAppServerRoots(await this.readAppServerProcesses());
+    if (external.length) {
+      throw new Error(`检测到 ${external.length} 个非 AgentDesk 启动的 Codex app-server，请先在对应程序中关闭后重试。`);
     }
-    const remaining = findCodexAppServerRoots(await this.readWindowsProcessSnapshot());
-    if (remaining.length) throw new Error(`仍有 ${remaining.length} 个 Codex app-server 未能停止。`);
-    return stoppedRootPids.size;
   }
 
   private errorMessage(error: unknown) {

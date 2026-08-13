@@ -4,6 +4,27 @@ import { asRecord, emptySession } from "./domain";
 import { createUpdateWorkspaceState, parseUpdateWorkspaceState } from "./workspaceState";
 
 describe("update workspace state budgets", () => {
+  it("restores each tab with its original Provider", () => {
+    const codex = emptySession("codex-session", "C:\\work", "gpt", "medium", "codex");
+    const claude = emptySession("claude-session", "C:\\work", "sonnet", "high", "claude");
+    codex.threadId = "codex-thread";
+    claude.threadId = "claude-thread";
+    const state = createUpdateWorkspaceState({
+      workspace: "C:\\work",
+      layout: { panes: [{ id: "pane-1", tabIds: [codex.id, claude.id], activeTabId: claude.id }], activePaneId: "pane-1" },
+      sessions: { [codex.id]: codex, [claude.id]: claude },
+      drafts: new Map(),
+      attachments: {},
+      queuedMessages: {},
+      pendingSteers: {},
+      sidebarCollapsed: false,
+    });
+
+    const restored = parseUpdateWorkspaceState(state, "C:\\work");
+    assert.equal(restored?.sessions[codex.id]?.provider, "codex");
+    assert.equal(restored?.sessions[claude.id]?.provider, "claude");
+  });
+
   it("caps oversized drafts and records truncation", () => {
     const session = emptySession("session-1", "C:\\work", "model", "medium");
     const state = createUpdateWorkspaceState({

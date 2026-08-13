@@ -5,10 +5,12 @@ import type { JsonObject, LogEntry, LogLevel } from "../shared/protocol";
 
 const LOG_FILE_PATTERN = /^agentdesk-(\d{4}-\d{2}-\d{2})\.ndjson$/;
 const RETENTION_DAYS = 7;
+const MAX_LOG_DIRECTORY_BYTES = 64 * 1024 * 1024;
 const MAX_LOG_LINE_BYTES = 64 * 1024;
 const MAX_STRING_LENGTH = 240;
+const PRUNE_INTERVAL = 1_000;
 const SENSITIVE_KEY = /(password|passwd|token|secret|authorization|credential|cookie|private.?key|api.?key|access.?key|data.?url)/i;
-const USER_TEXT_KEY = /^(text|content|prompt|objective|description|body|input|query|name|title|preview|snippet)$/i;
+const USER_TEXT_KEY = /^(text|content|prompt|objective|description|body|input|query|name|title|preview|snippet|delta|output|stdout|stderr|command)$/i;
 
 export interface AppLogger {
   log(level: LogLevel, event: string, details?: unknown): void;
@@ -89,6 +91,7 @@ export function logErrorDetails(error: unknown) {
 export class FileLogger implements AppLogger {
   private queue = Promise.resolve();
   private preparedDate = "";
+  private writesSincePrune = 0;
 
   constructor(private readonly resolveDirectory: () => string, private readonly now: () => Date = () => new Date()) {}
 
@@ -97,6 +100,7 @@ export class FileLogger implements AppLogger {
   }
 
   log(level: LogLevel, event: string, details?: unknown) {
+    if (level === "debug" && process.env.AGENTDESK_DEBUG_LOGS !== "1") return;
     let currentTime: Date;
     let line: string;
     try {
@@ -120,8 +124,10 @@ export class FileLogger implements AppLogger {
         const directory = this.resolveDirectory();
         await fsPromises.mkdir(directory, { recursive: true });
         const today = dateKey(currentTime);
-        if (this.preparedDate !== today) {
+        this.writesSincePrune += 1;
+        if (this.preparedDate !== today || this.writesSincePrune >= PRUNE_INTERVAL) {
           this.preparedDate = today;
+          this.writesSincePrune = 0;
           await this.prune(directory, today);
         }
         await fsPromises.appendFile(path.join(directory, `agentdesk-${today}.ndjson`), line, "utf8");
@@ -145,5 +151,16 @@ export class FileLogger implements AppLogger {
       const timestamp = Date.parse(`${match[1]}T00:00:00.000Z`);
       if (Number.isFinite(timestamp) && timestamp < cutoff) await fsPromises.unlink(path.join(directory, name)).catch(() => undefined);
     }));
+    const retained = (await fsPromises.readdir(directory).catch(() => []))
+      .filter((name) => LOG_FILE_PATTERN.test(name))
+      .map((name) => ({ name, timestamp: Date.parse(`${LOG_FILE_PATTERN.exec(name)?.[1]}T00:00:00.000Z`) }))
+      .sort((left, right) => left.timestamp - right.timestamp);
+    const sized = await Promise.all(retained.map(async (entry) => ({ ...entry, size: (await fsPromises.stat(path.join(directory, entry.name))).size })));
+    let totalBytes = sized.reduce((total, entry) => total + entry.size, 0);
+    for (const entry of sized) {
+      if (totalBytes <= MAX_LOG_DIRECTORY_BYTES) continue;
+      await fsPromises.unlink(path.join(directory, entry.name)).catch(() => undefined);
+      totalBytes -= entry.size;
+    }
   }
 }

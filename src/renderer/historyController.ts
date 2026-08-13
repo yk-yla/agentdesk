@@ -95,6 +95,8 @@ export class HistoryController {
   private searchLoading = false;
   private historyGeneration = 0;
   private searchGeneration = 0;
+  private refreshPromise: Promise<void> | null = null;
+  private lastRefreshAt = 0;
 
   constructor(
     private readonly state: HistoryControllerState,
@@ -157,16 +159,19 @@ export class HistoryController {
     };
   }
 
-  readonly refresh = async () => {
-    if (!this.services.isVisible()) return;
+  readonly refresh = () => {
+    if (!this.services.isVisible() || this.refreshPromise || Date.now() - this.lastRefreshAt < 5_000) return this.refreshPromise || Promise.resolve();
+    this.lastRefreshAt = Date.now();
     const generation = this.historyGeneration;
-    try {
-      await this.fetchMerged(null, 1, (page) => {
-        if (this.historyGeneration === generation) this.publishEntries(page);
-      });
-    } catch {
+    const refresh = this.fetchMerged(null, 1, (page) => {
+      if (this.historyGeneration === generation) this.publishEntries(page);
+    }).catch(() => {
       // 保留当前历史，下一次焦点或定时刷新继续尝试。
-    }
+    }).then(() => undefined).finally(() => {
+      if (this.refreshPromise === refresh) this.refreshPromise = null;
+    });
+    this.refreshPromise = refresh;
+    return refresh;
   };
 
   readonly loadMore = async () => {

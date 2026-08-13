@@ -20,6 +20,12 @@ export interface SkillSuggestion {
 
 export type CommandSuggestion = BuiltInCommand | SkillSuggestion;
 
+export type CommandUsage = Record<string, number>;
+
+export function commandUsageKey(kind: CommandSuggestion["kind"], name: string) {
+  return `${kind}:${name.toLowerCase()}`;
+}
+
 export type ResolvedComposerInput =
   | { kind: "command"; name: BuiltInCommandName }
   | { kind: "skill"; skill: SkillOption; prompt: string }
@@ -38,7 +44,7 @@ export function slashQuery(value: string) {
   return match ? match[1].toLowerCase() : null;
 }
 
-export function suggestionsFor(value: string, skills: SkillOption[], capabilities?: AgentCapabilities): CommandSuggestion[] {
+export function suggestionsFor(value: string, skills: SkillOption[], capabilities?: AgentCapabilities, recentUsage: CommandUsage = {}): CommandSuggestion[] {
   const query = slashQuery(value);
   if (query === null) return [];
   const commands = BUILT_IN_COMMANDS.filter((entry) => {
@@ -59,7 +65,12 @@ export function suggestionsFor(value: string, skills: SkillOption[], capabilitie
       path: entry.path,
       scope: entry.scope,
     }));
-  return [...commands, ...skillSuggestions].slice(0, 12);
+  return [...commands, ...skillSuggestions]
+    .map((entry, index) => ({ entry, index }))
+    .sort((left, right) => (recentUsage[commandUsageKey(right.entry.kind, right.entry.name)] || 0)
+      - (recentUsage[commandUsageKey(left.entry.kind, left.entry.name)] || 0) || left.index - right.index)
+    .map(({ entry }) => entry)
+    .slice(0, 12);
 }
 
 export function resolveComposerInput(text: string, skills: SkillOption[], capabilities?: AgentCapabilities): ResolvedComposerInput {
@@ -74,8 +85,8 @@ export function resolveComposerInput(text: string, skills: SkillOption[], capabi
   return skill ? { kind: "skill", skill, prompt } : { kind: "message", text };
 }
 
-export function useCommandSuggestions(value: string, skills: SkillOption[], capabilities?: AgentCapabilities) {
-  const suggestions = useMemo(() => suggestionsFor(value, skills, capabilities), [capabilities, skills, value]);
+export function useCommandSuggestions(value: string, skills: SkillOption[], capabilities?: AgentCapabilities, recentUsage: CommandUsage = {}) {
+  const suggestions = useMemo(() => suggestionsFor(value, skills, capabilities, recentUsage), [capabilities, recentUsage, skills, value]);
   const [selectedIndex, setSelectedIndex] = useState(0);
 
   useEffect(() => {

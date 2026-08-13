@@ -7,12 +7,18 @@ const MAX_MESSAGE_BYTES = 2 * 1024 * 1024;
 const REQUEST_TIMEOUT_MS = 30_000;
 const COMPACT_REQUEST_TIMEOUT_MS = 180_000;
 const PLUGIN_REQUEST_TIMEOUT_MS = 120_000;
-const FATAL_CLEANUP_TIMEOUT_MS = 10_000;
+const CLEANUP_TIMEOUT_MS = 25_000;
+
+export interface ClaudeWorkerHostOptions {
+  cleanupTimeoutMs?: number;
+  exitTimeoutMs?: number;
+  reportCleanupFailure?(message: string): void;
+}
 
 function validEvent(value: unknown): value is ClaudeWorkerEvent {
   if (!value || typeof value !== "object" || Array.isArray(value)) return false;
   const event = value as Record<string, unknown>;
-  return typeof event.type === "string" && ["message", "ready", "processStarted", "interrupted", "closed", "interactionPending", "interactionFinished", "response", "error", "fatal"].includes(event.type);
+  return typeof event.type === "string" && ["message", "ready", "processStarted", "interrupted", "closed", "interactionPending", "interactionFinished", "cleanupComplete", "response", "error", "fatal"].includes(event.type);
 }
 
 export class ClaudeWorkerHost {
@@ -21,7 +27,10 @@ export class ClaudeWorkerHost {
   private readonly listeners = new Set<(event: ClaudeWorkerEvent) => void>();
   private readonly pending = new Map<string, { resolve: (value: unknown) => void; reject: (error: Error) => void; timer: ReturnType<typeof setTimeout> }>();
 
-  constructor(private readonly workerPath: () => string) {}
+  constructor(
+    private readonly workerPath: () => string,
+    private readonly options: ClaudeWorkerHostOptions = {},
+  ) {}
 
   subscribe(listener: (event: ClaudeWorkerEvent) => void) {
     this.listeners.add(listener);
@@ -93,15 +102,13 @@ export class ClaudeWorkerHost {
     const worker = this.worker;
     if (!worker) return;
     this.closing = true;
-    worker.postMessage({ type: "close" } satisfies ClaudeWorkerCommand);
-    await Promise.race([
-      new Promise<void>((resolve) => worker.once("exit", () => resolve())),
-      new Promise<void>((resolve) => setTimeout(resolve, 3_000)),
-    ]);
-    if (this.worker === worker) await worker.terminate();
-    this.worker = null;
-    this.rejectPending(new Error("Claude Worker 已关闭。"));
-    this.closing = false;
+    try {
+      await this.completeCleanup(worker, true);
+    } finally {
+      if (this.worker === worker) this.worker = null;
+      this.rejectPending(new Error("Claude Worker 已关闭。"));
+      this.closing = false;
+    }
   }
 
   private ensureWorker() {
@@ -124,6 +131,7 @@ export class ClaudeWorkerHost {
         }
         return;
       }
+      if (value.type === "cleanupComplete") return;
       if (value.type === "fatal") {
         void this.failWorker(worker, new Error(value.message), false);
         return;
@@ -134,7 +142,7 @@ export class ClaudeWorkerHost {
     worker.on("exit", (code) => {
       if (this.worker !== worker) return;
       if (this.closing) this.worker = null;
-      else void this.failWorker(worker, new Error(`Claude Worker 异常退出（${code}）。`), false);
+      else void this.failWorker(worker, new Error(`Claude Worker 异常退出（${code}）。`), false, true);
     });
     this.worker = worker;
     return worker;
@@ -152,19 +160,81 @@ export class ClaudeWorkerHost {
     this.pending.clear();
   }
 
-  private async failWorker(worker: Worker, error: Error, terminate = true) {
+  private waitForCleanup(worker: Worker, requestClose: boolean) {
+    return new Promise<{ kind: "complete"; error?: string } | { kind: "exit" } | { kind: "timeout" }>((resolve) => {
+      let settled = false;
+      const finish = (result: { kind: "complete"; error?: string } | { kind: "exit" } | { kind: "timeout" }) => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timer);
+        worker.removeListener("message", onMessage);
+        worker.removeListener("exit", onExit);
+        resolve(result);
+      };
+      const onMessage = (value: unknown) => {
+        if (!value || typeof value !== "object" || Array.isArray(value)) return;
+        const event = value as Record<string, unknown>;
+        if (event.type !== "cleanupComplete") return;
+        finish({ kind: "complete", ...(typeof event.error === "string" && event.error ? { error: event.error } : {}) });
+      };
+      const onExit = () => finish({ kind: "exit" });
+      const timer = setTimeout(() => finish({ kind: "timeout" }), this.options.cleanupTimeoutMs ?? CLEANUP_TIMEOUT_MS);
+      worker.on("message", onMessage);
+      worker.once("exit", onExit);
+      if (requestClose) worker.postMessage({ type: "close" } satisfies ClaudeWorkerCommand);
+    });
+  }
+
+  private waitForExit(worker: Worker, timeoutMs: number) {
+    return new Promise<boolean>((resolve) => {
+      let settled = false;
+      const finish = (exited: boolean) => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timer);
+        worker.removeListener("exit", onExit);
+        resolve(exited);
+      };
+      const onExit = () => finish(true);
+      const timer = setTimeout(() => finish(false), timeoutMs);
+      worker.once("exit", onExit);
+    });
+  }
+
+  private async terminateAfterCleanupFailure(worker: Worker, message: string) {
+    try { this.options.reportCleanupFailure?.(message); } catch { /* cleanup must continue */ }
+    await worker.terminate().catch(() => undefined);
+  }
+
+  private async completeCleanup(worker: Worker, requestClose: boolean) {
+    const exitPromise = new Promise<void>((resolve) => worker.once("exit", () => resolve()));
+    const result = await this.waitForCleanup(worker, requestClose);
+    if (result.kind === "complete" && !result.error) {
+      const exited = await Promise.race([
+        exitPromise.then(() => true),
+        this.waitForExit(worker, this.options.exitTimeoutMs ?? 1_000),
+      ]);
+      if (!exited) await this.terminateAfterCleanupFailure(worker, "Claude Worker 清理完成后未按时退出。");
+      return;
+    }
+    const message = result.kind === "complete"
+      ? `Claude Worker 清理失败：${result.error}`
+      : result.kind === "exit"
+        ? "Claude Worker 未确认清理完成。"
+        : "Claude Worker 清理超时。";
+    await this.terminateAfterCleanupFailure(worker, message);
+  }
+
+  private async failWorker(worker: Worker, error: Error, terminate = true, exited = false) {
     if (this.worker !== worker) return;
     this.worker = null;
     this.rejectPending(error);
     this.emit({ type: "fatal", message: error.message });
+    if (exited) return;
     if (terminate) {
       await worker.terminate().catch(() => undefined);
       return;
     }
-    const exited = await Promise.race([
-      new Promise<boolean>((resolve) => worker.once("exit", () => resolve(true))),
-      new Promise<boolean>((resolve) => setTimeout(() => resolve(false), FATAL_CLEANUP_TIMEOUT_MS)),
-    ]);
-    if (!exited) await worker.terminate().catch(() => undefined);
+    await this.completeCleanup(worker, false);
   }
 }

@@ -58,6 +58,24 @@ export class LayoutController {
     return sessionId;
   };
 
+  readonly addSessionToPane = (paneId: string, cwd: string, options?: SessionCreationOptions, afterSessionId?: string) => {
+    const pane = this.state.getLayout().panes.find((entry) => entry.id === paneId);
+    if (!pane) return this.addSession(cwd, options);
+    const sessionId = this.services.createSession(cwd, options);
+    this.state.updateLayout((current) => ({
+      ...current,
+      activePaneId: paneId,
+      panes: current.panes.map((entry) => {
+        if (entry.id !== paneId) return entry;
+        const tabIds = [...entry.tabIds];
+        const afterIndex = afterSessionId ? tabIds.indexOf(afterSessionId) : -1;
+        tabIds.splice(afterIndex >= 0 ? afterIndex + 1 : tabIds.length, 0, sessionId);
+        return { ...entry, tabIds, activeTabId: sessionId };
+      }),
+    }));
+    return sessionId;
+  };
+
   readonly activateSession = (sessionId: string) => {
     this.state.updateLayout((current) => {
       const pane = current.panes.find((candidate) => candidate.tabIds.includes(sessionId));
@@ -136,9 +154,11 @@ export class LayoutController {
     if (current.panes.length >= targetCount) return;
     const pane = current.panes.find((entry) => entry.id === paneId);
     if (!pane) return;
-    const cwd = this.state.getSession(pane.activeTabId)?.cwd || "";
+    const sourceSession = this.state.getSession(pane.activeTabId);
+    const cwd = sourceSession?.cwd || "";
+    const provider = sourceSession?.provider;
     const additions = Array.from({ length: targetCount - current.panes.length }, () => {
-      const sessionId = this.services.createSession(cwd);
+      const sessionId = this.services.createSession(cwd, provider ? { provider } : undefined);
       return { id: this.nextPaneId(), tabIds: [sessionId], activeTabId: sessionId };
     });
     const lastPaneId = additions[additions.length - 1]?.id;
@@ -184,7 +204,7 @@ export class LayoutController {
         return { ...layout, panes: layout.panes.filter((entry) => entry.id !== pane.id), activePaneId: receiver.id };
       });
     } else {
-      const nextSessionId = this.services.createSession(session.cwd);
+      const nextSessionId = this.services.createSession(session.cwd, { provider: session.provider });
       this.replaceSession(sessionId, nextSessionId);
     }
     this.services.releaseSession(sessionId);
