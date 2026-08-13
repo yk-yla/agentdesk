@@ -23,7 +23,6 @@ export interface SettingsPopoverViewModel {
   cliUpdateStatus: CodexCliUpdateStatus;
   claudeStatus: ClaudeRuntimeStatus;
   bossKeyStatus: BossKeyStatus;
-  activeClaudeWorkspace: string;
 }
 
 export interface SettingsPopoverActions {
@@ -36,7 +35,6 @@ export interface SettingsPopoverActions {
   onUpdateCodexCli: () => Promise<void>;
   onCheckClaude: () => Promise<void>;
   onUpdateClaude: () => Promise<void>;
-  onRevokeClaudeWorkspace: (cwd: string) => Promise<void>;
   onDownloadUpdate: () => Promise<void>;
   onInstallUpdate: () => Promise<void>;
   onOpenUpdateTokenPage: () => Promise<void>;
@@ -84,7 +82,7 @@ export default function SettingsPopover({ collapsed, viewModel, actions }: Props
       <label>消息详细程度<select value={viewModel.displayMode} onChange={(event) => actions.onSavePreference({ displayMode: event.target.value as DisplayMode })}>{DISPLAY_OPTIONS.map((option) => <option value={option.id} key={option.id}>{option.label}</option>)}</select></label>
       <div className="settings-hint">{DISPLAY_OPTIONS.find((option) => option.id === viewModel.displayMode)?.hint}</div>
       <Suspense fallback={<div className="settings-lazy-loading" aria-busy="true">正在加载高级设置</div>}>
-        <SettingsAdvanced bossKey={{ status: viewModel.bossKeyStatus, onChange: actions.onSetBossKey }} update={{ status: viewModel.updateStatus, cliStatus: viewModel.cliUpdateStatus, claudeStatus: viewModel.claudeStatus, onSaveToken: actions.onSaveUpdateToken, onClearToken: actions.onClearUpdateToken, onCheck: actions.onCheckForUpdates, onCheckCli: actions.onCheckCodexCliUpdates, onUpdateCli: actions.onUpdateCodexCli, onCheckClaude: actions.onCheckClaude, onUpdateClaude: actions.onUpdateClaude, onRevokeClaudeWorkspace: actions.onRevokeClaudeWorkspace, activeClaudeWorkspace: viewModel.activeClaudeWorkspace, onDownload: actions.onDownloadUpdate, onInstall: actions.onInstallUpdate, onOpenTokenPage: actions.onOpenUpdateTokenPage }} />
+        <SettingsAdvanced bossKey={{ status: viewModel.bossKeyStatus, onChange: actions.onSetBossKey }} update={{ status: viewModel.updateStatus, cliStatus: viewModel.cliUpdateStatus, claudeStatus: viewModel.claudeStatus, onSaveToken: actions.onSaveUpdateToken, onClearToken: actions.onClearUpdateToken, onCheck: actions.onCheckForUpdates, onCheckCli: actions.onCheckCodexCliUpdates, onUpdateCli: actions.onUpdateCodexCli, onCheckClaude: actions.onCheckClaude, onUpdateClaude: actions.onUpdateClaude, onDownload: actions.onDownloadUpdate, onInstall: actions.onInstallUpdate, onOpenTokenPage: actions.onOpenUpdateTokenPage }} />
       </Suspense>
     </div> : null}
   </>;

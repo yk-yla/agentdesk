@@ -7,6 +7,7 @@ describe("session lifecycle close", () => {
     const calls: string[] = [];
     const result = await closeSessionResources({
       shouldInterrupt: true,
+      shouldClose: true,
       interrupt: async () => { calls.push("interrupt"); throw new Error("interrupt failed"); },
       waitForIdle: async () => { calls.push("idle"); },
       close: async () => { calls.push("close"); },
@@ -20,6 +21,7 @@ describe("session lifecycle close", () => {
     const calls: string[] = [];
     const result = await closeSessionResources({
       shouldInterrupt: true,
+      shouldClose: true,
       interrupt: async () => { calls.push("interrupt"); },
       waitForIdle: async () => { calls.push("idle"); throw new Error("等待任务停止超时。"); },
       close: async () => { calls.push("close"); },
@@ -32,6 +34,7 @@ describe("session lifecycle close", () => {
     const calls: string[] = [];
     const result = await closeSessionResources({
       shouldInterrupt: false,
+      shouldClose: true,
       interrupt: async () => { calls.push("interrupt"); },
       waitForIdle: async () => { calls.push("idle"); },
       close: async () => { calls.push("close"); throw new Error("close failed"); },
@@ -45,6 +48,7 @@ describe("session lifecycle close", () => {
     const closed: string[] = [];
     const results = await Promise.all(["ok", "bad", "ok-2"].map((id) => closeSessionResources({
       shouldInterrupt: true,
+      shouldClose: true,
       interrupt: async () => undefined,
       waitForIdle: async () => undefined,
       close: async () => { if (id === "bad") throw new Error("close failed"); closed.push(id); },
@@ -66,5 +70,18 @@ describe("session lifecycle close", () => {
     release();
     await first;
     assert.equal(active.has("session-1"), false);
+  });
+
+  it("does not call a Provider when closing an empty local session", async () => {
+    const calls: string[] = [];
+    const result = await closeSessionResources({
+      shouldInterrupt: false,
+      shouldClose: false,
+      interrupt: async () => { calls.push("interrupt"); },
+      waitForIdle: async () => { calls.push("idle"); },
+      close: async () => { calls.push("close"); },
+    });
+    assert.deepEqual(calls, []);
+    assert.deepEqual(result, {});
   });
 });

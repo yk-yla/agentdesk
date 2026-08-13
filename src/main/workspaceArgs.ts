@@ -27,3 +27,11 @@ export function requestedProviderFromArgs(argv: readonly string[]): AgentProvide
   const normalized = value.trim().toLowerCase();
   return normalized === "codex" || normalized === "claude" ? normalized : null;
 }
+
+export function startupWorkspace(
+  explicitWorkspace: string | null,
+  savedWorkspace: string | null,
+  fallbackWorkspace: string,
+) {
+  return explicitWorkspace || savedWorkspace || fallbackWorkspace;
+}

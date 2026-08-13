@@ -21,7 +21,6 @@ import type { ClaudeGatewayFixtureKind, ClaudeLifecycleFixtureKind } from "./pro
 import { prepareClaudeTurnParams } from "./providers/claude/claudeImageInput";
 import { ClaudeWorkerHost } from "./providers/claude/claudeWorkerHost";
 import { readClaudeCredentials } from "./providers/claude/claudeCredentials";
-import { replaceTrustedWorkspaces, revokeWorkspace, trustedWorkspaces, trustWorkspace } from "./providers/claude/claudeWorkspaceTrust";
 import { managedClaudeExecutablePath } from "./providers/claude/claudeUpdater";
 import { trustedThreadWorkspaces } from "./threadWorkspaceAuthorization";
 import { resolveExecutableFromPath } from "./executablePath";
@@ -35,7 +34,7 @@ import { isSafeExternalUrl, WindowLifecycle, type DesktopWindow } from "./window
 import { registerDesktopIpc } from "./ipc/registerDesktopIpc";
 import { FileLogger, logErrorDetails } from "./logger";
 import { launchWindowsTerminal } from "./windowsTerminal";
-import { requestedProviderFromArgs, requestedWorkspaceFromArgs } from "./workspaceArgs";
+import { requestedProviderFromArgs, requestedWorkspaceFromArgs, startupWorkspace } from "./workspaceArgs";
 import { WorkspaceAuthorizationRegistry, type WorkspaceAuthorizationSource } from "./workspaceAuthorizationRegistry";
 
 const MAX_AUTHORIZED_LOCAL_PATHS = 4_096;
@@ -224,53 +223,12 @@ function rememberWorkspace(directory: string) {
   return preferencesStore.write({ lastWorkspace: path.resolve(directory), recentWorkspaces: [] });
 }
 
-async function confirmWorkspaceAuthorization(cwdValue: unknown) {
+async function registerWorkspace(cwdValue: unknown) {
   if (typeof cwdValue !== "string") throw new Error("工作区无效。");
   const cwd = canonicalPath(cwdValue);
   if (!existsSync(cwd) || !statSync(cwd).isDirectory()) throw new Error("工作区不存在。");
-  if (authorizedWorkspacePaths.has(cwd)) return cwd;
-  const result = await dialog.showMessageBox({
-    type: "warning",
-    buttons: ["取消", "允许访问"],
-    defaultId: 0,
-    cancelId: 0,
-    noLink: true,
-    title: "允许访问工作区",
-    message: "AgentDesk 将访问以下目录中的本地文件：",
-    detail: cwd,
-  });
-  if (result.response !== 1) return null;
   registerAuthorizedWorkspacePath(cwd);
-  rememberWorkspace(cwd);
   return cwd;
-}
-
-async function confirmClaudeWorkspaceTrust(input: unknown) {
-  const value = input && typeof input === "object" && !Array.isArray(input) ? input as Record<string, unknown> : {};
-  if (typeof value.cwd !== "string" || (value.purpose !== "session" && value.purpose !== "plugin")) throw new Error("Claude 工作区授权参数无效。");
-  const cwd = canonicalPath(value.cwd);
-  if (!existsSync(cwd) || !statSync(cwd).isDirectory()) throw new Error("Claude 工作区不存在。");
-  if (!authorizedWorkspacePaths.has(cwd)) {
-    const authorized = await confirmWorkspaceAuthorization(cwd);
-    if (!authorized) return null;
-  }
-  if (trustedWorkspaces().some((entry) => canonicalPath(entry) === cwd)) return claudeUpdateManager.currentStatus();
-  const purpose = value.purpose === "plugin" ? "插件和市场操作" : "会话";
-  const result = await dialog.showMessageBox({
-    type: "warning",
-    buttons: ["取消", "信任并继续"],
-    defaultId: 0,
-    cancelId: 0,
-    noLink: true,
-    title: "信任 Claude Code 工作区",
-    message: `Claude Code ${purpose}将使用以下目录：`,
-    detail: `${cwd}\n\n项目配置可能启动 Hooks、MCP、插件或其他进程。仅在你信任此目录内容时继续。`,
-  });
-  if (result.response !== 1) return null;
-  trustWorkspace(cwd);
-  const workspaces = trustedWorkspaces();
-  preferencesStore.write({ trustedClaudeWorkspaces: workspaces });
-  return claudeUpdateManager.setStatus({ trustedWorkspaces: workspaces, message: "已信任 Claude 工作区。" });
 }
 
 async function closeClaudeGatewayFixture() {
@@ -547,10 +505,7 @@ const claudeWorkerHost = new ClaudeWorkerHost(claudeWorkerPath, {
   reportCleanupFailure: (message) => appLogger.log("error", "claude.worker.cleanup_failed", { message }),
 });
 let claudeBackend: ClaudeBackend;
-const backendManager = createBackendRegistry([new CodexBackend(codexAppServer), (claudeBackend = new ClaudeBackend(claudeWorkerHost, undefined, (workspaces) => {
-  preferencesStore.write({ trustedClaudeWorkspaces: workspaces });
-  claudeUpdateManager?.setStatus({ trustedWorkspaces: workspaces });
-}, readClaudeCredentialsForQuery, () => claudeGatewayFixture || claudeLifecycleFixture ? { kind: claudeGatewayFixture?.kind || "offline", ...(claudeGatewayFixture?.timeoutMs ? { timeoutMs: claudeGatewayFixture.timeoutMs } : {}), ...(claudeLifecycleFixture ? { lifecycle: claudeLifecycleFixture } : {}) } : undefined))], appLogger, (cwd) => authorizedWorkspacePaths.has(canonicalPath(cwd)));
+const backendManager = createBackendRegistry([new CodexBackend(codexAppServer), (claudeBackend = new ClaudeBackend(claudeWorkerHost, undefined, readClaudeCredentialsForQuery, () => claudeGatewayFixture || claudeLifecycleFixture ? { kind: claudeGatewayFixture?.kind || "offline", ...(claudeGatewayFixture?.timeoutMs ? { timeoutMs: claudeGatewayFixture.timeoutMs } : {}), ...(claudeLifecycleFixture ? { lifecycle: claudeLifecycleFixture } : {}) } : undefined))], appLogger, (cwd) => authorizedWorkspacePaths.has(canonicalPath(cwd)));
 
 claudeUpdateManager = new ClaudeUpdateManager({
   appPath: () => app.getAppPath(),
@@ -588,8 +543,8 @@ if (hasLock) {
     appLogger.log("info", "app.started", { version: app.getVersion(), packaged: app.isPackaged, argv: process.argv });
     const explicitWorkspace = requestedWorkspace(process.argv);
     const startupPreferences = preferencesStore.read();
-    replaceTrustedWorkspaces(startupPreferences.trustedClaudeWorkspaces || []);
-    workspacePath = explicitWorkspace || workspacePath;
+    const savedWorkspace = existingDirectory(startupPreferences.lastWorkspace);
+    workspacePath = startupWorkspace(explicitWorkspace, savedWorkspace, workspacePath);
     authorizedWorkspacePaths.clear();
     registerAuthorizedWorkspacePath(workspacePath);
     rememberWorkspace(workspacePath);
@@ -607,7 +562,7 @@ if (hasLock) {
           rememberWorkspace(selected);
           return selected;
         },
-        authorize: confirmWorkspaceAuthorization,
+        register: registerWorkspace,
       },
       preferences: preferencesStore,
       bossKey: {
@@ -694,15 +649,6 @@ if (hasLock) {
         status: () => claudeUpdateManager.currentStatus(),
         checkUpdate: () => claudeUpdateManager.check(),
         installUpdate: (allowUnverified) => claudeUpdateManager.update(allowUnverified),
-        trustWorkspace: confirmClaudeWorkspaceTrust,
-        revokeWorkspace: async (cwd) => {
-          if (typeof cwd !== "string") throw new Error("Claude 工作区无效。");
-          await claudeBackend.revokeWorkspace(cwd);
-          revokeWorkspace(cwd);
-          const workspaces = trustedWorkspaces();
-          preferencesStore.write({ trustedClaudeWorkspaces: workspaces });
-          return claudeUpdateManager.setStatus({ trustedWorkspaces: workspaces, message: "已撤销该 Claude 工作区信任。" });
-        },
       },
       agent: {
         request: (request) => {

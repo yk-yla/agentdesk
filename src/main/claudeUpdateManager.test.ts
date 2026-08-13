@@ -28,13 +28,11 @@ describe("ClaudeUpdateManager", () => {
         readSdkVersion: () => "1.0.0",
         readBinaryVersion: () => "1.0.0",
         credentialStatus: () => ({ credentialsAvailable: true, credentialSource: "settings", credentialMessage: "ok" }),
-        trustedWorkspaces: () => ["D:\\workspace"],
       });
 
       const status = await manager.check();
       assert.equal(status.phase, "available");
       assert.equal(status.latestVersion, "1.1.0");
-      assert.deepEqual(status.trustedWorkspaces, ["D:\\workspace"]);
     } finally {
       rmSync(directory, { recursive: true, force: true });
     }
@@ -160,7 +158,6 @@ describe("ClaudeUpdateManager", () => {
         readSdkVersion: () => "1.0.0",
         readBinaryVersion: () => "1.1.0",
         credentialStatus: () => ({ credentialsAvailable: true, credentialSource: "settings", credentialMessage: "ok" }),
-        trustedWorkspaces: () => [],
       });
       await manager.check();
       (manager as unknown as { pendingUpdate: unknown }).pendingUpdate = {

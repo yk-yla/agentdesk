@@ -6,11 +6,10 @@ import type { AgentBackend } from "../../agent/AgentBackend";
 import type { AgentCapabilities, AgentEventEnvelope, AgentOperation, AgentRequestContext, InteractionRef, PendingInteractionKind, PendingInteractionStatus } from "../../../shared/agentProtocol";
 import type { JsonObject } from "../../../shared/protocol";
 import { credentialEnv, readClaudeCredentials } from "./claudeCredentials";
-import { canonicalWorkspace, isTrustedWorkspace } from "./claudeWorkspaceTrust";
+import { canonicalWorkspace } from "../../localPathPolicy";
 import type { ClaudeGatewayFixtureKind, ClaudeLifecycleFixtureKind, ClaudePluginOperation, ClaudeWorkerEvent } from "./claudeWorkerProtocol";
 import { resolveExecutableFromPath } from "../../executablePath";
 
-export const CLAUDE_TRUST_REQUIRED_PREFIX = "__CLAUDE_WORKSPACE_TRUST_REQUIRED__";
 
 const CAPABILITIES: AgentCapabilities = {
   models: "supported", effort: "supported", images: "supported", history: "supported",
@@ -119,7 +118,6 @@ export class ClaudeBackend implements AgentBackend {
   constructor(
     private readonly runtime: ClaudeWorkerRuntime,
     private readonly interactionTimeoutMs = DEFAULT_INTERACTION_TIMEOUT_MS,
-    private readonly onTrustChanged?: (workspaces: string[]) => void,
     private readonly credentialsReader: typeof readClaudeCredentials = readClaudeCredentials,
     private readonly gatewayFixtureReader?: () => ClaudeGatewayFixtureConfig | undefined,
     private readonly toolArgumentStallTimeoutMs = DEFAULT_TOOL_ARGUMENT_STALL_TIMEOUT_MS,
@@ -232,7 +230,6 @@ export class ClaudeBackend implements AgentBackend {
     const cwdValue = typeof params.cwd === "string" ? params.cwd : context.canonicalCwd;
     if (!clientSessionId || !cwdValue) throw new Error("Claude 会话缺少客户端会话或工作区。");
     const cwd = canonicalWorkspace(cwdValue);
-    if (!isTrustedWorkspace(cwd)) throw new Error(`${CLAUDE_TRUST_REQUIRED_PREFIX}${cwd}`);
     if (this.sessions.has(clientSessionId)) throw new Error("Claude 客户端会话已存在，不能重复启动。");
     const nativeSessionId = randomUUID();
     const session: ClaudeSession = {
@@ -298,7 +295,6 @@ export class ClaudeBackend implements AgentBackend {
     const clientSessionId = context.sessionId;
     const { cwd, nativeSessionId } = this.sessionIdentity(params, context);
     if (!clientSessionId) throw new Error("Claude 恢复缺少客户端会话。");
-    if (!isTrustedWorkspace(cwd)) throw new Error(`${CLAUDE_TRUST_REQUIRED_PREFIX}${cwd}`);
     await this.assertKnownNativeSession(cwd, nativeSessionId);
     const existing = this.sessions.get(clientSessionId);
     if (existing?.queryActive) throw new Error("活动 Claude Query 不能被恢复请求覆盖。");
@@ -355,7 +351,6 @@ export class ClaudeBackend implements AgentBackend {
 
   private startTurn(params: JsonObject, context: AgentRequestContext) {
     const session = this.requireSession(context);
-    if (!isTrustedWorkspace(session.cwd)) throw new Error(`${CLAUDE_TRUST_REQUIRED_PREFIX}${session.cwd}`);
     const text = textFromInput(params.input);
     const inputBlocks = blocksFromInput(params.input);
     if (!text && !inputBlocks.some((item) => item.type === "localImage")) throw new Error("Claude Code 输入不能为空。");
@@ -481,7 +476,6 @@ export class ClaudeBackend implements AgentBackend {
     const cwdValue = typeof params.cwd === "string" ? params.cwd : context.canonicalCwd;
     if (!cwdValue) throw new Error("Claude 插件操作缺少工作区。");
     const cwd = canonicalWorkspace(cwdValue);
-    if (!isTrustedWorkspace(cwd)) throw new Error(`${CLAUDE_TRUST_REQUIRED_PREFIX}${cwd}`);
     const pluginName = typeof params.pluginName === "string" ? params.pluginName : typeof params.pluginId === "string" ? params.pluginId : undefined;
     const remoteMarketplace = typeof params.remoteMarketplaceName === "string" ? params.remoteMarketplaceName : undefined;
     const plugin = pluginName && remoteMarketplace && !pluginName.includes("@") ? `${pluginName}@${remoteMarketplace}` : pluginName;
@@ -823,25 +817,6 @@ export class ClaudeBackend implements AgentBackend {
     if (context.nativeSessionId && context.nativeSessionId !== session.nativeSessionId) throw new Error("Claude 原生会话归属不匹配。");
     if (context.queryGeneration !== undefined && context.queryGeneration !== session.queryGeneration) throw new Error("Claude Query 代次已失效。");
     return session;
-  }
-
-  async revokeWorkspace(cwdValue: string) {
-    const cwd = canonicalWorkspace(cwdValue);
-    for (const session of [...this.sessions.values()]) {
-      if (session.cwd !== cwd) continue;
-      this.clearToolTracking(session);
-      this.cancelSessionInteractions(session, "cancelled");
-      const previousGeneration = session.queryGeneration;
-      session.queryGeneration += 1;
-      session.queryActive = false;
-      session.turnId = null;
-      session.pendingStart = undefined;
-      session.resumeNativeSessionId = session.nativeSessionId;
-      session.mode = "resume";
-      this.emit(session, "claude/queryRestarted", { nativeSessionId: session.nativeSessionId, reason: "workspaceTrustRevoked" });
-      if (this.runtime.closeSession) await this.runtime.closeSession(session.clientSessionId, previousGeneration);
-      else this.runtime.send({ type: "closeSession", sessionId: session.clientSessionId, queryGeneration: previousGeneration });
-    }
   }
 
   private interactionKey(sessionId: string, queryGeneration: number, interactionId: string) {

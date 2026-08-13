@@ -16,15 +16,13 @@ interface Props {
   claudeStatus: ClaudeRuntimeStatus;
   onCheckClaude: () => Promise<void>;
   onUpdateClaude: () => Promise<void>;
-  onRevokeClaudeWorkspace: (cwd: string) => Promise<void>;
-  activeClaudeWorkspace: string;
 }
 
 function formatCheckTime(value?: number) {
   return value ? new Intl.DateTimeFormat("zh-CN", { month: "numeric", day: "numeric", hour: "2-digit", minute: "2-digit" }).format(value) : "-";
 }
 
-function UpdateSettingsBase({ status, cliStatus, claudeStatus, onSaveToken, onClearToken, onCheck, onDownload, onInstall, onOpenTokenPage, onCheckCli, onUpdateCli, onCheckClaude, onUpdateClaude, onRevokeClaudeWorkspace, activeClaudeWorkspace }: Props) {
+function UpdateSettingsBase({ status, cliStatus, claudeStatus, onSaveToken, onClearToken, onCheck, onDownload, onInstall, onOpenTokenPage, onCheckCli, onUpdateCli, onCheckClaude, onUpdateClaude }: Props) {
   const [token, setToken] = useState("");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
@@ -104,8 +102,7 @@ function UpdateSettingsBase({ status, cliStatus, claudeStatus, onSaveToken, onCl
       <div className={`update-status ${claudeStatus.phase}`}>{claudeStatus.message}</div>
       <div className={`update-status ${claudeStatus.credentialsAvailable ? "ready" : "error"}`}>{claudeStatus.credentialMessage}</div>
       {claudeAvailable ? <button className="update-action primary" onClick={() => void runClaude(onUpdateClaude)} disabled={claudeUpdating}><Download size={13} />更新到 v{claudeStatus.latestVersion}</button> : null}
-      {activeClaudeWorkspace && claudeStatus.trustedWorkspaces.some((entry) => entry.toLowerCase() === activeClaudeWorkspace.toLowerCase()) ? <button className="bare-button danger-button" onClick={() => void runClaude(() => onRevokeClaudeWorkspace(activeClaudeWorkspace))}>撤销当前目录信任</button> : null}
-      <div className="cli-check-meta"><span>已信任目录 {claudeStatus.trustedWorkspaces.length}</span><span>上次 {formatCheckTime(claudeStatus.checkedAt)}</span></div>
+      <div className="cli-check-meta"><span>上次 {formatCheckTime(claudeStatus.checkedAt)}</span></div>
     </section>
     <section className="desktop-update-section">
       <div className="update-heading"><strong>软件更新</strong><span>v{status.currentVersion || "-"}</span></div>

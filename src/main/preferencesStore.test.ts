@@ -53,7 +53,6 @@ describe("PreferencesStore", () => {
       compactionCounts: {
         "claude:thread-2": { count: 8, eventIds: ["claude-compaction-1"], updatedAt: 200 },
       },
-      trustedClaudeWorkspaces: [...Array.from({ length: 300 }, (_, index) => `trusted-${index}`), 1],
       workspaceState: [],
       ignored: "field",
     });
@@ -74,7 +73,6 @@ describe("PreferencesStore", () => {
       "codex:thread-1": { count: 12, eventIds: ["compact-1", "compact-2"], updatedAt: 100 },
       "claude:thread-2": { count: 8, eventIds: ["claude-compaction-1"], updatedAt: 200 },
     });
-    assert.equal(preferences.trustedClaudeWorkspaces?.length, 256);
     assert.equal(preferences.workspaceState, undefined);
     assert.equal("ignored" in preferences, false);
   });

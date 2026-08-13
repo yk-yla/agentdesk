@@ -6,7 +6,6 @@ import type { ClaudeRuntimeStatus } from "../shared/protocol";
 import { CLI_VERSION_PATTERN, compareVersions } from "./version";
 import { hasClaudeCredential, readClaudeCredentials } from "./providers/claude/claudeCredentials";
 import { inspectAndExtractClaudeZip, inspectClaudeExecutable, managedClaudeExecutablePath, replaceClaudeExecutable } from "./providers/claude/claudeUpdater";
-import { trustedWorkspaces } from "./providers/claude/claudeWorkspaceTrust";
 
 const CLAUDE_RELEASE_API = "https://api.github.com/repos/anthropics/claude-code/releases/latest";
 const MAX_CLAUDE_DOWNLOAD_BYTES = 300 * 1024 * 1024;
@@ -42,7 +41,6 @@ export interface ClaudeUpdateManagerDependencies {
   readSdkVersion?: () => string;
   readBinaryVersion?: (executable: string) => string;
   credentialStatus?: () => ClaudeCredentialStatus;
-  trustedWorkspaces?: () => string[];
   proxyDownloadUrl?: (officialUrl: string, version: string) => string | null;
 }
 
@@ -129,7 +127,6 @@ export class ClaudeUpdateManager {
     credentialsAvailable: false,
     credentialSource: "unavailable",
     credentialMessage: "正在检查 Claude 配置。",
-    trustedWorkspaces: [],
     message: "仅在手动检查时连接 Claude Code 发布源。",
   };
 
@@ -143,9 +140,8 @@ export class ClaudeUpdateManager {
       binarySource: managed ? "managed" : "sdk",
       binaryVersion: managed ? this.readBinaryVersion(this.managedPath()) : this.readSdkVersion(),
       sdkVersion: this.readSdkVersion(),
-      trustedWorkspaces: this.readTrustedWorkspaces(),
     };
-    return { ...this.status, trustedWorkspaces: [...this.status.trustedWorkspaces] };
+    return { ...this.status };
   }
 
   setStatus(patch: Partial<ClaudeRuntimeStatus>) {
@@ -302,10 +298,6 @@ export class ClaudeUpdateManager {
         credentialMessage: error instanceof Error ? error.message : "Claude 配置无法读取。",
       };
     }
-  }
-
-  private readTrustedWorkspaces() {
-    return this.dependencies.trustedWorkspaces?.() || trustedWorkspaces();
   }
 
   private async cleanupUpdateRoot(keepDirectory?: string) {

@@ -15,6 +15,8 @@ export function canonicalPath(filePath: string) {
   }
 }
 
+export const canonicalWorkspace = canonicalPath;
+
 export function isWithinDirectory(filePath: string, directory: string) {
   const relative = path.relative(canonicalPath(directory), canonicalPath(filePath));
   return relative === "" || (relative !== ".." && !relative.startsWith(`..${path.sep}`) && !path.isAbsolute(relative));

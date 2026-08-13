@@ -20,7 +20,7 @@ export function createMockBridge(): CodexBridge {
   let mockBossKeyStatus: BossKeyStatus = { accelerator: "F2", registered: true, message: "老板键 F2 已启用。" };
   let mockUpdateStatus: DesktopUpdateStatus = { phase: "unsupported", currentVersion: "1.0.7", message: "浏览器预览不检查软件更新。", tokenConfigured: false, repositoryUrl: "https://github.com/yxb715/agentdesk" };
   let mockCodexCliUpdateStatus: CodexCliUpdateStatus = { phase: "available", currentVersion: "0.146.1", latestVersion: "0.147.0", checkedAt: Date.now(), nextCheckAt: Date.now() + 6 * 60 * 60 * 1000, message: "发现新版本 0.147.0，可立即更新。" };
-  let mockClaudeRuntimeStatus: ClaudeRuntimeStatus = { phase: "available", binarySource: "sdk", binaryVersion: "1.0.0", sdkVersion: "0.1.0", latestVersion: "1.1.0", checkedAt: Date.now(), credentialsAvailable: true, credentialSource: "settings", credentialMessage: "已从 Claude 配置读取凭据。", trustedWorkspaces: [], integrityVerified: true, message: "发现 Claude Code 新版本 1.1.0。" };
+  let mockClaudeRuntimeStatus: ClaudeRuntimeStatus = { phase: "available", binarySource: "sdk", binaryVersion: "1.0.0", sdkVersion: "0.1.0", latestVersion: "1.1.0", checkedAt: Date.now(), credentialsAvailable: true, credentialSource: "settings", credentialMessage: "已从 Claude 配置读取凭据。", integrityVerified: true, message: "发现 Claude Code 新版本 1.1.0。" };
   let mockWindowMaximized = false;
   const mockDefaults: CodexDefaults = { model: "gpt-5.6-sol", effort: "xhigh" };
   const mockSkills = [
@@ -222,7 +222,7 @@ export function createMockBridge(): CodexBridge {
     getWorkspace: () => Promise.resolve(mockWorkspace),
     getLaunchProvider: () => Promise.resolve(null),
     chooseWorkspace: (defaultPath?: string) => Promise.resolve(defaultPath || mockWorkspace),
-    authorizeWorkspace: (cwd: string) => Promise.resolve(cwd),
+    registerWorkspace: (cwd: string) => Promise.resolve(cwd),
     getPreferences: () => Promise.resolve(mockPreferences),
     getCodexDefaults: () => Promise.resolve(mockDefaults),
     savePreferences: (preferences) => { mockPreferences = { ...mockPreferences, ...preferences }; return Promise.resolve(mockPreferences); },
@@ -276,17 +276,6 @@ export function createMockBridge(): CodexBridge {
     updateClaudeCode: () => {
       mockClaudeRuntimeStatus = { ...mockClaudeRuntimeStatus, phase: "updated", binarySource: "managed", binaryVersion: mockClaudeRuntimeStatus.latestVersion || mockClaudeRuntimeStatus.binaryVersion, message: "Claude Code 已更新。", checkedAt: Date.now() };
       claudeUpdateListeners.forEach((listener) => listener(mockClaudeRuntimeStatus));
-      return Promise.resolve(mockClaudeRuntimeStatus);
-    },
-    revokeClaudeWorkspace: (cwd: string) => {
-      mockClaudeRuntimeStatus = { ...mockClaudeRuntimeStatus, trustedWorkspaces: mockClaudeRuntimeStatus.trustedWorkspaces.filter((entry) => entry.toLowerCase() !== cwd.toLowerCase()), message: "已撤销该 Claude 工作区信任。" };
-      claudeUpdateListeners.forEach((listener) => listener(mockClaudeRuntimeStatus));
-      return Promise.resolve(mockClaudeRuntimeStatus);
-    },
-    trustClaudeWorkspace: (cwd: string) => {
-      if (!mockClaudeRuntimeStatus.trustedWorkspaces.some((entry) => entry.toLowerCase() === cwd.toLowerCase())) {
-        mockClaudeRuntimeStatus = { ...mockClaudeRuntimeStatus, trustedWorkspaces: [...mockClaudeRuntimeStatus.trustedWorkspaces, cwd], message: "已信任 Claude 工作区。" };
-      }
       return Promise.resolve(mockClaudeRuntimeStatus);
     },
     onClaudeRuntimeStatus(listener) {

@@ -18,7 +18,7 @@ import { createClaudeModelCache, sameClaudeModelCache } from "./agent/claudeMode
 import { codexRequestMethod, isCodexRequestTimeout, mergeMessages } from "./inputQueue";
 import {
   applyProviderModelDefaults, initialProviderCapabilities, initialProviderModels, newSessionDefaults, normalizeAgentRequestError, retargetEmptySession,
-  providerDisconnectedMessage, trustWorkspaceForRequest, workspaceForProvider,
+  providerDisconnectedMessage,
 } from "./agent/providerRegistry";
 import { createMockAgentBridge } from "./mockBridge";
 import PaneView from "./PaneView";
@@ -55,7 +55,7 @@ const NO_PENDING_STEERS: PendingSteerMessage[] = [];
 const NO_SKILLS: SkillOption[] = [];
 const INITIAL_UPDATE_STATUS: DesktopUpdateStatus = { phase: "idle", currentVersion: "", message: "仅在手动检查时连接 GitHub。", tokenConfigured: false, repositoryUrl: "https://github.com/yxb715/agentdesk" };
 const INITIAL_CLI_UPDATE_STATUS: CodexCliUpdateStatus = { phase: "idle", currentVersion: "", message: "正在读取 Codex CLI 版本。" };
-const INITIAL_CLAUDE_RUNTIME_STATUS: ClaudeRuntimeStatus = { phase: "idle", binarySource: "sdk", binaryVersion: "", sdkVersion: "", credentialsAvailable: false, credentialSource: "unavailable", credentialMessage: "正在读取 Claude 配置。", trustedWorkspaces: [], message: "仅在手动检查时连接 Claude Code 发布源。" };
+const INITIAL_CLAUDE_RUNTIME_STATUS: ClaudeRuntimeStatus = { phase: "idle", binarySource: "sdk", binaryVersion: "", sdkVersion: "", credentialsAvailable: false, credentialSource: "unavailable", credentialMessage: "正在读取 Claude 配置。", message: "仅在手动检查时连接 Claude Code 发布源。" };
 const INITIAL_BOSS_KEY_STATUS: BossKeyStatus = { accelerator: DEFAULT_BOSS_KEY, registered: false, message: "正在检查老板键。" };
 const DEFAULT_SIDEBAR_WIDTH = 250;
 const MIN_SIDEBAR_WIDTH = 184;
@@ -328,15 +328,6 @@ export default function App() {
       return value;
     } catch (error) {
       const normalized = normalizeAgentRequestError(provider, operation, error);
-      const canonicalCwd = trustWorkspaceForRequest(provider, operation, normalized, session?.cwd);
-      if (canonicalCwd) {
-        const status = await bridge.trustClaudeWorkspace(canonicalCwd, "session");
-        if (!status) throw new Error("已取消 Claude Code 工作区授权。");
-        setClaudeRuntimeStatus(status);
-        const value = await agentClient.request(provider, operation, params, context);
-        appendRawEvent(sessionId, `response ${operation}`, { provider, payload: value });
-        return value;
-      }
       appendRawEvent(sessionId, `error ${operation}`, { provider, message: normalized.message, ...(normalized instanceof Error && "payload" in normalized ? { payload: (normalized as { payload: unknown }).payload } : {}) });
       throw normalized;
     }
@@ -355,13 +346,7 @@ export default function App() {
     return agentClient.request(provider, operation, { ...params, cwd }, context).catch(async (error) => {
       if (provider !== "claude") throw error;
       const normalized = normalizeAgentRequestError(provider, operation, error);
-      const marker = normalized.message.indexOf("__CLAUDE_WORKSPACE_TRUST_REQUIRED__");
-      if (marker < 0) throw normalized;
-      const canonicalCwd = normalized.message.slice(marker + "__CLAUDE_WORKSPACE_TRUST_REQUIRED__".length).trim() || cwd;
-      const status = await bridge.trustClaudeWorkspace(canonicalCwd, "plugin");
-      if (!status) throw new Error("已取消 Claude Code 工作区授权。");
-      setClaudeRuntimeStatus(status);
-      return agentClient.request(provider, operation, { ...params, cwd }, context);
+      throw normalized;
     });
   }, [agentClient, bridge, workspace]);
 
@@ -442,6 +427,7 @@ export default function App() {
     updateSession(sessionId, (current) => ({ ...current, statusLabel: "正在关闭", errorText: "" }));
     return sessionLifecycleRef.current.close(sessionId, () => closeSessionResources({
       shouldInterrupt: session.status === "working" && Boolean(session.threadId && session.activeTurnId),
+      shouldClose: Boolean(session.threadId),
       interrupt: async () => {
         await agentClient.request(session.provider, "interruptTurn", { threadId: session.threadId || "", turnId: session.activeTurnId || "" }, context);
       },
@@ -753,10 +739,6 @@ export default function App() {
     }
     setClaudeRuntimeStatus(status);
   }, [bridge]);
-  const revokeClaudeWorkspace = useCallback(async (cwd: string) => {
-    setClaudeRuntimeStatus(await bridge.revokeClaudeWorkspace(cwd));
-  }, [bridge]);
-
   const downloadUpdate = useCallback(async () => {
     setUpdateStatus(await bridge.downloadUpdate());
   }, [bridge]);
@@ -779,18 +761,20 @@ export default function App() {
   const openUpdateTokenPage = useCallback(() => bridge.openExternal("https://github.com/settings/personal-access-tokens/new"), [bridge]);
 
   const selectWorkspace = useCallback(async (directory: string) => {
-    setWorkspace(directory);
-    await savePreference({ lastWorkspace: directory, recentWorkspaces: [] });
-  }, [savePreference]);
+    const registered = await bridge.registerWorkspace(directory);
+    if (!registered) return;
+    setWorkspace(registered);
+    await savePreference({ lastWorkspace: registered, recentWorkspaces: [] });
+  }, [bridge, savePreference]);
 
   const createSessionInDirectory = useCallback(async (
     directory: string,
     provider: AgentProvider = "codex",
     placement?: { paneId: string; afterSessionId?: string },
   ) => {
-    const authorized = await bridge.authorizeWorkspace(directory);
-    if (!authorized) return undefined;
-    directory = authorized;
+    const registered = await bridge.registerWorkspace(directory);
+    if (!registered) return undefined;
+    directory = registered;
     setWorkspace(directory);
     const sessionId = placement
       ? addSessionToPane(placement.paneId, directory, { provider }, placement.afterSessionId)
@@ -1649,6 +1633,9 @@ export default function App() {
         : restored.sessions;
       const restoredSessions = Object.fromEntries(Object.entries(restoredSessionsBase)
         .map(([id, session]) => [id, withPersistedCompaction(session, preferencesRef.current)]));
+      await Promise.all([...new Set(Object.values(restoredSessions).map((session) => session.cwd))]
+        .map((cwd) => bridge.registerWorkspace(cwd)));
+      if (!active) return;
       sessionsRef.current = restoredSessions;
       layoutRef.current = restored.layout;
       draftsRef.current = restored.drafts;
@@ -1969,7 +1956,6 @@ export default function App() {
       cliUpdateStatus,
       claudeStatus: claudeRuntimeStatus,
       bossKeyStatus,
-      activeClaudeWorkspace: workspaceForProvider(activeSession, "claude"),
     },
     actions: {
       onSavePreference: savePreference,
@@ -1981,12 +1967,11 @@ export default function App() {
       onUpdateCodexCli: updateCodexCli,
       onCheckClaude: checkClaudeCodeUpdates,
       onUpdateClaude: updateClaudeCode,
-      onRevokeClaudeWorkspace: revokeClaudeWorkspace,
       onDownloadUpdate: downloadUpdate,
       onInstallUpdate: installUpdate,
       onOpenUpdateTokenPage: openUpdateTokenPage,
     },
-  }), [activeSession, baseFontSize, bossKeyStatus, checkClaudeCodeUpdates, checkCodexCliUpdates, checkForUpdates, claudeRuntimeStatus, clearUpdateToken, cliUpdateStatus, displayMode, downloadUpdate, installUpdate, openUpdateTokenPage, preferences.theme, revokeClaudeWorkspace, savePreference, saveUpdateToken, setBossKey, updateClaudeCode, updateCodexCli, updateStatus]);
+  }), [baseFontSize, bossKeyStatus, checkClaudeCodeUpdates, checkCodexCliUpdates, checkForUpdates, claudeRuntimeStatus, clearUpdateToken, cliUpdateStatus, displayMode, downloadUpdate, installUpdate, openUpdateTokenPage, preferences.theme, savePreference, saveUpdateToken, setBossKey, updateClaudeCode, updateCodexCli, updateStatus]);
 
   const renderPane = (pane: PaneState) => {
     const session = sessions[pane.activeTabId];

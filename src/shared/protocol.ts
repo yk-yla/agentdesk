@@ -119,7 +119,6 @@ export interface DesktopPreferences {
   compactionCounts?: Record<string, CompactionRecord>;
   /** @deprecated 旧版本 Codex 专用字段，读取时会合并到 compactionCounts。 */
   codexCompactionCounts?: Record<string, CodexCompactionRecord>;
-  trustedClaudeWorkspaces?: string[];
   workspaceState?: JsonObject;
 }
 
@@ -204,7 +203,6 @@ export interface ClaudeRuntimeStatus {
   credentialsAvailable: boolean;
   credentialSource: "settings" | "process" | "unavailable";
   credentialMessage: string;
-  trustedWorkspaces: string[];
   integrityVerified?: boolean;
   integritySigner?: string;
   integrityStatus?: string;
@@ -233,7 +231,7 @@ export interface CodexBridge {
   getWorkspace(): Promise<string>;
   getLaunchProvider(): Promise<AgentProvider | null>;
   chooseWorkspace(defaultPath?: string): Promise<string | null>;
-  authorizeWorkspace(cwd: string): Promise<string | null>;
+  registerWorkspace(cwd: string): Promise<string | null>;
   getPreferences(): Promise<DesktopPreferences>;
   getCodexDefaults(): Promise<CodexDefaults>;
   savePreferences(preferences: Partial<DesktopPreferences>): Promise<DesktopPreferences>;
@@ -266,8 +264,6 @@ export interface CodexBridge {
   getClaudeRuntimeStatus(): Promise<ClaudeRuntimeStatus>;
   checkClaudeCodeUpdates(): Promise<ClaudeRuntimeStatus>;
   updateClaudeCode(allowUnverified: boolean): Promise<ClaudeRuntimeStatus>;
-  revokeClaudeWorkspace(cwd: string): Promise<ClaudeRuntimeStatus>;
-  trustClaudeWorkspace(cwd: string, purpose: "session" | "plugin"): Promise<ClaudeRuntimeStatus | null>;
   onClaudeRuntimeStatus(listener: (status: ClaudeRuntimeStatus) => void): () => void;
   onMessage(listener: (message: JsonRpcMessage) => void): () => void;
 }

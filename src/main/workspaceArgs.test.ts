@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { requestedProviderFromArgs, requestedWorkspaceFromArgs } from "./workspaceArgs";
+import { requestedProviderFromArgs, requestedWorkspaceFromArgs, startupWorkspace } from "./workspaceArgs";
 
 const resolveDirectory = (value: string) => value.startsWith("D:\\target") ? value : null;
 
@@ -44,4 +44,10 @@ test("normalizes Provider arguments and rejects unsupported values", () => {
   assert.equal(requestedProviderFromArgs(["AgentDesk.exe", "--provider=CLAUDE"]), "claude");
   assert.equal(requestedProviderFromArgs(["AgentDesk.exe", "--provider=openai"]), null);
   assert.equal(requestedProviderFromArgs(["AgentDesk.exe"]), null);
+});
+
+test("restores the saved workspace unless --cwd explicitly overrides it", () => {
+  assert.equal(startupWorkspace(null, "D:\\saved", "D:\\install"), "D:\\saved");
+  assert.equal(startupWorkspace("D:\\explicit", "D:\\saved", "D:\\install"), "D:\\explicit");
+  assert.equal(startupWorkspace(null, null, "D:\\install"), "D:\\install");
 });

@@ -30,7 +30,6 @@ export const DEFAULT_PREFERENCES: DesktopPreferences = {
   theme: "github-light",
   displayMode: "simple",
   bossKey: DEFAULT_BOSS_KEY,
-  trustedClaudeWorkspaces: [],
 };
 
 const THEME_IDS: ThemeId[] = [
@@ -171,7 +170,6 @@ export function normalizePreferences(value: unknown): DesktopPreferences {
       ...normalizeCompactionCounts(parsed.compactionCounts),
     }),
     codexCompactionCounts: normalizeCompactionCounts(parsed.codexCompactionCounts),
-    trustedClaudeWorkspaces: Array.isArray(parsed.trustedClaudeWorkspaces) ? parsed.trustedClaudeWorkspaces.filter((item): item is string => typeof item === "string").slice(0, 256) : [],
   };
   if (parsed.workspaceState && typeof parsed.workspaceState === "object" && !Array.isArray(parsed.workspaceState)) {
     preferences.workspaceState = parsed.workspaceState;

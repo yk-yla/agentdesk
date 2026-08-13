@@ -1,5 +1,6 @@
 export interface CloseSessionResourcesOptions {
   shouldInterrupt: boolean;
+  shouldClose: boolean;
   interrupt: () => Promise<void>;
   waitForIdle: () => Promise<void>;
   close: () => Promise<void>;
@@ -37,10 +38,12 @@ export async function closeSessionResources(options: CloseSessionResourcesOption
   }
 
   let closeError: unknown;
-  try {
-    await options.close();
-  } catch (error) {
-    closeError = error;
+  if (options.shouldClose) {
+    try {
+      await options.close();
+    } catch (error) {
+      closeError = error;
+    }
   }
   return { ...(interruptError === undefined ? {} : { interruptError }), ...(closeError === undefined ? {} : { closeError }) };
 }

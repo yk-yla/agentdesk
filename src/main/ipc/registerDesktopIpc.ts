@@ -30,7 +30,7 @@ interface DesktopIpcServices {
     current(): string;
     launchProvider(): AgentProvider | null;
     choose(defaultPath?: string): Promise<string | null>;
-    authorize(cwd: unknown): Promise<string | null>;
+    register(cwd: unknown): Promise<string | null>;
   };
   preferences: PreferenceService;
   bossKey: {
@@ -70,8 +70,6 @@ interface DesktopIpcServices {
     status(): unknown;
     checkUpdate(): unknown;
     installUpdate(allowUnverified: boolean): unknown;
-    revokeWorkspace(cwd: unknown): unknown;
-    trustWorkspace(input: unknown): unknown;
   };
   agent: {
     request(request: ValidatedAgentRequest): unknown;
@@ -198,7 +196,7 @@ export function registerDesktopIpc(ipc: IpcRegistrar, services: DesktopIpcServic
   ipc.handle("agentdesk:get-workspace", () => services.workspace.current());
   ipc.handle("agentdesk:get-launch-provider", () => services.workspace.launchProvider());
   ipc.handle("agentdesk:choose-workspace", (_event, defaultPath: unknown) => services.workspace.choose(typeof defaultPath === "string" ? defaultPath : undefined));
-  ipc.handle("agentdesk:authorize-workspace", (_event, cwd: unknown) => services.workspace.authorize(cwd));
+  ipc.handle("agentdesk:register-workspace", (_event, cwd: unknown) => services.workspace.register(cwd));
   ipc.handle("agentdesk:get-preferences", () => services.preferences.read());
   ipc.handle("agentdesk:save-preferences", (_event, patch: unknown) => services.preferences.write(sanitizePreferencesPatch(patch)));
   ipc.handle("agentdesk:boss-key-status", () => services.bossKey.status());
@@ -230,8 +228,6 @@ export function registerDesktopIpc(ipc: IpcRegistrar, services: DesktopIpcServic
   ipc.handle("claude:runtime-status", () => services.claude.status());
   ipc.handle("claude:update-check", () => services.claude.checkUpdate());
   ipc.handle("claude:update-install", (_event, allowUnverified: unknown) => services.claude.installUpdate(allowUnverified === true));
-  ipc.handle("claude:workspace-revoke", (_event, cwd: unknown) => services.claude.revokeWorkspace(cwd));
-  ipc.handle("claude:workspace-trust", (_event, input: unknown) => services.claude.trustWorkspace(input));
   ipc.handle("agent:request", (_event, request: unknown) => services.agent.request(validateAgentRequest(request)));
   ipc.handle("agent:respond", (_event, response: unknown) => services.agent.respond(validateAgentResponse(response)));
 

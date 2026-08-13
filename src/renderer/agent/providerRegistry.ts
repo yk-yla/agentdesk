@@ -20,10 +20,8 @@ interface RendererProviderDefinition {
   sessionDefaults(models: ModelOption[], defaults: CodexDefaults): { model: string; effort: string };
   normalizeRequestError(error: unknown, operation: AgentOperation): Error;
   historyParams(input: { cursor: string | null; limit: number; cwd?: string }): JsonObject;
-  trustWorkspace(error: Error, fallbackCwd?: string): string | null;
 }
 
-const CLAUDE_TRUST_REQUIRED_PREFIX = "__CLAUDE_WORKSPACE_TRUST_REQUIRED__";
 const CLAUDE_BOOTSTRAP_EFFORTS = ["low", "medium", "high", "xhigh", "max"];
 const CLAUDE_BOOTSTRAP_MODELS: ModelOption[] = [
   { id: "default", displayName: "Default (recommended)", description: "使用 Claude Code 当前推荐模型", efforts: CLAUDE_BOOTSTRAP_EFFORTS, defaultEffort: "medium", supportsImage: true },
@@ -62,7 +60,6 @@ const definitions: Record<AgentProvider, RendererProviderDefinition> = {
     },
     normalizeRequestError: normalizeCodexRequestError,
     historyParams: ({ cursor, limit, cwd }) => ({ cursor, limit, sortKey: "recency_at", sortDirection: "desc", sourceKinds: ["cli", "vscode", "exec", "appServer"], archived: false, ...(cwd ? { cwd } : {}) }),
-    trustWorkspace: () => null,
   },
   claude: {
     initialCapabilities: CLAUDE_INITIAL_CAPABILITIES,
@@ -75,10 +72,6 @@ const definitions: Record<AgentProvider, RendererProviderDefinition> = {
       return error instanceof Error ? error : new Error("Claude Code 请求失败。" );
     },
     historyParams: ({ cursor, limit, cwd }) => ({ cursor, limit, ...(cwd ? { cwd } : {}) }),
-    trustWorkspace(error, fallbackCwd) {
-      const marker = error.message.indexOf(CLAUDE_TRUST_REQUIRED_PREFIX);
-      return marker < 0 ? null : error.message.slice(marker + CLAUDE_TRUST_REQUIRED_PREFIX.length).trim() || fallbackCwd || "当前目录";
-    },
   },
 };
 
@@ -126,11 +119,6 @@ export function normalizeAgentRequestError(provider: AgentProvider, operation: A
   return definitions[provider].normalizeRequestError(error, operation);
 }
 
-export function trustWorkspaceForRequest(provider: AgentProvider, operation: AgentOperation, error: Error, fallbackCwd?: string) {
-  if (operation !== "startSession" && operation !== "resumeSession") return null;
-  return definitions[provider].trustWorkspace(error, fallbackCwd);
-}
-
 export function providerHistoryParams(provider: AgentProvider, input: { cursor: string | null; limit: number; cwd?: string }) {
   return definitions[provider].historyParams(input);
 }
@@ -141,9 +129,5 @@ export function providerAffectsStartupState(provider: AgentProvider) {
 
 export function providerDisconnectedMessage(provider: AgentProvider) {
   return `${providerDisplayName(provider)} 服务已断开，会话创建结果已作废。`;
-}
-
-export function workspaceForProvider(session: SessionState | undefined, provider: AgentProvider) {
-  return session?.provider === provider ? session.cwd : "";
 }
 
