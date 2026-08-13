@@ -32,6 +32,7 @@ import { SessionLifecycleController } from "./sessionLifecycleController";
 import { SessionMessageController } from "./sessionMessageController";
 import { nativeSessionKey, ProviderEventController } from "./providerEventController";
 import { applyLocalSessionMetadata, favoriteHistoryEntries, favoriteSessionSummary, HistoryController, isFavoriteSession, mergeHistory, sortHistory } from "./historyController";
+import { restoreHistoricalSession } from "./historicalSessionRestore";
 import { LayoutController, type TabDropPosition, type TabDropTarget } from "./layoutController";
 import WindowTitleBar from "./WindowTitleBar";
 import ProviderIcon from "./ProviderIcon";
@@ -1402,37 +1403,35 @@ export default function App() {
     }
     providerEventRef.current?.bindSession(entry.provider, entry.id, sessionId);
 
-    // read 先到就先显示，不再等较慢的 resume；resume 独立完成后只补模型和思考等级。
-    // 守卫在 resume 结束后清掉：失败时 resumed 仍为 false，下次发送会重新 resume 而不是永久报同一个错。
-    const resumePromise = sessionLifecycleRef.current.resume(sessionId, () => (
-      requestForSession(sessionId, "resumeSession", { threadId: entry.id, cwd: entry.cwd })
-    ));
-
     const readVersion = providerEventRef.current?.captureVersion(sessionId) || { event: 0, lifecycle: 0 };
-    const readPromise = requestForSession(sessionId, "readSession", { threadId: entry.id, includeTurns: true })
-      .then((readValue) => {
-        const preserve = providerEventRef.current?.changedSince(sessionId, readVersion) || { preserveRealtime: false, preserveLifecycle: false };
-        updateSession(sessionId, (current) => {
-          const persisted = persistedCompaction(preferencesRef.current, current);
-          return hydrateAgentSession(current, current.provider, asRecord(readValue).thread, {
-            ...preserve,
-            ...(persisted ? { persistedCompactionCount: persisted.count, persistedCompactionEventIds: persisted.eventIds } : {}),
-          });
-        });
-        persistCompactionSnapshot(sessionId);
-      })
-      .catch((error) => setError(sessionId, error, "读取历史会话失败"));
-
     try {
-      const resume = asRecord(await resumePromise);
-      updateSession(sessionId, (current) => {
-        const model = stringValue(resume.model) || current.model;
-        return { ...current, model, effort: stringValue(resume.reasoningEffort) || current.effort, resumed: true, tokenUsage: tokenUsageForModel(current, model, preferencesRef.current) };
+      await restoreHistoricalSession({
+        resume: () => sessionLifecycleRef.current.resume(sessionId, () => (
+          requestForSession(sessionId, "resumeSession", { threadId: entry.id, cwd: entry.cwd })
+        )),
+        applyResume: (resumeValue) => {
+          const resume = asRecord(resumeValue);
+          updateSession(sessionId, (current) => {
+            const model = stringValue(resume.model) || current.model;
+            return { ...current, model, effort: stringValue(resume.reasoningEffort) || current.effort, resumed: true, tokenUsage: tokenUsageForModel(current, model, preferencesRef.current) };
+          });
+        },
+        read: () => requestForSession(sessionId, "readSession", { threadId: entry.id, includeTurns: true }),
+        applyRead: (readValue) => {
+          const preserve = providerEventRef.current?.changedSince(sessionId, readVersion) || { preserveRealtime: false, preserveLifecycle: false };
+          updateSession(sessionId, (current) => {
+            const persisted = persistedCompaction(preferencesRef.current, current);
+            return hydrateAgentSession(current, current.provider, asRecord(readValue).thread, {
+              ...preserve,
+              ...(persisted ? { persistedCompactionCount: persisted.count, persistedCompactionEventIds: persisted.eventIds } : {}),
+            });
+          });
+          persistCompactionSnapshot(sessionId);
+        },
       });
     } catch (error) {
-      setError(sessionId, error, "恢复历史会话失败");
+      setError(sessionId, error, "恢复或读取历史会话失败");
     }
-    await readPromise;
     return sessionId;
   }, [activateSessionTab, addSession, persistCompactionSnapshot, requestForSession, setError, updateSession]);
 
@@ -1732,21 +1731,20 @@ export default function App() {
       if (!providerCanRestore(providerStartupStates, session.provider)) continue;
       workspaceRestoreIdsRef.current.delete(sessionId);
       providerEventRef.current?.bindSession(session.provider, session.threadId, sessionId);
-      const resumePromise = sessionLifecycleRef.current.resume(sessionId, () => (
-        requestForSession(sessionId, "resumeSession", { threadId: session.threadId as string, cwd: session.cwd })
-      ));
-      void resumePromise
-        .then((resumeValue) => {
+      const readVersion = providerEventRef.current?.captureVersion(sessionId) || { event: 0, lifecycle: 0 };
+      void restoreHistoricalSession({
+        resume: () => sessionLifecycleRef.current.resume(sessionId, () => (
+          requestForSession(sessionId, "resumeSession", { threadId: session.threadId as string, cwd: session.cwd })
+        )),
+        applyResume: (resumeValue) => {
           const resume = asRecord(resumeValue);
           updateSession(sessionId, (current) => {
             const model = stringValue(resume.model) || current.model;
             return { ...current, model, effort: stringValue(resume.reasoningEffort) || current.effort, resumed: true, tokenUsage: tokenUsageForModel(current, model, preferencesRef.current) };
           });
-        })
-        .catch((error) => setError(sessionId, error, "恢复更新前会话失败"));
-      const readVersion = providerEventRef.current?.captureVersion(sessionId) || { event: 0, lifecycle: 0 };
-      void requestForSession(sessionId, "readSession", { threadId: session.threadId, includeTurns: true })
-        .then((readValue) => {
+        },
+        read: () => requestForSession(sessionId, "readSession", { threadId: session.threadId as string, includeTurns: true }),
+        applyRead: (readValue) => {
           const preserve = providerEventRef.current?.changedSince(sessionId, readVersion) || { preserveRealtime: false, preserveLifecycle: false };
           updateSession(sessionId, (current) => {
             const persisted = persistedCompaction(preferencesRef.current, current);
@@ -1756,8 +1754,8 @@ export default function App() {
             });
           });
           persistCompactionSnapshot(sessionId);
-        })
-        .catch((error) => setError(sessionId, error, "读取更新前会话失败"));
+        },
+      }).catch((error) => setError(sessionId, error, "恢复或读取更新前会话失败"));
     }
   }, [persistCompactionSnapshot, providerStartupStates, requestForSession, sessions, setError, updateSession]);
 
