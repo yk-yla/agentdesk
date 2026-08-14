@@ -146,6 +146,9 @@ export class AgentSessionRegistry {
       if (!knownCwd || knownCwd !== canonicalCwd) throw new Error("原生会话尚未由当前工作区的 Provider 历史登记。");
       return;
     }
+    if (operation === "closeSession" && context.sessionId && !this.sessions.has(context.sessionId)) {
+      return { skipBackend: true } as const;
+    }
     if (!SESSION_OPERATIONS.has(operation)) return;
     const session = this.requireSession(provider, context);
     this.assertContextMatches(session, context);

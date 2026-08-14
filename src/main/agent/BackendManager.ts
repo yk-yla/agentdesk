@@ -36,9 +36,10 @@ export class BackendManager {
     const startedAt = Date.now();
     try {
       const backend = this.require(provider);
-      this.sessions.prepareRequest(provider, operation, params, context);
+      const preparation = this.sessions.prepareRequest(provider, operation, params, context);
       let result: unknown;
-      if (operation === "getCapabilities") result = await backend.getCapabilities();
+      if (preparation?.skipBackend) result = undefined;
+      else if (operation === "getCapabilities") result = await backend.getCapabilities();
       else if (operation === "closeSession") result = await backend.closeSession(context);
       else result = await backend.request(operation, params, context);
       this.sessions.completeRequest(provider, operation, params, context, result);

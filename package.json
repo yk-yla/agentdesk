@@ -1,6 +1,6 @@
 {
   "name": "agentdesk",
-  "version": "1.0.10",
+  "version": "1.0.11",
   "private": true,
   "description": "A focused desktop client for Codex and Claude Code.",
   "engines": {

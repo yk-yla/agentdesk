@@ -32,7 +32,7 @@ import { SessionLifecycleController } from "./sessionLifecycleController";
 import { SessionMessageController } from "./sessionMessageController";
 import { nativeSessionKey, ProviderEventController } from "./providerEventController";
 import { applyLocalSessionMetadata, favoriteHistoryEntries, favoriteSessionSummary, HistoryController, isFavoriteSession, mergeHistory, sortHistory } from "./historyController";
-import { restoreHistoricalSession } from "./historicalSessionRestore";
+import { registerHistoricalWorkspace, restoreHistoricalSession } from "./historicalSessionRestore";
 import { LayoutController, type TabDropPosition, type TabDropTarget } from "./layoutController";
 import WindowTitleBar from "./WindowTitleBar";
 import ProviderIcon from "./ProviderIcon";
@@ -1368,9 +1368,23 @@ export default function App() {
 
   const openHistory = useCallback(async (entry: HistoryThread) => {
     const existing = Object.values(sessionsRef.current).find((session) => session.provider === entry.provider && session.threadId === entry.id && sameDirectory(session.cwd, entry.cwd));
+    let registeredCwd: string;
+    try {
+      registeredCwd = await registerHistoricalWorkspace((cwd) => bridge.registerWorkspace(cwd), entry.cwd);
+    } catch (error) {
+      if (existing) {
+        activateSessionTab(existing.id);
+        setError(existing.id, error, "打开历史会话失败");
+        return existing.id;
+      }
+      const currentLayout = layoutRef.current;
+      const activePane = currentLayout.panes.find((pane) => pane.id === currentLayout.activePaneId) ?? currentLayout.panes[0];
+      if (activePane) setError(activePane.activeTabId, error, "打开历史会话失败");
+      return undefined;
+    }
     if (existing) {
       activateSessionTab(existing.id);
-      return existing.id;
+      if (existing.resumed) return existing.id;
     }
     const currentLayout = layoutRef.current;
     const activePane = currentLayout.panes.find((pane) => pane.id === currentLayout.activePaneId) ?? currentLayout.panes[0];
@@ -1384,13 +1398,13 @@ export default function App() {
       && !(attachmentsRef.current[placeholder.id] || []).length
       && !draftsRef.current.get(placeholder.id),
     );
-    const sessionId = canReusePlaceholder && placeholder ? placeholder.id : addSession(entry.cwd, { threadId: entry.id, title: entry.title, provider: entry.provider });
-    if (canReusePlaceholder) {
+    const sessionId = existing?.id ?? (canReusePlaceholder && placeholder ? placeholder.id : addSession(registeredCwd, { threadId: entry.id, title: entry.title, provider: entry.provider }));
+    if (!existing && canReusePlaceholder) {
       updateSession(sessionId, (current) => {
         const next = retargetEmptySession(
           current,
           entry.provider,
-          entry.cwd,
+          registeredCwd,
           entry.id,
           entry.title,
           providerModelsRef.current[entry.provider],
@@ -1400,6 +1414,8 @@ export default function App() {
         next.tokenUsage.total = cachedModelContextWindow(preferencesRef.current, next.model);
         return withPersistedCompaction(next, preferencesRef.current);
       });
+    } else if (existing) {
+      updateSession(sessionId, (current) => ({ ...current, cwd: registeredCwd, errorText: "" }));
     }
     providerEventRef.current?.bindSession(entry.provider, entry.id, sessionId);
 
@@ -1407,7 +1423,7 @@ export default function App() {
     try {
       await restoreHistoricalSession({
         resume: () => sessionLifecycleRef.current.resume(sessionId, () => (
-          requestForSession(sessionId, "resumeSession", { threadId: entry.id, cwd: entry.cwd })
+          requestForSession(sessionId, "resumeSession", { threadId: entry.id, cwd: registeredCwd })
         )),
         applyResume: (resumeValue) => {
           const resume = asRecord(resumeValue);
@@ -1433,7 +1449,7 @@ export default function App() {
       setError(sessionId, error, "恢复或读取历史会话失败");
     }
     return sessionId;
-  }, [activateSessionTab, addSession, persistCompactionSnapshot, requestForSession, setError, updateSession]);
+  }, [activateSessionTab, addSession, bridge, persistCompactionSnapshot, requestForSession, setError, updateSession]);
 
   const isHistoryWorking = useCallback((threadId: string, provider?: AgentProvider) => (
     Object.values(sessionsRef.current).some((session) => session.threadId === threadId && (!provider || session.provider === provider) && session.status === "working")

@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
-import { restoreHistoricalSession } from "./historicalSessionRestore";
+import { registerHistoricalWorkspace, restoreHistoricalSession } from "./historicalSessionRestore";
 
 describe("restoreHistoricalSession", () => {
   it("registers a resumed session before reading its history", async () => {
@@ -36,5 +36,21 @@ describe("restoreHistoricalSession", () => {
       applyRead: () => undefined,
     }), /resume failed/);
     assert.equal(readCalled, false);
+  });
+});
+
+describe("registerHistoricalWorkspace", () => {
+  it("returns the main-process registered workspace", async () => {
+    const calls: string[] = [];
+    const registered = await registerHistoricalWorkspace(async (cwd) => {
+      calls.push(cwd);
+      return "D:\\canonical";
+    }, "D:\\favorite");
+    assert.equal(registered, "D:\\canonical");
+    assert.deepEqual(calls, ["D:\\favorite"]);
+  });
+
+  it("rejects a workspace that was not registered", async () => {
+    await assert.rejects(registerHistoricalWorkspace(async () => null, "D:\\missing"), /不存在或未获授权/);
   });
 });

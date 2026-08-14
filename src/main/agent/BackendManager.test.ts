@@ -33,6 +33,22 @@ describe("BackendManager", () => {
     await assert.rejects(() => manager.request("claude", "listModels"), /Provider 暂不可用/);
   });
 
+  it("treats closing an unregistered client session as already closed", async () => {
+    const manager = new BackendManager();
+    const codex = backend("codex", null);
+    let closes = 0;
+    codex.closeSession = async () => { closes += 1; };
+    manager.register(codex);
+
+    await manager.request("codex", "closeSession", {}, {
+      sessionId: "missing-client",
+      canonicalCwd: process.cwd(),
+      nativeSessionId: "history-thread",
+    });
+
+    assert.equal(closes, 0);
+  });
+
   it("closes every provider once and reports partial failures", async () => {
     const manager = new BackendManager();
     let codexCloses = 0;
