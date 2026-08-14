@@ -4,6 +4,8 @@ import ReactMarkdown, { type Components } from "react-markdown";
 import remarkGfm from "remark-gfm";
 import type { ImageAttachment } from "./domain";
 import ImageLightbox from "./ImageLightbox";
+import { classifyLocalLink } from "./localFileLink";
+import type { LocalPathOpenRequest } from "../shared/protocol";
 
 interface Props {
   text: string;
@@ -11,8 +13,9 @@ interface Props {
   streaming?: boolean;
   readLocalImage: (path: string) => Promise<string | null>;
   copyImage: (dataUrl: string) => Promise<void>;
-  openLocalPath: (path: string) => Promise<string>;
+  openLocalPath: (input: LocalPathOpenRequest) => Promise<string>;
   openExternal: (url: string) => Promise<void>;
+  cwd: string;
 }
 
 /** 模块级常量：避免每次渲染都创建新的插件数组，触发 react-markdown 重建管线。 */
@@ -41,21 +44,8 @@ function readCachedLocalImage(path: string, reader: Props["readLocalImage"]) {
   return pending;
 }
 
-function safeDecodeURIComponent(value: string) {
-  try {
-    return decodeURIComponent(value);
-  } catch {
-    return value;
-  }
-}
-
-function localPathFromHref(value: string) {
-  const decoded = safeDecodeURIComponent(value.replace(/^file:\/\//, ""));
-  return /^\/[a-z]:[\\/]/i.test(decoded) ? decoded.slice(1) : decoded;
-}
-
 function isHttpSource(value: string) {
-  return value.startsWith("http://") || value.startsWith("https://");
+  return /^https?:\/\//i.test(value);
 }
 
 function AttachmentImage({ image, readLocalImage, openExternal, onOpen }: { image: ImageAttachment; readLocalImage: Props["readLocalImage"]; openExternal: Props["openExternal"]; onOpen?: (source: string) => void }) {
@@ -98,26 +88,46 @@ function CodeBlock({ children }: { children: ReactNode }) {
  * memo + 稳定的 plugins/components 引用：
  * 未变化的历史消息不再随任意状态变化重新执行 Markdown/GFM 解析。
  */
-function MarkdownMessageBase({ text, images = NO_IMAGES, streaming = false, readLocalImage, copyImage, openLocalPath, openExternal }: Props) {
+function MarkdownMessageBase({ text, images = NO_IMAGES, streaming = false, readLocalImage, copyImage, openLocalPath, openExternal, cwd }: Props) {
   const [previewSource, setPreviewSource] = useState<string | null>(null);
+  const [linkError, setLinkError] = useState<string | null>(null);
 
   const components = useMemo<Components>(() => ({
-    a: ({ href, children }) => <a href={href} onClick={(event) => { event.preventDefault(); if (href?.startsWith("http://") || href?.startsWith("https://")) void openExternal(href); else if (href) void openLocalPath(localPathFromHref(href)); }}>{children}</a>,
+    a: ({ href, children }) => {
+      const link = href ? classifyLocalLink(href, cwd) : { kind: "unsupported" as const, value: "" };
+      if (link.kind === "anchor") return <a href={href}>{children}</a>;
+      if (link.kind === "unsupported") return <a>{children}</a>;
+      return <a href={href} onClick={(event) => {
+        event.preventDefault();
+        setLinkError(null);
+        void (async () => {
+          try {
+            const result = link.kind === "external"
+              ? await openExternal(link.value)
+              : await openLocalPath({ path: link.value, cwd });
+            if (typeof result === "string" && result.trim()) setLinkError(result.trim());
+          } catch (error) {
+            setLinkError(error instanceof Error && error.message ? error.message : "打开链接失败。");
+          }
+        })();
+      }}>{children}</a>;
+    },
     img: ({ src, alt }) => src ? (src.startsWith("data:image/")
       ? <img className="message-image" src={src} alt={alt || "图片"} onClick={() => setPreviewSource(src)} title="点击放大" />
       : isHttpSource(src)
         ? <a className="image-placeholder" href={src} onClick={(event) => { event.preventDefault(); void openExternal(src); }}>远程图片：{alt || "图片"}</a>
-        : <AttachmentImage image={{ path: localPathFromHref(src), dataUrl: "", name: alt || "图片" }} readLocalImage={readLocalImage} openExternal={openExternal} onOpen={setPreviewSource} />) : null,
+        : <AttachmentImage image={{ path: classifyLocalLink(src, cwd).value, dataUrl: "", name: alt || "图片" }} readLocalImage={readLocalImage} openExternal={openExternal} onOpen={setPreviewSource} />) : null,
     pre: ({ children }) => <CodeBlock>{children}</CodeBlock>,
     code: ({ className, children, ...props }) => <code className={`markdown-code ${className || ""}`} {...props}>{children}</code>,
-  }), [readLocalImage, openLocalPath, openExternal]);
+  }), [cwd, readLocalImage, openLocalPath, openExternal]);
 
   return (
     <div className="markdown-message">
       {images.length ? <div className="message-images">{images.map((image, index) => <AttachmentImage key={`${image.path}-${index}`} image={image} readLocalImage={readLocalImage} openExternal={openExternal} onOpen={setPreviewSource} />)}</div> : null}
       {text ? (streaming
         ? <div className="streaming-plain-text">{text}</div>
-        : <ReactMarkdown remarkPlugins={REMARK_PLUGINS} components={components}>{text}</ReactMarkdown>) : null}
+        : <ReactMarkdown remarkPlugins={REMARK_PLUGINS} components={components} urlTransform={(value) => value}>{text}</ReactMarkdown>) : null}
+      {linkError ? <div className="markdown-link-error" role="alert">{linkError}</div> : null}
       {previewSource ? <ImageLightbox source={previewSource} label="图片预览" copyImage={copyImage} onClose={() => setPreviewSource(null)} /> : null}
     </div>
   );

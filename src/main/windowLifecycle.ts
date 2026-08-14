@@ -212,8 +212,9 @@ export class WindowLifecycle {
   }
 
   send(channel: string, payload: unknown) {
-    if (!this.window || this.window.isDestroyed()) return;
+    if (!this.window || this.window.isDestroyed()) return false;
     this.window.webContents.send(channel, payload);
+    return true;
   }
 
   reloadRenderer(webContents: unknown) {

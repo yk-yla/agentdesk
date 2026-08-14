@@ -1,0 +1,36 @@
+async page => {
+  const assert = (condition, message) => {
+    if (!condition) throw new Error(message);
+  };
+  const sidebar = page.locator("aside.sidebar");
+  await sidebar.waitFor({ state: "visible", timeout: 15_000 });
+  await page.waitForFunction(() => document.querySelectorAll(".pane-panel").length === 1 && Boolean(document.querySelector('.pane-panel textarea[aria-label="消息输入"]')), null, { timeout: 15_000 });
+
+  const initialTabCount = await page.locator(".tab").count();
+  await sidebar.locator(".current-workspace .provider-new-codex").click({ force: true });
+  await page.waitForFunction((previousCount) => document.querySelectorAll(".tab").length === previousCount + 1, initialTabCount, { timeout: 15_000 });
+  const leftDraft = "AgentDesk restart left draft";
+  await page.locator('.pane-panel textarea[aria-label="消息输入"]').fill(leftDraft);
+
+  await sidebar.getByRole("button", { name: "分成两列" }).click({ force: true });
+  await page.waitForFunction(() => document.querySelectorAll(".pane-panel").length === 2 && document.querySelector(".app-shell")?.getAttribute("data-pane-count") === "2", null, { timeout: 15_000 });
+  const panes = page.locator(".pane-panel");
+  const rightDraft = "AgentDesk restart right draft - forced snapshot";
+  await panes.nth(1).locator('textarea[aria-label="消息输入"]').fill(rightDraft);
+  await sidebar.getByRole("button", { name: "收起左侧面板" }).click({ force: true });
+  await page.waitForFunction(() => document.querySelector("aside.sidebar")?.classList.contains("collapsed"), null, { timeout: 10_000 });
+
+  const state = await page.evaluate(() => ({
+    paneCount: document.querySelectorAll(".pane-panel").length,
+    tabCounts: Array.from(document.querySelectorAll(".pane-tab-group")).map((group) => group.querySelectorAll(".tab").length),
+    activePaneIndex: Array.from(document.querySelectorAll(".pane-panel")).findIndex((pane) => pane.classList.contains("active-pane")),
+    drafts: Array.from(document.querySelectorAll('.pane-panel textarea[aria-label="消息输入"]')).map((input) => input.value),
+    collapsed: document.querySelector("aside.sidebar")?.classList.contains("collapsed") === true,
+  }));
+  assert(state.paneCount === 2, "退出前没有形成两栏。");
+  assert(JSON.stringify(state.tabCounts) === JSON.stringify([2, 1]), `退出前 Tab 分布不正确：${JSON.stringify(state.tabCounts)}`);
+  assert(state.activePaneIndex === 1, `退出前活动栏不正确：${state.activePaneIndex}`);
+  assert(JSON.stringify(state.drafts) === JSON.stringify([leftDraft, rightDraft]), `退出前草稿不正确：${JSON.stringify(state.drafts)}`);
+  assert(state.collapsed, "退出前侧栏没有收起。");
+  return { ok: true, state };
+}

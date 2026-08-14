@@ -45,14 +45,17 @@ const bridge: Omit<CodexBridge, "request" | "respond" | "onMessage"> = {
   createHandoffPackage(input) {
     return ipcRenderer.invoke("agentdesk:create-handoff", input);
   },
+  chooseClaudeMarketplaceDirectory(defaultPath?: string) {
+    return ipcRenderer.invoke("agentdesk:choose-claude-marketplace-directory", defaultPath);
+  },
   openWindowsTerminal(cwd: string) {
     return ipcRenderer.invoke("agentdesk:open-windows-terminal", cwd);
   },
   readLocalImage(filePath: string) {
     return ipcRenderer.invoke("agentdesk:read-local-image", filePath);
   },
-  openLocalPath(filePath: string) {
-    return ipcRenderer.invoke("agentdesk:open-local-path", filePath);
+  openLocalPath(input: Parameters<AgentBridge["openLocalPath"]>[0]) {
+    return ipcRenderer.invoke("agentdesk:open-local-path", input);
   },
   openExternal(url: string) {
     return ipcRenderer.invoke("agentdesk:open-external", url);
@@ -87,10 +90,18 @@ const bridge: Omit<CodexBridge, "request" | "respond" | "onMessage"> = {
   installUpdate() {
     return ipcRenderer.invoke("agentdesk:update-install");
   },
+  saveWorkspaceSnapshot(requestId: string, workspaceState: JsonObject) {
+    return ipcRenderer.invoke("agentdesk:workspace-snapshot-save", { requestId, workspaceState });
+  },
   onWindowState(listener: (state: DesktopWindowState) => void) {
     const wrapped = (_event: Electron.IpcRendererEvent, state: DesktopWindowState) => listener(state);
     ipcRenderer.on("agentdesk:window-state-changed", wrapped);
     return () => ipcRenderer.removeListener("agentdesk:window-state-changed", wrapped);
+  },
+  onWorkspaceSnapshotRequested(listener: (requestId: string) => void) {
+    const wrapped = (_event: Electron.IpcRendererEvent, requestId: string) => listener(requestId);
+    ipcRenderer.on("agentdesk:workspace-snapshot-requested", wrapped);
+    return () => ipcRenderer.removeListener("agentdesk:workspace-snapshot-requested", wrapped);
   },
   onUpdateStatus(listener: (status: DesktopUpdateStatus) => void) {
     const wrapped = (_event: Electron.IpcRendererEvent, status: DesktopUpdateStatus) => listener(status);
@@ -153,6 +164,7 @@ const agentBridge: AgentBridge = {
   copyImage: bridge.copyImage,
   saveTextFile: bridge.saveTextFile,
   createHandoffPackage: bridge.createHandoffPackage,
+  chooseClaudeMarketplaceDirectory: bridge.chooseClaudeMarketplaceDirectory,
   openWindowsTerminal: bridge.openWindowsTerminal,
   readLocalImage: bridge.readLocalImage,
   openLocalPath: bridge.openLocalPath,
@@ -167,7 +179,9 @@ const agentBridge: AgentBridge = {
   checkForUpdates: bridge.checkForUpdates,
   downloadUpdate: bridge.downloadUpdate,
   installUpdate: bridge.installUpdate,
+  saveWorkspaceSnapshot: bridge.saveWorkspaceSnapshot,
   onWindowState: bridge.onWindowState,
+  onWorkspaceSnapshotRequested: bridge.onWorkspaceSnapshotRequested,
   onUpdateStatus: bridge.onUpdateStatus,
   getCodexCliUpdateStatus: bridge.getCodexCliUpdateStatus,
   checkCodexCliUpdates: bridge.checkCodexCliUpdates,
@@ -185,7 +199,7 @@ const agentBridge: AgentBridge = {
       injectClaudeWorkerFatal() {
         return ipcRenderer.invoke("agentdesk:dev-claude-worker-fatal");
       },
-      setClaudeLifecycleFixture(kind: "longBash" | "hook" | "mcp" | "approval" | "stream" | "compact" | "incompleteTool" | null) {
+      setClaudeLifecycleFixture(kind: "longBash" | "hook" | "mcp" | "userQuestion" | "stream" | "compact" | "incompleteTool" | null) {
         return ipcRenderer.invoke("agentdesk:dev-claude-lifecycle-fixture", kind);
       },
       setDesktopUpdateFixture() {

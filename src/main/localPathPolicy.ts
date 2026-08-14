@@ -1,4 +1,4 @@
-import { realpathSync } from "node:fs";
+import { existsSync, realpathSync, statSync } from "node:fs";
 import path from "node:path";
 
 const EXECUTABLE_FILE_EXTENSIONS = new Set([
@@ -24,4 +24,34 @@ export function isWithinDirectory(filePath: string, directory: string) {
 
 export function isExecutableLocalPath(filePath: string) {
   return EXECUTABLE_FILE_EXTENSIONS.has(path.extname(filePath).toLowerCase());
+}
+
+interface LocalPathAccessPolicy {
+  isAuthorizedWorkspacePath(directory: string): boolean;
+}
+
+export function resolveLocalPathOpenRequest(input: unknown, policy: LocalPathAccessPolicy) {
+  if (!input || typeof input !== "object" || Array.isArray(input)) throw new Error("本地文件链接无效。");
+  const request = input as { path?: unknown; cwd?: unknown };
+  if (typeof request.path !== "string" || !request.path.trim() || request.path.includes("\0")) throw new Error("本地文件链接无效。");
+
+  const cwd = typeof request.cwd === "string" && request.cwd.trim() ? canonicalPath(request.cwd) : "";
+  const requestedPath = request.path.trim();
+  if (!path.isAbsolute(requestedPath) && (!cwd || !policy.isAuthorizedWorkspacePath(cwd))) {
+    throw new Error("相对文件链接缺少已授权工作区。");
+  }
+
+  const resolveCandidate = (value: string) => canonicalPath(path.isAbsolute(value) ? value : path.resolve(cwd, value));
+  let resolvedPath = resolveCandidate(requestedPath);
+  if (!existsSync(resolvedPath)) {
+    const location = /^(.*?):(\d+)(?::(\d+))?$/.exec(requestedPath);
+    if (location?.[1]) resolvedPath = resolveCandidate(location[1]);
+  }
+  if (!existsSync(resolvedPath)) throw new Error("文件不存在。");
+
+  const stats = statSync(resolvedPath);
+  return {
+    path: resolvedPath,
+    revealOnly: stats.isFile() && isExecutableLocalPath(resolvedPath),
+  };
 }

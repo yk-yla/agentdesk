@@ -32,3 +32,6 @@ jobs:
 
       - name: Build and test
         run: npm run build
+
+      - name: Verify workspace recovery
+        run: npm run test:restart

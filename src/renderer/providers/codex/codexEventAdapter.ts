@@ -122,7 +122,7 @@ export function adaptCodexEvent(envelope: AgentEventEnvelope): RoutedCodexEvent 
   const kind: RoutedCodexEvent["kind"] =
     method === "client/ready" ? "ready"
       : method === "thread/deleted" ? "sessionDeleted"
-        : method === "client/server-exited" || method === "client/error" ? "backendExited"
+        : method === "client/server-exited" ? "backendExited"
           : method === "client/close-active-tab" ? "closeActiveTab"
             : method === "skills/changed" ? "skillsChanged"
               : method === "client/activate-session" ? "activateSession"

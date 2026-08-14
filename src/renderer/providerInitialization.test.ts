@@ -8,7 +8,7 @@ function capabilities(): AgentCapabilities {
   return { ...EMPTY_AGENT_CAPABILITIES };
 }
 
-async function run(failures: string[] = []) {
+async function run(failures: string[] = [], providers?: AgentProvider[]) {
   const applied: string[] = [];
   const errors: string[] = [];
   const states: Partial<Record<AgentProvider, string>> = {};
@@ -26,7 +26,7 @@ async function run(failures: string[] = []) {
     applyCapabilities: (provider) => applied.push(`${provider}:capabilities`),
     reportError: (provider, phase) => errors.push(`${provider}:${phase}`),
     setProviderState: (provider, value) => { states[provider] = value; },
-  });
+  }, providers);
   return { applied, errors, states };
 }
 
@@ -41,6 +41,12 @@ describe("initializeProviders", () => {
     const result = await run();
     assert.deepEqual(result.states, { claude: "ready", codex: "ready" });
     assert.deepEqual(result.errors, []);
+  });
+
+  it("initializes Claude without loading any Codex model or capability", async () => {
+    const result = await run([], ["claude"]);
+    assert.deepEqual(result.applied, ["claude:capabilities"]);
+    assert.deepEqual(result.states, { claude: "ready" });
   });
 
   it("keeps Codex ready when only Claude initialization fails", async () => {

@@ -43,6 +43,24 @@ describe("AgentSessionRegistry", () => {
     assert.throws(() => sessions.prepareRequest("codex", "interruptTurn", { threadId: "thread-1" }, context({ nativeSessionId: "thread-1", queryGeneration: 0 })), /Query 代次已失效/);
   });
 
+  it("keeps Codex session registrations after a non-terminal client error", () => {
+    const sessions = registry();
+    startSession(sessions);
+
+    sessions.observeEvent(event("codex", "client/error", { threadId: "thread-1", message: "request failed" }));
+
+    sessions.prepareRequest("codex", "startTurn", { threadId: "thread-1" }, context({ nativeSessionId: "thread-1" }));
+  });
+
+  it("clears Codex session registrations only after the app-server exits", () => {
+    const sessions = registry();
+    startSession(sessions);
+
+    sessions.observeEvent(event("codex", "client/server-exited", { code: 1 }));
+
+    assert.throws(() => sessions.prepareRequest("codex", "startTurn", { threadId: "thread-1" }, context({ nativeSessionId: "thread-1" })), /会话不存在/);
+  });
+
   it("rejects Renderer trust and dangerous Codex overrides recursively", () => {
     const sessions = registry();
     assert.throws(() => sessions.prepareRequest("claude", "startSession", { cwd, trustWorkspace: true }, context()), /不能自行授予/);
@@ -60,9 +78,18 @@ describe("AgentSessionRegistry", () => {
     assert.throws(() => sessions.prepareRequest("codex", "deleteSession", { threadId: "thread-1" }, context({ nativeSessionId: "thread-1" })), /不存在或已过期/);
   });
 
-  it("requires Provider history registration before sessionless history reads", () => {
+  it("verifies unknown reads and tracks sessionless fork and delete ownership", () => {
     const sessions = registry();
-    assert.throws(() => sessions.prepareRequest("codex", "readSession", { cwd, threadId: "history-1" }, { canonicalCwd: cwd }), /尚未由当前工作区/);
+    sessions.prepareRequest("codex", "readSession", { cwd, threadId: "history-1" }, { canonicalCwd: cwd, nativeSessionId: "history-1" });
+    assert.throws(() => sessions.completeRequest("codex", "readSession", { cwd, threadId: "history-1" }, { canonicalCwd: cwd, nativeSessionId: "history-1" }, { thread: { id: "history-1", cwd: otherCwd } }), /归属无效/);
+    sessions.completeRequest("codex", "readSession", { cwd, threadId: "history-1" }, { canonicalCwd: cwd, nativeSessionId: "history-1" }, { thread: { id: "history-1", cwd } });
+    sessions.prepareRequest("codex", "renameSession", { cwd, threadId: "history-1", name: "renamed" }, { canonicalCwd: cwd, nativeSessionId: "history-1" });
+    sessions.prepareRequest("codex", "forkSession", { cwd, threadId: "history-1" }, { canonicalCwd: cwd, nativeSessionId: "history-1" });
+    sessions.completeRequest("codex", "forkSession", { cwd, threadId: "history-1" }, { canonicalCwd: cwd, nativeSessionId: "history-1" }, { thread: { id: "history-fork", cwd } });
+    sessions.prepareRequest("codex", "renameSession", { cwd, threadId: "history-fork", name: "forked" }, { canonicalCwd: cwd, nativeSessionId: "history-fork" });
+    sessions.prepareRequest("codex", "deleteSession", { cwd, threadId: "history-1" }, { canonicalCwd: cwd, nativeSessionId: "history-1" });
+    sessions.completeRequest("codex", "deleteSession", { cwd, threadId: "history-1" }, { canonicalCwd: cwd, nativeSessionId: "history-1" }, {});
+    assert.throws(() => sessions.prepareRequest("codex", "renameSession", { cwd, threadId: "history-1", name: "deleted" }, { canonicalCwd: cwd, nativeSessionId: "history-1" }), /尚未由当前工作区/);
     sessions.prepareRequest("codex", "listSessions", { cwd }, { canonicalCwd: cwd });
     sessions.completeRequest("codex", "listSessions", { cwd }, { canonicalCwd: cwd }, { data: [{ id: "history-1", cwd }] });
     sessions.prepareRequest("codex", "readSession", { cwd, threadId: "history-1" }, { canonicalCwd: cwd });

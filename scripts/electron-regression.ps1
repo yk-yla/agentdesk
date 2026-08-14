@@ -12,7 +12,7 @@ $scriptRoot = Split-Path -Parent $MyInvocation.MyCommand.Path
 $repoRoot = Split-Path -Parent $scriptRoot
 
 if (-not $PlaywrightWrapper) {
-  $PlaywrightWrapper = Join-Path $env:USERPROFILE ".claude\skills\playwright-cli\scripts\playwright-cli.ps1"
+  $PlaywrightWrapper = Join-Path $repoRoot "scripts\playwright-cli-wrapper.ps1"
 }
 if (-not (Test-Path -LiteralPath $PlaywrightWrapper -PathType Leaf)) {
   throw "找不到 playwright-cli wrapper：$PlaywrightWrapper"
@@ -29,6 +29,8 @@ $attached = $false
 $started = $false
 $developmentProcess = $null
 $logRoot = Join-Path $repoRoot "build\logs"
+$buildRoot = [IO.Path]::GetFullPath((Join-Path $repoRoot "build"))
+$profile = Join-Path $buildRoot "electron-regression-profile"
 $stdoutLog = Join-Path $logRoot "electron-regression-$PID.stdout.log"
 $stderrLog = Join-Path $logRoot "electron-regression-$PID.stderr.log"
 
@@ -46,6 +48,21 @@ function Stop-OwnedProcessTree {
   $processIds = @((Get-DescendantProcessIds $RootProcessId), $RootProcessId) | Select-Object -Unique
   foreach ($processId in $processIds) {
     Stop-Process -Id $processId -Force -ErrorAction SilentlyContinue
+  }
+}
+
+function Remove-RegressionProfile {
+  $resolved = [IO.Path]::GetFullPath($profile)
+  if (-not $resolved.StartsWith("$buildRoot$([IO.Path]::DirectorySeparatorChar)", [StringComparison]::OrdinalIgnoreCase)) {
+    throw "拒绝清理 build 目录外的 Electron 回归配置：$resolved"
+  }
+  for ($attempt = 0; $attempt -lt 20 -and (Test-Path -LiteralPath $resolved); $attempt += 1) {
+    try {
+      Remove-Item -LiteralPath $resolved -Recurse -Force -ErrorAction Stop
+    } catch {
+      if ($attempt -eq 19) { throw }
+      Start-Sleep -Milliseconds 250
+    }
   }
 }
 
@@ -79,8 +96,9 @@ try {
   if ($occupiedPorts.Count) {
     throw "Electron 回归端口 3000 或 9223 已被占用，请先停止现有开发实例。"
   }
+  Remove-RegressionProfile
   New-Item -ItemType Directory -Path $logRoot -Force | Out-Null
-  $developmentProcess = Start-Process -FilePath $NpmCommand -ArgumentList @("run", "dev") -WorkingDirectory $repoRoot -WindowStyle Hidden -RedirectStandardOutput $stdoutLog -RedirectStandardError $stderrLog -PassThru
+  $developmentProcess = Start-Process -FilePath $NpmCommand -ArgumentList @("run", "dev:regression") -WorkingDirectory $repoRoot -WindowStyle Hidden -RedirectStandardOutput $stdoutLog -RedirectStandardError $stderrLog -PassThru
   $started = $true
 
   $cdpReady = $false
@@ -128,5 +146,8 @@ try {
   if ($started -and -not $KeepRunning) {
     Stop-OwnedProcessTree $developmentProcess.Id
     Write-Output "已停止本轮 Electron 回归启动的开发进程。"
+  }
+  if (-not $KeepRunning) {
+    Remove-RegressionProfile
   }
 }

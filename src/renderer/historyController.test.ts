@@ -47,7 +47,7 @@ function createHarness(request: (provider: AgentProvider, operation: AgentOperat
     setSearchCursor: (value) => { searchCursor = value; },
   }, {
     request,
-    getPreferences: () => ({ recentWorkspaces: [], lastWorkspace: "", favoriteWorkspaces: [], theme: "github-light", displayMode: "simple", bossKey: "", sessionAliases: {}, favoriteSessions: [] }),
+    getPreferences: () => ({ lastWorkspace: "", favoriteWorkspaces: [], theme: "github-light", displayMode: "simple", bossKey: "", sessionAliases: {}, favoriteSessions: [] }),
     isVisible: () => true,
   });
   return {
@@ -65,7 +65,7 @@ describe("history helpers", () => {
   it("keeps Provider identities separate and applies aliases and favorites", () => {
     const merged = mergeHistory([thread("same", "codex", 1)], [thread("same", "claude", 2), thread("same", "codex", 3)]);
     const decorated = applyLocalSessionMetadata(merged, {
-      recentWorkspaces: [], lastWorkspace: "", favoriteWorkspaces: [],
+      lastWorkspace: "", favoriteWorkspaces: [],
       theme: "github-light", displayMode: "simple", bossKey: "",
       sessionAliases: { "claude:same": "Claude alias" },
       favoriteSessions: ["codex:same"],
@@ -78,7 +78,7 @@ describe("history helpers", () => {
 
   it("restores cross-directory favorites from saved summaries", () => {
     const favorites = favoriteHistoryEntries([thread("loaded", "codex", 2)], {
-      recentWorkspaces: [], lastWorkspace: "", favoriteWorkspaces: [],
+      lastWorkspace: "", favoriteWorkspaces: [],
       theme: "github-light", displayMode: "simple", bossKey: "",
       favoriteSessions: ["codex:loaded", "claude:saved"],
       favoriteSessionSummaries: {
@@ -116,6 +116,20 @@ describe("HistoryController", () => {
 
     assert.deepEqual(harness.entries.map((entry) => entry.id).sort(), ["claude-thread", "codex-thread"]);
     assert.deepEqual(JSON.parse(harness.cursor || "{}"), { codex: "codex-next", claude: "claude-next" });
+  });
+
+  it("loads only Claude history for a Claude-only workspace state", async () => {
+    const calls: AgentProvider[] = [];
+    const harness = createHarness(async (provider) => {
+      calls.push(provider);
+      return listValue(`${provider}-thread`, provider);
+    });
+
+    harness.controller.loadInitial("D:\\work", ["claude"]);
+    await waitFor(() => !harness.loading);
+
+    assert.deepEqual(calls, ["claude"]);
+    assert.deepEqual(harness.entries.map((entry) => entry.id), ["claude-thread"]);
   });
 
   it("keeps Claude history when Codex history fails", async () => {

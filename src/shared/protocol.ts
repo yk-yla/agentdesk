@@ -100,7 +100,6 @@ export type ThemeId =
   | "github-dark-dimmed"
 
 export interface DesktopPreferences {
-  recentWorkspaces: string[];
   lastWorkspace: string;
   favoriteWorkspaces: string[];
   sidebarWidth?: number;
@@ -135,6 +134,13 @@ export interface SavedImage {
 
 export interface SavedTextFile {
   path: string;
+}
+
+export interface LocalPathOpenRequest {
+  path: string;
+  cwd?: string;
+  line?: number;
+  column?: number;
 }
 
 export interface HandoffPackage {
@@ -201,7 +207,7 @@ export interface ClaudeRuntimeStatus {
   latestVersion?: string;
   checkedAt?: number;
   credentialsAvailable: boolean;
-  credentialSource: "settings" | "process" | "unavailable";
+  credentialSource: "settings" | "process" | "native" | "unavailable";
   credentialMessage: string;
   integrityVerified?: boolean;
   integritySigner?: string;
@@ -242,9 +248,10 @@ export interface CodexBridge {
   copyImage(dataUrl: string): Promise<void>;
   saveTextFile(content: string, suggestedName?: string): Promise<SavedTextFile | null>;
   createHandoffPackage(input: { cwd: string; title: string; threadId: string; content: string }): Promise<HandoffPackage>;
+  chooseClaudeMarketplaceDirectory(defaultPath?: string): Promise<string | null>;
   openWindowsTerminal(cwd: string): Promise<void>;
   readLocalImage(filePath: string): Promise<string | null>;
-  openLocalPath(filePath: string): Promise<string>;
+  openLocalPath(input: LocalPathOpenRequest): Promise<string>;
   openExternal(url: string): Promise<void>;
   showNotification(notification: DesktopNotification): Promise<boolean>;
   getWindowState(): Promise<DesktopWindowState>;
@@ -256,7 +263,9 @@ export interface CodexBridge {
   checkForUpdates(): Promise<DesktopUpdateStatus>;
   downloadUpdate(): Promise<DesktopUpdateStatus>;
   installUpdate(): Promise<void>;
+  saveWorkspaceSnapshot(requestId: string, workspaceState: JsonObject): Promise<void>;
   onWindowState(listener: (state: DesktopWindowState) => void): () => void;
+  onWorkspaceSnapshotRequested(listener: (requestId: string) => void): () => void;
   onUpdateStatus(listener: (status: DesktopUpdateStatus) => void): () => void;
   getCodexCliUpdateStatus(): Promise<CodexCliUpdateStatus>;
   checkCodexCliUpdates(): Promise<CodexCliUpdateStatus>;
@@ -277,7 +286,7 @@ export interface AgentBridge extends Omit<CodexBridge, "request" | "respond" | "
   dev?: {
     holdClaudeWorkerRequests(): Promise<void>;
     injectClaudeWorkerFatal(): Promise<void>;
-    setClaudeLifecycleFixture(kind: "longBash" | "hook" | "mcp" | "approval" | "stream" | "compact" | "incompleteTool" | null): Promise<{ kind: string | null }>;
+    setClaudeLifecycleFixture(kind: "longBash" | "hook" | "mcp" | "userQuestion" | "stream" | "compact" | "incompleteTool" | null): Promise<{ kind: string | null }>;
     setDesktopUpdateFixture(): Promise<DesktopUpdateStatus>;
     shutdownDryRun(): Promise<{ ok: true }>;
     quitForTesting(): Promise<{ requested: true }>;

@@ -34,6 +34,8 @@
     "main/claudeUpdateManager.test.ts",
     "main/windowLifecycle.ts",
     "main/windowLifecycle.test.ts",
+    "main/workspaceSnapshotCoordinator.ts",
+    "main/workspaceSnapshotCoordinator.test.ts",
     "main/workspaceArgs.ts",
     "main/workspaceArgs.test.ts",
     "main/windowsTerminal.ts",

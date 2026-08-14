@@ -3,7 +3,6 @@ import { describe, it } from "node:test";
 import { PreferenceSaveCoordinator } from "./preferenceSaveCoordinator";
 
 const snapshot = (extra: Partial<import("../shared/protocol").DesktopPreferences> = {}) => ({
-  recentWorkspaces: [],
   lastWorkspace: "",
   favoriteWorkspaces: [],
   theme: "github-light" as const,

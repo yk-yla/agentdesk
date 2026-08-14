@@ -19,7 +19,7 @@ describe("PreferencesStore", () => {
   it("returns independent defaults for missing and malformed files", async () => {
     await withStore((store, filePath) => {
       const missing = store.read();
-      missing.recentWorkspaces.push("mutated");
+      missing.favoriteWorkspaces.push("mutated");
       assert.deepEqual(store.read(), DEFAULT_PREFERENCES);
 
       writeFileSync(filePath, "{broken", "utf8");
@@ -38,7 +38,6 @@ describe("PreferencesStore", () => {
       bossKey: "ctrl+shift+k",
       sidebarWidth: 999,
       baseFontSize: 99,
-      recentWorkspaces: ["one", 2, ...Array.from({ length: 40 }, (_, index) => `path-${index}`)],
       favoriteWorkspaces: Array.from({ length: 40 }, (_, index) => `favorite-${index}`),
       sessionAliases: { valid: "Title", empty: "", numeric: 1 },
       modelContextWindows: {
@@ -63,7 +62,6 @@ describe("PreferencesStore", () => {
     assert.equal(preferences.bossKey, "Control+Shift+K");
     assert.equal(preferences.sidebarWidth, 480);
     assert.equal(preferences.baseFontSize, 14);
-    assert.equal(preferences.recentWorkspaces.length, 32);
     assert.equal(preferences.favoriteWorkspaces.length, 32);
     assert.deepEqual(preferences.sessionAliases, { valid: "Title" });
     assert.deepEqual(preferences.modelContextWindows, { valid: { tokens: 200_000, updatedAt: 2 } });

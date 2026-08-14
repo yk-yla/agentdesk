@@ -97,6 +97,7 @@ export class HistoryController {
   private searchGeneration = 0;
   private refreshPromise: Promise<void> | null = null;
   private lastRefreshAt = 0;
+  private enabledProviders = new Set<AgentProvider>(["codex", "claude"]);
 
   constructor(
     private readonly state: HistoryControllerState,
@@ -134,7 +135,7 @@ export class HistoryController {
   private async fetchMerged(cursor: string | null, maxPages: number, onPage: (entries: HistoryThread[]) => void) {
     const decoded = decodeHistoryCursor(cursor);
     const next = { ...decoded };
-    const providers = (["codex", "claude"] as const).filter((provider) => cursor === null || decoded[provider] !== null);
+    const providers = (["codex", "claude"] as const).filter((provider) => this.enabledProviders.has(provider) && (cursor === null || decoded[provider] !== null));
     const results = await Promise.allSettled(providers.map((provider) => this.fetchProvider(provider, decoded[provider], maxPages, onPage)));
     let firstError: unknown;
     let successCount = 0;
@@ -152,7 +153,8 @@ export class HistoryController {
     return encodeHistoryCursor(next);
   }
 
-  loadInitial(workspace: string) {
+  loadInitial(workspace: string, providers: AgentProvider[] = ["codex", "claude"]) {
+    this.enabledProviders = new Set(providers);
     if (!workspace.trim() || workspace === "正在连接工作区" || workspace === "工作区不可用") {
       this.workspace = "";
       this.historyCursor = null;
@@ -229,7 +231,7 @@ export class HistoryController {
 
   private async searchPage(cursor: string | null) {
     const cursors = decodeHistoryCursor(cursor);
-    const providers = (["codex", "claude"] as const).filter((provider) => cursor === null || cursors[provider] !== null);
+    const providers = (["codex", "claude"] as const).filter((provider) => this.enabledProviders.has(provider) && (cursor === null || cursors[provider] !== null));
     const results = await Promise.allSettled(providers.map((provider) => this.services.request(provider, "searchSessions", this.searchParams(provider, cursors[provider]))));
     const values: Array<{ provider: AgentProvider; value: unknown }> = [];
     let firstError: unknown;

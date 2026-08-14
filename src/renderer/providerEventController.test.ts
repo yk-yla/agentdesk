@@ -221,6 +221,16 @@ describe("ProviderEventController", () => {
     assert.deepEqual(harness.recovered, ["codex"]);
   });
 
+  it("does not disconnect the Provider for a non-terminal Codex client error", () => {
+    const harness = createHarness();
+
+    harness.controller.handleEnvelope(event("client/error", { threadId: "thread", message: "request failed" }));
+
+    assert.deepEqual(harness.recovered, []);
+    assert.equal(harness.sessions.session.status, "idle");
+    assert.deepEqual(harness.raw, [{ sessionId: "session", type: "client/error" }]);
+  });
+
   it("passes a requested Provider when opening a workspace", () => {
     const harness = createHarness();
 

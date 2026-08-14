@@ -15,7 +15,6 @@ const MAX_COMPACTION_EVENT_IDS = 64;
 const MAX_RECENT_COMMAND_USAGE_ENTRIES = 512;
 
 export const DEFAULT_PREFERENCES: DesktopPreferences = {
-  recentWorkspaces: [],
   lastWorkspace: "",
   favoriteWorkspaces: [],
   sidebarWidth: 250,
@@ -150,10 +149,7 @@ export function normalizePreferences(value: unknown): DesktopPreferences {
     theme: normalizeTheme(parsed.theme),
     displayMode: normalizeDisplayMode(parsed.displayMode),
     bossKey: normalizeBossKeyAccelerator(parsed.bossKey) || DEFAULT_BOSS_KEY,
-    recentWorkspaces: Array.isArray(parsed.recentWorkspaces) ? parsed.recentWorkspaces.filter((item): item is string => typeof item === "string").slice(0, 32) : [],
-    lastWorkspace: typeof parsed.lastWorkspace === "string"
-      ? parsed.lastWorkspace
-      : Array.isArray(parsed.recentWorkspaces) && typeof parsed.recentWorkspaces[0] === "string" ? parsed.recentWorkspaces[0] : "",
+    lastWorkspace: typeof parsed.lastWorkspace === "string" ? parsed.lastWorkspace : "",
     favoriteWorkspaces: Array.isArray(parsed.favoriteWorkspaces) ? parsed.favoriteWorkspaces.filter((item): item is string => typeof item === "string").slice(0, 32) : [],
     sidebarWidth: normalizeSidebarWidth(parsed.sidebarWidth),
     baseFontSize: normalizeBaseFontSize(parsed.baseFontSize),

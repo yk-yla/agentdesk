@@ -10,6 +10,7 @@ export function recoverProviderSessions(sessions: Record<string, SessionState>, 
     statusLabel: `${providerName} 服务已断开`,
     activeTurnId: null,
     startedAt: null,
+    queryGeneration: 0,
     pendingApprovals: [],
     messages: session.messages.some((message) => message.streaming)
       ? session.messages.map((message) => message.streaming ? { ...message, streaming: false } : message)

@@ -233,16 +233,17 @@ async page => {
     results.push("Claude 上下文用量可见，压缩后可恢复并继续回复");
 
     await openClaude();
-    await page.evaluate(() => window.agentDesk.dev.setClaudeLifecycleFixture("approval"));
-    await activeInput().fill("AgentDesk fixture approval " + Date.now());
+    await page.evaluate(() => window.agentDesk.dev.setClaudeLifecycleFixture("userQuestion"));
+    await activeInput().fill("AgentDesk fixture user question " + Date.now());
     await activeInput().press("Enter");
-    const approval = page.getByRole("dialog", { name: "Bash 请求授权" });
-    await approval.waitFor({ state: "visible", timeout: 15_000 });
-    await approval.getByRole("button", { name: "允许", exact: true }).click({ force: true });
-    await approval.waitFor({ state: "hidden", timeout: 15_000 });
+    const question = page.getByRole("dialog", { name: "Claude 需要你的回答" });
+    await question.waitFor({ state: "visible", timeout: 15_000 });
+    await question.getByText("继续执行", { exact: true }).click({ force: true });
+    await question.getByRole("button", { name: "提交回答", exact: true }).click({ force: true });
+    await question.waitFor({ state: "hidden", timeout: 15_000 });
     await stopButton.click({ force: true });
     await stopButton.waitFor({ state: "hidden", timeout: 15_000 });
-    results.push("Claude 权限审批可处理并收敛");
+    results.push("Claude 正常提问可显示、提交并继续");
 
     await openClaude();
     await page.evaluate(() => window.agentDesk.dev.setClaudeLifecycleFixture("stream"));

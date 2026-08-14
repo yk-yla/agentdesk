@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
-import { sanitizePreferencesPatch, validateAgentRequest, validateAgentResponse, validateClientLog } from "./registerDesktopIpc";
+import { sanitizePreferencesPatch, validateAgentRequest, validateAgentResponse, validateClientLog, validateWorkspaceSnapshotSubmission } from "./registerDesktopIpc";
 
 describe("desktop IPC validation", () => {
   it("sanitizes preference patches without trusting renderer types", () => {
@@ -10,7 +10,6 @@ describe("desktop IPC validation", () => {
       theme: "modern-dark",
       sidebarWidth: 999,
       baseFontSize: 99,
-      recentWorkspaces: ["one", 2],
       claudeModelCache: { schema: 2, claudeVersion: "1.2.3", updatedAt, models: [{ id: "sonnet", displayName: "Sonnet", efforts: [], defaultEffort: "", supportsImage: true }] },
       lastReasoningEfforts: { codex: " xhigh ", claude: "high", unknown: "medium" },
       recentCommandUsage: { "skill:latest": 30, "command:older": 20, invalid: 99 },
@@ -22,7 +21,6 @@ describe("desktop IPC validation", () => {
       theme: "modern-dark",
       sidebarWidth: 480,
       baseFontSize: 14,
-      recentWorkspaces: ["one"],
       claudeModelCache: { schema: 2, claudeVersion: "1.2.3", updatedAt, models: [{ id: "sonnet", displayName: "Sonnet", description: "", efforts: [], defaultEffort: "", supportsImage: true }] },
       lastReasoningEfforts: { codex: "xhigh", claude: "high" },
       recentCommandUsage: { "skill:latest": 30, "command:older": 20 },
@@ -53,5 +51,14 @@ describe("desktop IPC validation", () => {
     assert.deepEqual(validateClientLog({ level: "error", event: "ui.click", details: { tag: "button" } }), { level: "error", event: "ui.click", details: { tag: "button" } });
     assert.throws(() => validateClientLog({ level: "trace", event: "bad" }), /客户端日志无效/);
     assert.throws(() => validateClientLog({ event: "" }), /客户端日志无效/);
+  });
+
+  it("accepts only bounded workspace snapshot responses", () => {
+    assert.deepEqual(validateWorkspaceSnapshotSubmission({ requestId: "snapshot-123", workspaceState: { version: 1 } }), {
+      requestId: "snapshot-123",
+      workspaceState: { version: 1 },
+    });
+    assert.throws(() => validateWorkspaceSnapshotSubmission({ requestId: "../bad", workspaceState: {} }), /快照响应无效/);
+    assert.throws(() => validateWorkspaceSnapshotSubmission({ requestId: "snapshot", workspaceState: [] }), /快照响应无效/);
   });
 });

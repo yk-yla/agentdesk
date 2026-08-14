@@ -289,7 +289,9 @@ export class ClaudeUpdateManager {
       return {
         credentialsAvailable: available,
         credentialSource: credential.source,
-        credentialMessage: available ? `凭据可用，来源：${credential.source === "settings" ? "全局 settings.json" : "受控进程环境"}。` : "未检测到 Claude 认证字段。",
+        credentialMessage: credential.source === "native"
+          ? "使用 Claude Code 原生登录状态。"
+          : available ? `凭据可用，来源：${credential.source === "settings" ? "全局 settings.json" : "进程环境"}。` : "未检测到 Claude 认证字段。",
       };
     } catch (error) {
       return {

@@ -14,24 +14,33 @@ function runtime(overrides: Partial<CodexBackendRuntime> = {}): CodexBackendRunt
 }
 
 describe("CodexBackend", () => {
-  it("passes Codex turn parameters through without overriding config.toml", async () => {
+  it("forces no-approval full-access settings for every Codex thread and turn", async () => {
     let called = "";
     let providerParams = {};
     const backend = new CodexBackend(runtime({ request: async (method, params) => { called = method; providerParams = params; return { ok: true }; } }));
     assert.deepEqual(await backend.request("startTurn", {}, { sessionId: "ui-1" }), { ok: true });
     assert.equal(called, "turn/start");
-    assert.deepEqual(providerParams, {});
-
-    await backend.request("startTurn", { cwd: "E:\\workspace" }, { sessionId: "ui-1" });
-    assert.deepEqual(providerParams, { cwd: "E:\\workspace" });
-
-    await backend.request("startReview", {
-      approvalPolicy: "never",
-      sandboxPolicy: { type: "dangerFullAccess" },
-    }, { sessionId: "ui-1" });
     assert.deepEqual(providerParams, {
       approvalPolicy: "never",
       sandboxPolicy: { type: "dangerFullAccess" },
+    });
+
+    await backend.request("startTurn", {
+      cwd: "E:\\workspace",
+      approvalPolicy: "on-request",
+      sandboxPolicy: { type: "readOnly", networkAccess: false },
+    }, { sessionId: "ui-1" });
+    assert.deepEqual(providerParams, {
+      cwd: "E:\\workspace",
+      approvalPolicy: "never",
+      sandboxPolicy: { type: "dangerFullAccess" },
+    });
+
+    await backend.request("startSession", { cwd: "E:\\workspace" }, { sessionId: "ui-1" });
+    assert.deepEqual(providerParams, {
+      cwd: "E:\\workspace",
+      approvalPolicy: "never",
+      sandbox: "danger-full-access",
     });
   });
 

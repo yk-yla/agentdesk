@@ -1,15 +1,16 @@
 import type { AgentBridge, JsonObject } from "../shared/protocol";
 import {
-  asRecord, emptySession, numberValue, sameDirectory, stringValue,
+  asRecord, emptySession, numberValue, stringValue,
   type ImageAttachment, type LayoutState, type PaneState, type PendingSteerMessage, type QueuedMessage, type SessionState, type SkillOption,
 } from "./domain";
 
-const UPDATE_WORKSPACE_STATE_VERSION = 1;
-const UPDATE_WORKSPACE_STATE_MAX_AGE_MS = 2 * 60 * 60 * 1000;
+const WORKSPACE_STATE_VERSION = 1;
+const MAX_PANES = 2;
 const MAX_RESTORED_SESSIONS = 60;
 const MAX_SAVED_TEXT_BYTES = 2_500_000;
 const MAX_SAVED_IMAGES = 256;
 const MAX_SAVED_QUEUED_MESSAGES = 500;
+const MAX_WORKSPACE_STATE_BYTES = 2_500_000;
 function takeUtf8Prefix(value: string, maxBytes: number) {
   let byteLength = 0;
   let index = 0;
@@ -47,7 +48,14 @@ export interface RestoredWorkspaceState {
   queuedMessages: Record<string, SavedQueuedMessage[]>;
   sidebarCollapsed: boolean;
   threadSessionIds: string[];
+  stoppedSessionIds: string[];
   truncated: boolean;
+  truncationReasons: string[];
+}
+
+export function workspaceStateFingerprint(state: JsonObject) {
+  const { savedAt: _savedAt, ...content } = state;
+  return JSON.stringify(content);
 }
 
 export async function authorizeRestoredSessionWorkspaces(
@@ -83,7 +91,7 @@ function stateId(value: unknown) {
   return /^[a-z0-9][a-z0-9_-]{0,239}$/i.test(id) ? id : "";
 }
 
-export function createUpdateWorkspaceState(input: {
+export function createWorkspaceState(input: {
   workspace: string;
   layout: LayoutState;
   sessions: Record<string, SessionState>;
@@ -97,25 +105,35 @@ export function createUpdateWorkspaceState(input: {
   let remainingImages = MAX_SAVED_IMAGES;
   let remainingQueuedMessages = MAX_SAVED_QUEUED_MESSAGES;
   let truncated = false;
+  const truncationReasons = new Set<string>();
+  const markTruncated = (reason: string) => {
+    truncated = true;
+    truncationReasons.add(reason);
+  };
   const takeText = (value: string, fieldLimit: number) => {
-    const allowedBytes = Math.max(0, Math.min(fieldLimit * 4, remainingTextBytes));
-    const taken = takeUtf8Prefix(value, allowedBytes);
+    const fieldValue = value.slice(0, fieldLimit);
+    if (fieldValue.length < value.length) markTruncated("text");
+    const allowedBytes = Math.max(0, remainingTextBytes);
+    const taken = takeUtf8Prefix(fieldValue, allowedBytes);
     const next = taken.text;
-    if (next.length < value.length) truncated = true;
+    if (next.length < fieldValue.length) markTruncated("text");
     remainingTextBytes -= taken.byteLength;
     return next;
   };
   const takeImages = (images: ImageAttachment[]) => {
     const allowed = Math.max(0, Math.min(images.length, remainingImages));
-    if (allowed < images.length) truncated = true;
+    if (allowed < images.length) markTruncated("images");
     remainingImages -= allowed;
     return images.slice(0, allowed).map((image) => ({ path: image.path.slice(0, 2_000), name: image.name.slice(0, 500) }));
   };
-  const sessionIds = [...new Set(input.layout.panes.flatMap((pane) => pane.tabIds))]
-    .filter((sessionId) => Boolean(input.sessions[sessionId]))
-    .slice(0, MAX_RESTORED_SESSIONS);
+  const allSessionIds = [...new Set(input.layout.panes.slice(0, MAX_PANES).flatMap((pane) => pane.tabIds))]
+    .filter((sessionId) => Boolean(input.sessions[sessionId]));
+  const activePane = input.layout.panes.find((pane) => pane.id === input.layout.activePaneId) || input.layout.panes[0];
+  const activeSessionId = activePane?.activeTabId && input.sessions[activePane.activeTabId] ? activePane.activeTabId : "";
+  const sessionIds = [...new Set([activeSessionId, ...allSessionIds].filter(Boolean))].slice(0, MAX_RESTORED_SESSIONS);
+  if (sessionIds.length < allSessionIds.length) markTruncated("sessions");
   const allowedSessionIds = new Set(sessionIds);
-  const panes = input.layout.panes.slice(0, 3).map((pane) => {
+  const panes = input.layout.panes.slice(0, MAX_PANES).map((pane) => {
     const tabIds = pane.tabIds.filter((sessionId) => allowedSessionIds.has(sessionId));
     return { id: pane.id, tabIds, activeTabId: tabIds.includes(pane.activeTabId) ? pane.activeTabId : tabIds[0] };
   }).filter((pane) => pane.tabIds.length);
@@ -124,7 +142,7 @@ export function createUpdateWorkspaceState(input: {
     const pending = (input.pendingSteers[sessionId] || []).map((message) => ({ ...message, queueKind: "rejectedSteer" as const }));
     const sourceQueue = [...(input.queuedMessages[sessionId] || []), ...pending];
     const allowed = Math.max(0, Math.min(sourceQueue.length, remainingQueuedMessages, 100));
-    if (allowed < sourceQueue.length) truncated = true;
+    if (allowed < sourceQueue.length) markTruncated("queuedMessages");
     remainingQueuedMessages -= allowed;
     const queue = sourceQueue.slice(0, allowed).map((message) => {
       const text = takeText(message.text, 200_000);
@@ -146,37 +164,79 @@ export function createUpdateWorkspaceState(input: {
       };
     }).filter((message) => message.id && (message.text || message.images.length));
     return [sessionId, queue];
-  }).filter(([, queue]) => (queue as SavedQueuedMessage[]).length));
-  const drafts = Object.fromEntries(sessionIds.map((sessionId) => [sessionId, takeText(input.drafts.get(sessionId) || "", 200_000)]).filter(([, draft]) => draft));
-  const attachments = Object.fromEntries(sessionIds.map((sessionId) => [sessionId, takeImages(input.attachments[sessionId] || [])]).filter(([, images]) => (images as SavedImageReference[]).length));
-  return {
-    version: UPDATE_WORKSPACE_STATE_VERSION,
+  }).filter(([, queue]) => (queue as SavedQueuedMessage[]).length)) as Record<string, SavedQueuedMessage[]>;
+  const drafts = Object.fromEntries(sessionIds.map((sessionId) => [sessionId, takeText(input.drafts.get(sessionId) || "", 200_000)]).filter(([, draft]) => draft)) as Record<string, string>;
+  const attachments = Object.fromEntries(sessionIds.map((sessionId) => [sessionId, takeImages(input.attachments[sessionId] || [])]).filter(([, images]) => (images as SavedImageReference[]).length)) as Record<string, SavedImageReference[]>;
+  const savedSessions = sessionIds.map((sessionId) => {
+    const session = input.sessions[sessionId];
+    return {
+      id: session.id,
+      threadId: session.threadId || "",
+      provider: session.provider,
+      cwd: session.cwd.slice(0, 2_000),
+      title: session.title.slice(0, 500),
+      updatedAt: session.updatedAt,
+      model: session.model,
+      effort: session.effort,
+      collaborationMode: session.collaborationMode,
+      detailsOpen: session.detailsOpen,
+      detailView: session.detailView,
+      wasWorking: session.status === "working",
+    };
+  });
+  const state = {
+    version: WORKSPACE_STATE_VERSION,
     savedAt: Date.now(),
     workspace: input.workspace,
     layout: { panes, activePaneId },
-    sessions: sessionIds.map((sessionId) => {
-      const session = input.sessions[sessionId];
-      return {
-        id: session.id,
-        threadId: session.threadId || "",
-        provider: session.provider,
-        cwd: session.cwd.slice(0, 2_000),
-        title: session.title.slice(0, 500),
-        updatedAt: session.updatedAt,
-        model: session.model,
-        effort: session.effort,
-        collaborationMode: session.collaborationMode,
-        detailsOpen: session.detailsOpen,
-        detailView: session.detailView,
-        wasWorking: session.status === "working",
-      };
-    }),
+    sessions: savedSessions,
     drafts,
     attachments,
     queuedMessages,
     sidebarCollapsed: input.sidebarCollapsed,
     truncated,
-  } as unknown as JsonObject;
+    truncationReasons: [...truncationReasons],
+  };
+
+  const serializedBytes = () => new TextEncoder().encode(JSON.stringify(state)).byteLength;
+  for (let pass = 0; serializedBytes() > MAX_WORKSPACE_STATE_BYTES && pass < 24; pass += 1) {
+    let changed = false;
+    const shrink = (value: string) => {
+      if (!value) return value;
+      changed = true;
+      return takeUtf8Prefix(value, Math.floor(new TextEncoder().encode(value).byteLength / 2)).text;
+    };
+    for (const sessionId of Object.keys(drafts)) {
+      drafts[sessionId] = shrink(drafts[sessionId]);
+      if (!drafts[sessionId]) delete drafts[sessionId];
+    }
+    for (const queue of Object.values(queuedMessages)) {
+      for (const message of queue) {
+        message.text = shrink(message.text);
+        if (message.inputText) message.inputText = shrink(message.inputText);
+        for (const skill of message.skills || []) {
+          skill.name = shrink(skill.name);
+          skill.path = shrink(skill.path);
+        }
+      }
+    }
+    for (const [sessionId, queue] of Object.entries(queuedMessages)) {
+      queuedMessages[sessionId] = queue.filter((message) => message.text || message.images.length);
+      if (!queuedMessages[sessionId].length) delete queuedMessages[sessionId];
+    }
+    state.truncated = true;
+    if (!state.truncationReasons.includes("serializedSize")) state.truncationReasons.push("serializedSize");
+    if (changed) continue;
+    const imageCollections = [...Object.values(attachments), ...Object.values(queuedMessages).flatMap((queue) => queue.map((message) => message.images))];
+    let removedImages = false;
+    for (const collection of imageCollections) {
+      if (!collection.length) continue;
+      collection.splice(Math.floor(collection.length / 2));
+      removedImages = true;
+    }
+    if (!removedImages) break;
+  }
+  return state as unknown as JsonObject;
 }
 
 function parseSavedImageReferences(value: unknown): SavedImageReference[] {
@@ -211,15 +271,13 @@ function parseSavedQueuedMessages(value: unknown): SavedQueuedMessage[] {
   }).filter((message) => message.id && (message.text || message.images.length));
 }
 
-export function parseUpdateWorkspaceState(value: unknown, currentWorkspace: string): RestoredWorkspaceState | null {
+export function parseWorkspaceState(value: unknown, currentWorkspace: string): RestoredWorkspaceState | null {
   const state = asRecord(value);
   const savedAt = numberValue(state.savedAt);
-  if (numberValue(state.version) !== UPDATE_WORKSPACE_STATE_VERSION || !savedAt || Date.now() - savedAt > UPDATE_WORKSPACE_STATE_MAX_AGE_MS || savedAt > Date.now() + 60_000) return null;
-  const savedWorkspace = stringValue(state.workspace);
-  if (savedWorkspace && currentWorkspace && !sameDirectory(savedWorkspace, currentWorkspace)) return null;
-
+  if (numberValue(state.version) !== WORKSPACE_STATE_VERSION || !savedAt || savedAt > Date.now() + 60_000) return null;
   const sessionValues = Array.isArray(state.sessions) ? state.sessions.slice(0, MAX_RESTORED_SESSIONS) : [];
   const sessions: Record<string, SessionState> = {};
+  const stoppedSessionIds: string[] = [];
   for (const value of sessionValues) {
     const saved = asRecord(value);
     const id = stateId(saved.id);
@@ -236,15 +294,16 @@ export function parseUpdateWorkspaceState(value: unknown, currentWorkspace: stri
     if (["activity", "raw", "goal", "plan", "agents"].includes(stringValue(saved.detailView))) session.detailView = stringValue(saved.detailView) as SessionState["detailView"];
     session.resumed = false;
     if (saved.wasWorking === true) {
-      session.status = "error";
+      session.status = "idle";
       session.statusLabel = "任务已停止";
-      session.errorText = "软件更新已完成，上次正在执行的任务已停止。";
+      session.errorText = "上次退出软件时正在执行的任务已停止，请重新发送或继续。";
+      stoppedSessionIds.push(id);
     }
     sessions[id] = session;
   }
 
   const layoutValue = asRecord(state.layout);
-  const paneValues = Array.isArray(layoutValue.panes) ? layoutValue.panes.slice(0, 3) : [];
+  const paneValues = Array.isArray(layoutValue.panes) ? layoutValue.panes.slice(0, MAX_PANES) : [];
   const usedSessionIds = new Set<string>();
   const usedPaneIds = new Set<string>();
   const panes: PaneState[] = [];
@@ -282,7 +341,11 @@ export function parseUpdateWorkspaceState(value: unknown, currentWorkspace: stri
     queuedMessages,
     sidebarCollapsed: state.sidebarCollapsed === true,
     threadSessionIds: [...usedSessionIds].filter((sessionId) => Boolean(sessions[sessionId]?.threadId)),
+    stoppedSessionIds: stoppedSessionIds.filter((sessionId) => usedSessionIds.has(sessionId)),
     truncated: state.truncated === true,
+    truncationReasons: Array.isArray(state.truncationReasons)
+      ? state.truncationReasons.filter((reason): reason is string => typeof reason === "string").slice(0, 16)
+      : [],
   };
 }
 

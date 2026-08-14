@@ -53,8 +53,8 @@ class FakeRuntime implements ClaudeWorkerRuntime {
 
 const fixtureCredentials = () => ({ source: "settings" as const, baseUrl: "https://example.invalid", authToken: "fixture-token" });
 
-function testBackend(runtime: FakeRuntime, timeoutMs = 300_000, toolArgumentStallTimeoutMs = 90_000) {
-  return new ClaudeBackend(runtime, timeoutMs, fixtureCredentials, undefined, toolArgumentStallTimeoutMs);
+function testBackend(runtime: FakeRuntime, timeoutMs = 300_000, toolArgumentStallTimeoutMs = 90_000, isMarketplacePathAuthorized: (directory: string) => boolean = () => false) {
+  return new ClaudeBackend(runtime, timeoutMs, fixtureCredentials, undefined, toolArgumentStallTimeoutMs, isMarketplacePathAuthorized);
 }
 
 async function activeBackend(timeoutMs = 300_000, toolArgumentStallTimeoutMs = 90_000) {
@@ -398,22 +398,29 @@ describe("ClaudeBackend", () => {
     await backend.close();
   });
 
-  it("allows local marketplaces only inside the authorized workspace", async (test) => {
+  it("allows selected external marketplaces and rejects unselected paths", async (test) => {
     const workspace = mkdtempSync(path.join(tmpdir(), "agentdesk-claude-marketplace-workspace-"));
     const outside = mkdtempSync(path.join(tmpdir(), "agentdesk-claude-marketplace-outside-"));
+    const unselected = mkdtempSync(path.join(tmpdir(), "agentdesk-claude-marketplace-unselected-"));
     test.after(() => rmSync(workspace, { recursive: true, force: true }));
     test.after(() => rmSync(outside, { recursive: true, force: true }));
+    test.after(() => rmSync(unselected, { recursive: true, force: true }));
     const marketplace = path.join(workspace, "marketplace");
     mkdirSync(marketplace);
     const runtime = new FakeRuntime();
-    const backend = testBackend(runtime);
+    const backend = testBackend(runtime, 300_000, 90_000, (directory) => directory === outside);
 
     await backend.request("addMarketplace", { cwd: workspace, source: marketplace }, { canonicalCwd: workspace });
-    const request = runtime.requests.at(-1) as Extract<ClaudeWorkerCommand, { type: "plugin" }>;
-    assert.equal(request.source, marketplace);
+    const workspaceRequest = runtime.requests.at(-1) as Extract<ClaudeWorkerCommand, { type: "plugin" }>;
+    assert.equal(workspaceRequest.source, marketplace);
+    assert.equal(workspaceRequest.authorizedLocalMarketplacePath, undefined);
+    await backend.request("addMarketplace", { cwd: workspace, source: outside }, { canonicalCwd: workspace });
+    const externalRequest = runtime.requests.at(-1) as Extract<ClaudeWorkerCommand, { type: "plugin" }>;
+    assert.equal(externalRequest.source, outside);
+    assert.equal(externalRequest.authorizedLocalMarketplacePath, outside);
     await assert.rejects(
-      backend.request("addMarketplace", { cwd: workspace, source: outside }, { canonicalCwd: workspace }),
-      /必须位于已授权工作区内/,
+      backend.request("addMarketplace", { cwd: workspace, source: unselected }, { canonicalCwd: workspace }),
+      /请选择本地插件市场目录/,
     );
     await backend.close();
   });
@@ -501,6 +508,15 @@ describe("ClaudeBackend", () => {
     assert.equal(command?.operation, "install");
     assert.equal(command?.plugin, "demo@market");
     await active.backend.close();
+  });
+
+  it("runs plugin operations without reading Claude credentials", async () => {
+    const runtime = new FakeRuntime();
+    const backend = new ClaudeBackend(runtime, undefined, () => { throw new Error("credentials must not be read"); });
+    const result = await backend.request("listPlugins", { cwd: process.cwd() }, { canonicalCwd: process.cwd() });
+    assert.deepEqual(result, { marketplaces: [{ name: "Claude Code", path: "", plugins: [] }] });
+    assert.equal(runtime.requests.some((command) => command.type === "plugin"), true);
+    await backend.close();
   });
 
   it("rejects unsafe Claude plugin arguments before reaching the Worker", async () => {

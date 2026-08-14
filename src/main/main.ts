@@ -13,7 +13,7 @@ import { prepareAgentRequest } from "./agent/requestAdapterRegistry";
 import { writeTextFileAtomicAsync } from "./atomicFile";
 import { DesktopNotificationRetention, normalizeDesktopNotification } from "./desktopNotification";
 import { CoalescingAsyncTask } from "./asyncOperation";
-import { canonicalPath, isExecutableLocalPath, isWithinDirectory } from "./localPathPolicy";
+import { canonicalPath, isWithinDirectory, resolveLocalPathOpenRequest } from "./localPathPolicy";
 import { CodexBackend } from "./providers/codex/CodexBackend";
 import { CodexAppServer } from "./providers/codex/codexAppServer";
 import { ClaudeBackend } from "./providers/claude/ClaudeBackend";
@@ -38,6 +38,7 @@ import { WorkspaceAuthorizationRegistry, type WorkspaceAuthorizationSource } fro
 import { WorkspaceGrantStore } from "./workspaceGrantStore";
 import { parseClipboardImageDataUrl } from "./clipboardImageData";
 import { isClipboardImageSizeAllowed } from "../shared/imagePolicy";
+import { WorkspaceSnapshotCoordinator } from "./workspaceSnapshotCoordinator";
 
 const MAX_AUTHORIZED_LOCAL_PATHS = 4_096;
 const MAX_AUTHORIZED_WORKSPACE_PATHS = 64;
@@ -94,6 +95,11 @@ const windowLifecycle = new WindowLifecycle({
   requestSingleInstanceLock: () => app.requestSingleInstanceLock(),
   onSecondInstance: (listener) => { app.on("second-instance", (_event, argv) => listener(argv)); },
 });
+const workspaceSnapshotCoordinator = new WorkspaceSnapshotCoordinator({
+  createRequestId: randomUUID,
+  requestFromRenderer: (requestId) => windowLifecycle.send("agentdesk:workspace-snapshot-requested", requestId),
+  save: (workspaceState) => preferencesStore.write({ workspaceState }),
+});
 
 function showRetainedDesktopNotification(options: NotificationConstructorOptions, onClick?: () => void) {
   if (!Notification.isSupported()) return false;
@@ -134,9 +140,10 @@ function attachmentsPath() {
 
 const authorizedLocalPaths = new Set<string>();
 const authorizedClaudeImagePaths = new Set<string>();
+const authorizedClaudeMarketplacePaths = new Set<string>();
 const authorizedWorkspacePaths = new WorkspaceAuthorizationRegistry(MAX_AUTHORIZED_WORKSPACE_PATHS);
-const pendingWorkspaceAuthorizationRequests = new Map<string, Promise<string | null>>();
-let workspaceAuthorizationPromptQueue = Promise.resolve();
+const pendingWorkspaceAuthorizationRequests = new Map<string, Promise<string>>();
+let workspaceAuthorizationGrantQueue = Promise.resolve();
 
 function registerAuthorizedWorkspacePath(directory: string, source: WorkspaceAuthorizationSource = "explicit") {
   if (!existingDirectory(directory)) return;
@@ -207,6 +214,18 @@ function registerAuthorizedImageReferences(value: unknown) {
   Object.values(record).forEach(registerAuthorizedImageReferences);
 }
 
+function registerAuthorizedClaudeMarketplacePath(directory: string) {
+  if (!existingDirectory(directory)) return;
+  const resolved = canonicalPath(directory);
+  authorizedClaudeMarketplacePaths.delete(resolved);
+  authorizedClaudeMarketplacePaths.add(resolved);
+  while (authorizedClaudeMarketplacePaths.size > MAX_AUTHORIZED_WORKSPACE_PATHS) {
+    const oldest = authorizedClaudeMarketplacePaths.values().next().value as string | undefined;
+    if (!oldest) break;
+    authorizedClaudeMarketplacePaths.delete(oldest);
+  }
+}
+
 function isAllowedLocalPath(filePath: string) {
   const resolved = canonicalPath(filePath);
   return isWithinDirectory(resolved, attachmentsPath())
@@ -218,6 +237,12 @@ async function closeAllBackendsForExit() {
   appLogger.log("info", "app.shutdown.started");
   return backendShutdownCoordinator.run(async () => {
     try {
+      try {
+        const snapshotResult = await workspaceSnapshotCoordinator.request();
+        if (snapshotResult !== "saved") appLogger.log("warn", "app.workspace_snapshot.fallback", { reason: snapshotResult });
+      } catch (error) {
+        appLogger.log("warn", "app.workspace_snapshot.failed", logErrorDetails(error));
+      }
       await runShutdownSteps([
         { name: "Provider", run: () => backendManager.close() },
         { name: "已跟踪进程", run: () => processSupervisor.terminateAll() },
@@ -245,7 +270,7 @@ const desktopUpdateManager = new DesktopUpdateManager({
 });
 
 function rememberWorkspace(directory: string) {
-  return preferencesStore.write({ lastWorkspace: path.resolve(directory), recentWorkspaces: [] });
+  return preferencesStore.write({ lastWorkspace: path.resolve(directory) });
 }
 
 async function registerWorkspace(cwdValue: unknown) {
@@ -255,21 +280,11 @@ async function registerWorkspace(cwdValue: unknown) {
   if (isAuthorizedWorkspacePath(cwd)) return cwd;
   const pending = pendingWorkspaceAuthorizationRequests.get(cwd);
   if (pending) return pending;
-  const request = workspaceAuthorizationPromptQueue.then(async () => {
+  const request = workspaceAuthorizationGrantQueue.then(async () => {
     if (isAuthorizedWorkspacePath(cwd)) return cwd;
-    const result = await dialog.showMessageBox({
-      type: "question",
-      title: "授权工作区",
-      message: "允许 AgentDesk 访问此工作区吗？",
-      detail: cwd,
-      buttons: ["允许访问", "取消"],
-      defaultId: 1,
-      cancelId: 1,
-      noLink: true,
-    });
-    return result.response === 0 ? grantAuthorizedWorkspacePath(cwd) : null;
+    return grantAuthorizedWorkspacePath(cwd);
   });
-  workspaceAuthorizationPromptQueue = request.then(() => undefined, () => undefined);
+  workspaceAuthorizationGrantQueue = request.then(() => undefined, () => undefined);
   pendingWorkspaceAuthorizationRequests.set(cwd, request);
   try {
     return await request;
@@ -557,7 +572,7 @@ const claudeWorkerHost = new ClaudeWorkerHost(claudeWorkerPath, {
   reportCleanupFailure: (message) => appLogger.log("error", "claude.worker.cleanup_failed", { message }),
 });
 let claudeBackend: ClaudeBackend;
-const backendManager = createBackendRegistry([new CodexBackend(codexAppServer), (claudeBackend = new ClaudeBackend(claudeWorkerHost, undefined, readClaudeCredentialsForQuery, () => claudeGatewayFixture || claudeLifecycleFixture ? { kind: claudeGatewayFixture?.kind || "offline", ...(claudeGatewayFixture?.timeoutMs ? { timeoutMs: claudeGatewayFixture.timeoutMs } : {}), ...(claudeLifecycleFixture ? { lifecycle: claudeLifecycleFixture } : {}) } : undefined))], appLogger, (cwd) => isAuthorizedWorkspacePath(cwd));
+const backendManager = createBackendRegistry([new CodexBackend(codexAppServer), (claudeBackend = new ClaudeBackend(claudeWorkerHost, undefined, readClaudeCredentialsForQuery, () => claudeGatewayFixture || claudeLifecycleFixture ? { kind: claudeGatewayFixture?.kind || "offline", ...(claudeGatewayFixture?.timeoutMs ? { timeoutMs: claudeGatewayFixture.timeoutMs } : {}), ...(claudeLifecycleFixture ? { lifecycle: claudeLifecycleFixture } : {}) } : undefined, undefined, (directory) => authorizedClaudeMarketplacePaths.has(canonicalPath(directory))))], appLogger, (cwd) => isAuthorizedWorkspacePath(cwd));
 
 claudeUpdateManager = new ClaudeUpdateManager({
   appPath: () => app.getAppPath(),
@@ -620,6 +635,9 @@ if (hasLock) {
         register: registerWorkspace,
       },
       preferences: preferencesStore,
+      workspaceSnapshot: {
+        complete: (requestId, workspaceState) => workspaceSnapshotCoordinator.complete(requestId, workspaceState),
+      },
       bossKey: {
         status: () => windowLifecycle.bossKeyState(),
         change: (accelerator) => windowLifecycle.changeBossKey(accelerator),
@@ -646,6 +664,14 @@ if (hasLock) {
           if (typeof value.cwd !== "string" || typeof value.title !== "string" || typeof value.threadId !== "string" || typeof value.content !== "string") throw new Error("交接参数无效。");
           return createHandoffPackage({ cwd: value.cwd, title: value.title, threadId: value.threadId, content: value.content });
         },
+        chooseClaudeMarketplaceDirectory: async (defaultPath) => {
+          const initial = typeof defaultPath === "string" && existingDirectory(defaultPath) ? defaultPath : workspacePath;
+          const result = await dialog.showOpenDialog({ properties: ["openDirectory"], defaultPath: initial });
+          if (result.canceled || !result.filePaths[0]) return null;
+          const selected = canonicalPath(result.filePaths[0]);
+          registerAuthorizedClaudeMarketplacePath(selected);
+          return selected;
+        },
         openTerminal: (cwd) => {
           if (typeof cwd !== "string") throw new Error("工作目录无效。");
           return openWindowsTerminal(cwd);
@@ -661,16 +687,14 @@ if (hasLock) {
           }
           return dataUrl;
         },
-        openLocalPath: (filePath) => {
-          if (typeof filePath !== "string" || !existsSync(filePath)) throw new Error("文件不存在。");
-          const resolved = canonicalPath(filePath);
-          if (!isAllowedLocalPath(resolved)) throw new Error("该本地路径未获得授权。");
-          const stats = statSync(resolved);
-          if (stats.isFile() && isExecutableLocalPath(resolved)) {
-            shell.showItemInFolder(resolved);
+        openLocalPath: (input) => {
+          const target = resolveLocalPathOpenRequest(input, { isAuthorizedWorkspacePath });
+          if (!isAllowedLocalPath(target.path)) registerAuthorizedLocalPath(target.path);
+          if (target.revealOnly) {
+            shell.showItemInFolder(target.path);
             return "";
           }
-          return shell.openPath(resolved);
+          return shell.openPath(target.path);
         },
         openExternal: (url) => {
           if (typeof url !== "string" || !isSafeExternalUrl(url)) throw new Error("只允许打开 HTTP 或 HTTPS 链接。");
@@ -728,7 +752,7 @@ if (hasLock) {
           },
           setClaudeLifecycleFixture: (kind: unknown) => {
             if (kind === null) return closeClaudeGatewayFixture().then(() => ({ kind: null }));
-            if (kind !== "longBash" && kind !== "hook" && kind !== "mcp" && kind !== "approval" && kind !== "stream" && kind !== "compact" && kind !== "incompleteTool") throw new Error("Claude 生命周期夹具类型无效。");
+            if (kind !== "longBash" && kind !== "hook" && kind !== "mcp" && kind !== "userQuestion" && kind !== "stream" && kind !== "compact" && kind !== "incompleteTool") throw new Error("Claude 生命周期夹具类型无效。");
             claudeLifecycleFixture = kind;
             return { kind };
           },
@@ -755,10 +779,6 @@ if (hasLock) {
     windowLifecycle.registerBossKey(startupPreferences.bossKey);
     windowLifecycle.createTray();
     void codexCliUpdateManager.initialize();
-    void codexAppServer.ensureStarted().catch((error: Error) => {
-      appLogger.log("error", "codex.app_server.start_failed", logErrorDetails(error));
-      emitToRenderer({ method: "client/error", params: { message: error.message } });
-    });
   });
 }
 

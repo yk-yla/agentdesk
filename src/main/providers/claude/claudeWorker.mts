@@ -2,7 +2,6 @@ import { parentPort } from "node:worker_threads";
 import { randomUUID } from "node:crypto";
 import { spawn } from "node:child_process";
 import { createRequire } from "node:module";
-import { existsSync, realpathSync } from "node:fs";
 import path from "node:path";
 import {
   deleteSession,
@@ -31,6 +30,8 @@ import { createClaudeSettingsSnapshot, type ClaudeSettingsSnapshot } from "./cla
 import { searchSnippet, sessionSearchText } from "./claudeHistorySearch.js";
 import { classifyClaudeGatewayFailure, type ClaudeGatewayFailureKind } from "./claudeGatewayError.js";
 import { ClaudeProcessTreeController, terminateClaudeProcessTree } from "./claudeProcessTree.js";
+import { verifyWorkerLocalMarketplacePath } from "./claudeMarketplacePolicy.js";
+import { automaticClaudeToolPermission, settingsWithoutClaudePermissionRules } from "./claudePermissionPolicy.js";
 
 if (!parentPort) throw new Error("Claude Worker 缺少父进程通道。");
 
@@ -127,17 +128,11 @@ function safeMarketplaceName(value: unknown) {
   return name;
 }
 
-function safeMarketplaceSource(value: unknown, cwd: string) {
+function safeMarketplaceSource(value: unknown, cwd: string, authorizedLocalMarketplacePath?: string) {
   const source = safeCliText(value, "插件市场来源", 2_048);
   if (/^(?:https?|git):\/\//i.test(source) || /^git@[^:]+:[^\s]+$/i.test(source) || /^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+(?:#[A-Za-z0-9._/-]+)?$/.test(source)) return source;
   if (/^[.\\/]|^[A-Za-z]:[\\/]/.test(source)) {
-    const root = realpathSync(cwd);
-    const candidate = path.resolve(root, source);
-    if (!existsSync(candidate)) throw new Error("Claude 本地插件市场不存在。");
-    const resolved = realpathSync(candidate);
-    const relative = path.relative(root, resolved);
-    if (relative === ".." || relative.startsWith(`..${path.sep}`) || path.isAbsolute(relative)) throw new Error("Claude 本地插件市场必须位于已授权工作区内。");
-    return resolved;
+    return verifyWorkerLocalMarketplacePath(source, cwd, authorizedLocalMarketplacePath);
   }
   throw new Error("Claude 插件市场来源必须是 HTTP(S)、Git、GitHub 仓库或受控本地路径。");
 }
@@ -290,7 +285,7 @@ async function pluginRequest(command: Extract<ClaudeWorkerCommand, { type: "plug
       return { marketplaces: entries.map((item) => { const record = item && typeof item === "object" && !Array.isArray(item) ? item as Record<string, unknown> : {}; return { name: typeof record.name === "string" ? record.name : "未命名市场", path: typeof record.path === "string" ? record.path : "", plugins: [] }; }) };
     }
     case "marketplaceAdd": {
-      const source = safeMarketplaceSource(command.source, command.cwd);
+      const source = safeMarketplaceSource(command.source, command.cwd, command.authorizedLocalMarketplacePath);
       await runClaudePluginCli(command, ["plugin", "marketplace", "add", "--scope", "user", source]);
       return { ok: true };
     }
@@ -445,9 +440,10 @@ async function startLifecycleFixture(command: Extract<ClaudeWorkerCommand, { typ
     emit({ type: "message", sessionId: command.sessionId, queryGeneration: command.queryGeneration, payload: { type: "assistant", session_id: command.nativeSessionId, message: { role: "assistant", content: [{ type: "tool_use", id: `fixture-${scenario}`, name: toolName, input: { command: `agentdesk ${scenario} lifecycle fixture` } }] } } });
     return;
   }
-  if (scenario === "approval") {
-    emit({ type: "message", sessionId: command.sessionId, queryGeneration: command.queryGeneration, payload: { type: "assistant", session_id: command.nativeSessionId, message: { role: "assistant", content: [{ type: "tool_use", id: "fixture-approval", name: "Bash", input: { command: "agentdesk approval fixture" } }] } } });
-    void interactionPromise(command, state, "permission:fixture-approval", "permission", { nativeSessionId: command.nativeSessionId, requestId: "fixture-approval", toolUseId: "fixture-approval", toolName: "Bash", input: { command: "agentdesk approval fixture" }, suggestions: [] }, abortController.signal);
+  if (scenario === "userQuestion") {
+    const input = { questions: [{ header: "执行方式", question: "Claude 应该怎样继续？", options: [{ label: "继续执行", description: "按当前计划继续" }, { label: "停止", description: "停止当前任务" }], multiSelect: false }] };
+    emit({ type: "message", sessionId: command.sessionId, queryGeneration: command.queryGeneration, payload: { type: "assistant", session_id: command.nativeSessionId, message: { role: "assistant", content: [{ type: "tool_use", id: "fixture-user-question", name: "AskUserQuestion", input }] } } });
+    void interactionPromise(command, state, "permission:fixture-user-question", "userQuestion", { nativeSessionId: command.nativeSessionId, requestId: "fixture-user-question", toolUseId: "fixture-user-question", toolName: "AskUserQuestion", input, suggestions: [] }, abortController.signal);
     return;
   }
   let streamStep = 0;
@@ -492,7 +488,7 @@ async function start(command: Extract<ClaudeWorkerCommand, { type: "start" }>) {
   }
   if (secretEnv) for (const key of Object.keys(secretEnv)) delete secretEnv[key];
   const resolvedSettings = await resolveSettings({ cwd: command.cwd, settingSources: command.settingSources as SettingSource[] });
-  const settingsSnapshot = await createClaudeSettingsSnapshot(resolvedSettings.effective);
+  const settingsSnapshot = await createClaudeSettingsSnapshot(settingsWithoutClaudePermissionRules(resolvedSettings.effective));
   try {
     const claudeQuery = query({
       prompt: input,
@@ -507,8 +503,9 @@ async function start(command: Extract<ClaudeWorkerCommand, { type: "start" }>) {
       systemPrompt: { type: "preset", preset: "claude_code" },
       tools: { type: "preset", preset: "claude_code" },
       canUseTool: async (toolName, input, options): Promise<PermissionResult> => {
-        const kind = toolName === "AskUserQuestion" ? "userQuestion" : "permission";
-        const result = await interactionPromise(command, interactionState, `permission:${options.requestId}`, kind, {
+        const automatic = automaticClaudeToolPermission(toolName, input);
+        if (automatic) return automatic;
+        const result = await interactionPromise(command, interactionState, `permission:${options.requestId}`, "userQuestion", {
           nativeSessionId: command.nativeSessionId,
           requestId: options.requestId,
           toolUseId: options.toolUseID,

@@ -149,6 +149,7 @@ export class AgentSessionRegistry {
       this.assertWorkspaceAuthorized(canonicalCwd);
       const nativeSessionId = this.requireNativeSessionId(params, context);
       const knownCwd = this.knownNativeSessions.get(this.nativeKey(provider, nativeSessionId));
+      if (!knownCwd && operation === "readSession") return;
       if (!knownCwd || knownCwd !== canonicalCwd) throw new Error("原生会话尚未由当前工作区的 Provider 历史登记。");
       return;
     }
@@ -168,6 +169,26 @@ export class AgentSessionRegistry {
       return;
     }
     const clientSessionId = context.sessionId;
+    if (!clientSessionId && HISTORY_OPERATIONS.has(operation)) {
+      const canonicalCwd = this.requireWorkspace(params, context);
+      const nativeSessionId = this.requireNativeSessionId(params, context);
+      if (operation === "readSession") {
+        const returnedNativeSessionId = nativeSessionIdFrom(result);
+        const returnedCwd = workspaceFrom(result);
+        if (returnedNativeSessionId !== nativeSessionId || !returnedCwd || canonicalPath(returnedCwd) !== canonicalCwd) {
+          throw new Error("Provider 返回的历史会话归属无效。");
+        }
+        this.knownNativeSessions.set(this.nativeKey(provider, nativeSessionId), canonicalCwd);
+      } else if (operation === "forkSession") {
+        const forkedNativeSessionId = nativeSessionIdFrom(result);
+        const forkedCwd = workspaceFrom(result);
+        if (!forkedNativeSessionId || !forkedCwd || canonicalPath(forkedCwd) !== canonicalCwd) throw new Error("Provider 返回的分支会话归属无效。");
+        this.knownNativeSessions.set(this.nativeKey(provider, forkedNativeSessionId), canonicalCwd);
+      } else if (operation === "deleteSession") {
+        this.knownNativeSessions.delete(this.nativeKey(provider, nativeSessionId));
+      }
+      return;
+    }
     if (!clientSessionId) return;
     if (operation === "deleteSession") this.closedSessions.delete(clientSessionId);
     const session = this.sessions.get(clientSessionId);
@@ -270,7 +291,7 @@ export class AgentSessionRegistry {
       };
       this.interactions.set(this.interactionKey("codex", event.requestId), interaction);
     }
-    if (event.type === "client/server-exited" || event.type === "client/error") this.clearProvider("codex");
+    if (event.type === "client/server-exited") this.clearProvider("codex");
     if (session && (nativeSessionId || event.queryGeneration !== undefined)) {
       return { ...event, queryGeneration: session.queryGeneration };
     }

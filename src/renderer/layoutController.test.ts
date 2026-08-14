@@ -124,17 +124,17 @@ describe("LayoutController", () => {
     assert.equal(harness.layout.activePaneId, "pane-2");
   });
 
-  it("creates bounded split panes and merges a closed pane into its neighbor", () => {
+  it("creates at most two panes and merges a closed pane into its neighbor", () => {
     const harness = createHarness();
 
-    harness.controller.splitPane("pane-1", 3);
-    assert.equal(harness.layout.panes.length, 3);
-    harness.controller.splitPane("pane-1", 3);
-    assert.equal(harness.layout.panes.length, 3);
-
-    const closingPane = harness.layout.panes[2];
-    harness.controller.closePane(closingPane.id);
+    harness.controller.splitPane("pane-1");
     assert.equal(harness.layout.panes.length, 2);
+    harness.controller.splitPane("pane-1");
+    assert.equal(harness.layout.panes.length, 2);
+
+    const closingPane = harness.layout.panes[1];
+    harness.controller.closePane(closingPane.id);
+    assert.equal(harness.layout.panes.length, 1);
     assert.ok(harness.layout.panes.some((pane) => pane.tabIds.includes(closingPane.activeTabId)));
   });
 
@@ -142,10 +142,25 @@ describe("LayoutController", () => {
     const harness = createHarness();
     harness.sessions.s1.provider = "claude";
 
-    harness.controller.splitPane("pane-1", 2);
+    harness.controller.splitPane("pane-1");
 
     const created = harness.layout.panes[1].activeTabId;
     assert.equal(harness.sessions[created].provider, "claude");
+  });
+
+  it("does not create a third pane through split-drop", () => {
+    const harness = createHarness({
+      panes: [
+        { id: "pane-1", tabIds: ["s1", "s2"], activeTabId: "s2" },
+        { id: "pane-2", tabIds: ["s3"], activeTabId: "s3" },
+      ],
+      activePaneId: "pane-1",
+    });
+
+    harness.controller.moveTab("s2", "pane-2", undefined, "vertical");
+
+    assert.equal(harness.layout.panes.length, 2);
+    assert.deepEqual(harness.layout.panes[0].tabIds, ["s1", "s2"]);
   });
 
   it("keeps a tab whose backend close failed during a batch close", async () => {

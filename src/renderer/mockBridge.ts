@@ -16,7 +16,7 @@ export function createMockBridge(): CodexBridge {
   let threadCounter = 0;
   let turnCounter = 0;
   const mockWorkspace = "mock-workspace";
-  let mockPreferences: DesktopPreferences = { recentWorkspaces: [], lastWorkspace: mockWorkspace, favoriteWorkspaces: [], sidebarWidth: 250, theme: "github-light", displayMode: "simple", bossKey: "F2" };
+  let mockPreferences: DesktopPreferences = { lastWorkspace: mockWorkspace, favoriteWorkspaces: [], sidebarWidth: 250, theme: "github-light", displayMode: "simple", bossKey: "F2" };
   let mockBossKeyStatus: BossKeyStatus = { accelerator: "F2", registered: true, message: "老板键 F2 已启用。" };
   let mockUpdateStatus: DesktopUpdateStatus = { phase: "unsupported", currentVersion: "1.0.7", message: "浏览器预览不检查软件更新。", tokenConfigured: false, repositoryUrl: "https://github.com/yxb715/agentdesk" };
   let mockCodexCliUpdateStatus: CodexCliUpdateStatus = { phase: "available", currentVersion: "0.146.1", latestVersion: "0.147.0", checkedAt: Date.now(), nextCheckAt: Date.now() + 6 * 60 * 60 * 1000, message: "发现新版本 0.147.0，可立即更新。" };
@@ -222,6 +222,7 @@ export function createMockBridge(): CodexBridge {
     getWorkspace: () => Promise.resolve(mockWorkspace),
     getLaunchProvider: () => Promise.resolve(null),
     chooseWorkspace: (defaultPath?: string) => Promise.resolve(defaultPath || mockWorkspace),
+    chooseClaudeMarketplaceDirectory: (defaultPath?: string) => Promise.resolve(defaultPath || mockWorkspace),
     registerWorkspace: (cwd: string) => Promise.resolve(cwd),
     getPreferences: () => Promise.resolve(mockPreferences),
     getCodexDefaults: () => Promise.resolve(mockDefaults),
@@ -254,6 +255,10 @@ export function createMockBridge(): CodexBridge {
     checkForUpdates: () => Promise.resolve(mockUpdateStatus),
     downloadUpdate: () => Promise.resolve(mockUpdateStatus),
     installUpdate: () => Promise.resolve(),
+    saveWorkspaceSnapshot: (_requestId, workspaceState) => {
+      mockPreferences = { ...mockPreferences, workspaceState };
+      return Promise.resolve();
+    },
     getCodexCliUpdateStatus: () => Promise.resolve(mockCodexCliUpdateStatus),
     checkCodexCliUpdates: () => Promise.resolve(mockCodexCliUpdateStatus),
     updateCodexCli: () => {
@@ -267,6 +272,7 @@ export function createMockBridge(): CodexBridge {
       }, 1_200));
     },
     onWindowState: () => () => undefined,
+    onWorkspaceSnapshotRequested: () => () => undefined,
     onUpdateStatus: () => () => undefined,
     onCodexCliUpdateStatus(listener) {
       cliUpdateListeners.add(listener);

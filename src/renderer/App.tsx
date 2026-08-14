@@ -25,7 +25,7 @@ import PaneView from "./PaneView";
 import { appendRawEvent, clearRawEvents } from "./rawEventStore";
 import Sidebar, { type HistoryAction, type SidebarProps } from "./Sidebar";
 import { handoffMarkdown, sessionMarkdown } from "./sessionTools";
-import { authorizeRestoredSessionWorkspaces, createUpdateWorkspaceState, loadSavedImages, parseUpdateWorkspaceState } from "./workspaceState";
+import { authorizeRestoredSessionWorkspaces, createWorkspaceState, loadSavedImages, parseWorkspaceState, workspaceStateFingerprint } from "./workspaceState";
 import { SessionSettingsCoordinator } from "./sessionSettingsCoordinator";
 import { recoverProviderSessions } from "./providerRecovery";
 import { SessionLifecycleController } from "./sessionLifecycleController";
@@ -74,6 +74,10 @@ function clampSidebarWidth(value: unknown) {
 
 function sidebarWidthFromPointer(clientX: number) {
   return Math.max(MIN_SIDEBAR_WIDTH, Math.min(MAX_SIDEBAR_WIDTH, Math.round(clientX)));
+}
+
+function sessionHasActiveWork(session: SessionState | undefined) {
+  return Boolean(session && (session.status === "working" || session.activeTurnId || session.pendingApprovals.length));
 }
 
 interface TabContextMenuState {
@@ -178,7 +182,7 @@ export default function App() {
   const [skillsByCwd, setSkillsByCwd] = useState<Record<string, SkillOption[]>>({});
   const [codexDefaults, setCodexDefaults] = useState<CodexDefaults>(EMPTY_CODEX_DEFAULTS);
   const [providerStartupStates, setProviderStartupStates] = useState<Record<AgentProvider, ProviderStartupState>>({ codex: "connecting", claude: "connecting" });
-  const [preferences, setPreferences] = useState<DesktopPreferences>({ recentWorkspaces: [], lastWorkspace: "", favoriteWorkspaces: [], theme: DEFAULT_THEME, displayMode: DEFAULT_DISPLAY_MODE, bossKey: DEFAULT_BOSS_KEY });
+  const [preferences, setPreferences] = useState<DesktopPreferences>({ lastWorkspace: "", favoriteWorkspaces: [], theme: DEFAULT_THEME, displayMode: DEFAULT_DISPLAY_MODE, bossKey: DEFAULT_BOSS_KEY });
   const recentCommandUsage = (preferences.recentCommandUsage || {}) as CommandUsage;
   const [bossKeyStatus, setBossKeyStatus] = useState<BossKeyStatus>(INITIAL_BOSS_KEY_STATUS);
   const [updateStatus, setUpdateStatus] = useState<DesktopUpdateStatus>(INITIAL_UPDATE_STATUS);
@@ -197,6 +201,7 @@ export default function App() {
   const [pluginPanelOpen, setPluginPanelOpen] = useState(false);
   const [sidebarWidth, setSidebarWidth] = useState(DEFAULT_SIDEBAR_WIDTH);
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
+  const [workspaceStateReady, setWorkspaceStateReady] = useState(false);
 
   // 所有回调都通过 ref 读取最新状态，这样回调本身保持稳定，memo 才能真正拦住分栏。
   const sessionsRef = useRef(sessions);
@@ -210,9 +215,11 @@ export default function App() {
   const queuedMessagesRef = useRef(queuedMessages);
   const pendingSteersRef = useRef(pendingSteers);
   const preferencesRef = useRef(preferences);
+  const providerStartupStatesRef = useRef(providerStartupStates);
   const preferenceSaveCoordinatorRef = useRef(new PreferenceSaveCoordinator());
   const claudeRuntimeStatusRef = useRef(claudeRuntimeStatus);
   const tabContextMenuRef = useRef(tabContextMenu);
+  const sidebarCollapsedRef = useRef(sidebarCollapsed);
   sessionsRef.current = sessions;
   workspaceRef.current = workspace;
   layoutRef.current = layout;
@@ -224,8 +231,10 @@ export default function App() {
   queuedMessagesRef.current = queuedMessages;
   pendingSteersRef.current = pendingSteers;
   preferencesRef.current = preferences;
+  providerStartupStatesRef.current = providerStartupStates;
   claudeRuntimeStatusRef.current = claudeRuntimeStatus;
   tabContextMenuRef.current = tabContextMenu;
+  sidebarCollapsedRef.current = sidebarCollapsed;
 
   const draftsRef = useRef(new Map<string, string>());
   const skillLoadsRef = useRef(new Map<string, Promise<void>>());
@@ -236,9 +245,15 @@ export default function App() {
   const providerEventRef = useRef<ProviderEventController | null>(null);
   const turnTelemetryRef = useRef<TurnTelemetry | null>(null);
   const historyControllerRef = useRef<HistoryController | null>(null);
+  const providerInitializationTasksRef = useRef(new Map<AgentProvider, Promise<void>>());
+  const initializedProvidersRef = useRef(new Set<AgentProvider>());
   const layoutControllerRef = useRef<LayoutController | null>(null);
   const settingsCoordinatorRef = useRef(new SessionSettingsCoordinator());
   const workspaceRestoreInProgressRef = useRef(false);
+  const workspaceStateReadyRef = useRef(false);
+  const workspaceStateSaveTimerRef = useRef<number | undefined>(undefined);
+  const lastWorkspaceStateFingerprintRef = useRef("");
+  const workspaceRestoreStoppedIdsRef = useRef(new Set<string>());
   if (!turnTelemetryRef.current) turnTelemetryRef.current = new TurnTelemetry(trackUiEvent);
 
   useEffect(() => {
@@ -311,6 +326,51 @@ export default function App() {
     void bridge.writeLog({ level: "error", event: "renderer.session_error", details: { sessionId, fallback, error: error instanceof Error ? { name: error.name, message: error.message, stack: error.stack } : { message: String(error) } } }).catch(() => undefined);
     updateSession(sessionId, (current) => ({ ...current, errorText: error instanceof Error ? error.message : fallback }));
   }, [bridge, updateSession]);
+
+  const ensureProviderInitialized = useCallback((provider: AgentProvider) => {
+    if (initializedProvidersRef.current.has(provider)) return Promise.resolve();
+    const currentTask = providerInitializationTasksRef.current.get(provider);
+    if (currentTask) return currentTask;
+    const setProviderState = (target: AgentProvider, state: Exclude<ProviderStartupState, "connecting">) => {
+      providerStartupStatesRef.current = { ...providerStartupStatesRef.current, [target]: state };
+      if (state === "ready") initializedProvidersRef.current.add(target);
+      setProviderStartupStates(providerStartupStatesRef.current);
+    };
+    providerStartupStatesRef.current = { ...providerStartupStatesRef.current, [provider]: "connecting" };
+    setProviderStartupStates(providerStartupStatesRef.current);
+    const task = initializeProviders({
+      loadCodexModels: async () => {
+        const [value, defaults] = await Promise.all([
+          agentClient.request("codex", "listModels", { limit: 100, includeHidden: false }),
+          bridge.getCodexDefaults().catch(() => EMPTY_CODEX_DEFAULTS),
+        ]);
+        return { value, defaults };
+      },
+      loadCapabilities: (target) => agentClient.request(target, "getCapabilities") as Promise<AgentCapabilities>,
+      isActive: () => true,
+      applyCodexModels: ({ value, defaults }) => {
+        defaultsRef.current = defaults;
+        setCodexDefaults(defaults);
+        const models = ((asRecord(value).data as unknown[]) || []).map((model) => normalizeAgentModel("codex", model));
+        providerModelsRef.current = { ...providerModelsRef.current, codex: models };
+        setProviderModels(providerModelsRef.current);
+      },
+      applyCapabilities: (target, capabilities) => {
+        providerCapabilitiesRef.current = { ...providerCapabilitiesRef.current, [target]: capabilities };
+        setProviderCapabilities(providerCapabilitiesRef.current);
+        setSessions((current) => Object.fromEntries(Object.entries(current).map(([id, session]) => [id, session.provider === target ? { ...session, capabilities } : session])));
+      },
+      reportError: (target, phase, error) => {
+        const providerName = target === "codex" ? "Codex" : "Claude Code";
+        const phaseName = phase === "models" ? "模型列表" : "能力";
+        const message = error instanceof Error ? `${providerName} ${phaseName}加载失败：${error.message}` : `${providerName} ${phaseName}加载失败。`;
+        setSessions((current) => Object.fromEntries(Object.entries(current).map(([id, session]) => [id, session.provider === target ? { ...session, errorText: message } : session])));
+      },
+      setProviderState,
+    }, [provider]).finally(() => providerInitializationTasksRef.current.delete(provider));
+    providerInitializationTasksRef.current.set(provider, task);
+    return task;
+  }, [agentClient, bridge]);
 
   /**
    * 会话相关请求都走这里：响应和错误直接记入原始事件存储。
@@ -566,6 +626,73 @@ export default function App() {
     setHistory((current) => applyLocalSessionMetadata(current, merged));
   }, [bridge]);
 
+  const currentWorkspaceSnapshot = useCallback(() => {
+    if (!workspaceStateReadyRef.current || workspaceRestoreInProgressRef.current) return null;
+    const currentWorkspace = workspaceRef.current;
+    if (!currentWorkspace || currentWorkspace === "正在连接工作区" || currentWorkspace === "工作区不可用") return null;
+    return createWorkspaceState({
+      workspace: currentWorkspace,
+      layout: layoutRef.current,
+      sessions: sessionsRef.current,
+      drafts: draftsRef.current,
+      attachments: attachmentsRef.current,
+      queuedMessages: queuedMessagesRef.current,
+      pendingSteers: pendingSteersRef.current,
+      sidebarCollapsed: sidebarCollapsedRef.current,
+    });
+  }, []);
+
+  const persistWorkspaceState = useCallback(async (force = false) => {
+    const workspaceState = currentWorkspaceSnapshot();
+    if (!workspaceState) return false;
+    const fingerprint = workspaceStateFingerprint(workspaceState);
+    if (!force && fingerprint === lastWorkspaceStateFingerprintRef.current) return true;
+    await bridge.savePreferences({ workspaceState });
+    lastWorkspaceStateFingerprintRef.current = fingerprint;
+    return true;
+  }, [bridge, currentWorkspaceSnapshot]);
+
+  const scheduleWorkspaceStateSave = useCallback(() => {
+    if (!workspaceStateReadyRef.current) return;
+    if (workspaceStateSaveTimerRef.current !== undefined) window.clearTimeout(workspaceStateSaveTimerRef.current);
+    workspaceStateSaveTimerRef.current = window.setTimeout(() => {
+      workspaceStateSaveTimerRef.current = undefined;
+      void persistWorkspaceState().catch((error) => bridge.writeLog({
+        level: "warn",
+        event: "renderer.workspace_snapshot.auto_save_failed",
+        details: { message: error instanceof Error ? error.message : String(error) },
+      }).catch(() => undefined));
+    }, 750);
+  }, [bridge, persistWorkspaceState]);
+
+  useEffect(() => {
+    if (!workspaceStateReady) return;
+    scheduleWorkspaceStateSave();
+  }, [attachments, layout, pendingSteers, queuedMessages, scheduleWorkspaceStateSave, sessions, sidebarCollapsed, workspace, workspaceStateReady]);
+
+  useEffect(() => () => {
+    if (workspaceStateSaveTimerRef.current !== undefined) window.clearTimeout(workspaceStateSaveTimerRef.current);
+  }, []);
+
+  useEffect(() => bridge.onWorkspaceSnapshotRequested((requestId) => {
+    const workspaceState = currentWorkspaceSnapshot();
+    if (!workspaceState) {
+      void bridge.writeLog({ level: "warn", event: "renderer.workspace_snapshot.not_ready", details: { requestId } }).catch(() => undefined);
+      return;
+    }
+    if (workspaceStateSaveTimerRef.current !== undefined) {
+      window.clearTimeout(workspaceStateSaveTimerRef.current);
+      workspaceStateSaveTimerRef.current = undefined;
+    }
+    void bridge.saveWorkspaceSnapshot(requestId, workspaceState).then(() => {
+      lastWorkspaceStateFingerprintRef.current = workspaceStateFingerprint(workspaceState);
+    }).catch((error) => bridge.writeLog({
+      level: "warn",
+      event: "renderer.workspace_snapshot.exit_save_failed",
+      details: { requestId, message: error instanceof Error ? error.message : String(error) },
+    }).catch(() => undefined));
+  }), [bridge, currentWorkspaceSnapshot]);
+
   const rememberCommandUse = useCallback((key: string) => {
     const current = preferencesRef.current.recentCommandUsage || {};
     const latest = Object.values(current).reduce((max, value) => Math.max(max, value), 0);
@@ -758,7 +885,8 @@ export default function App() {
     setClaudeRuntimeStatus(await bridge.checkClaudeCodeUpdates());
   }, [bridge]);
   const updateClaudeCode = useCallback(async () => {
-    if (!window.confirm("更新 Claude Code 会停止全部 Claude 会话、Query、Worker 和后代进程，Codex 会话不会停止。确定继续吗？")) return;
+    const hasActiveClaudeSession = Object.values(sessionsRef.current).some((session) => session.provider === "claude" && sessionHasActiveWork(session));
+    if (hasActiveClaudeSession && !window.confirm("更新 Claude Code 会停止正在运行的 Claude 会话、Query、Worker 和后代进程，Codex 会话不会停止。确定继续吗？")) return;
     let status = await bridge.updateClaudeCode(false);
     if (!status.integrityVerified && status.phase === "available") {
       const signer = status.integritySigner || "未检测到签名者";
@@ -773,26 +901,16 @@ export default function App() {
 
   const installUpdate = useCallback(async () => {
     if (workspaceRestoreInProgressRef.current) throw new Error("本地会话仍在恢复，请稍后再重启安装。");
-    const workspaceState = createUpdateWorkspaceState({
-      workspace,
-      layout: layoutRef.current,
-      sessions: sessionsRef.current,
-      drafts: draftsRef.current,
-      attachments: attachmentsRef.current,
-      queuedMessages: queuedMessagesRef.current,
-      pendingSteers: pendingSteersRef.current,
-      sidebarCollapsed,
-    });
-    await bridge.savePreferences({ workspaceState });
+    if (!await persistWorkspaceState(true)) throw new Error("当前会话现场尚未准备完成，请稍后再重启安装。");
     await bridge.installUpdate();
-  }, [bridge, sidebarCollapsed, workspace]);
+  }, [bridge, persistWorkspaceState]);
   const openUpdateTokenPage = useCallback(() => bridge.openExternal("https://github.com/settings/personal-access-tokens/new"), [bridge]);
 
   const selectWorkspace = useCallback(async (directory: string) => {
     const registered = await bridge.registerWorkspace(directory);
     if (!registered) return;
     setWorkspace(registered);
-    await savePreference({ lastWorkspace: registered, recentWorkspaces: [] });
+    await savePreference({ lastWorkspace: registered });
   }, [bridge, savePreference]);
 
   const createSessionInDirectory = useCallback(async (
@@ -803,6 +921,7 @@ export default function App() {
     const registered = await bridge.registerWorkspace(directory);
     if (!registered) return undefined;
     directory = registered;
+    void ensureProviderInitialized(provider);
     setWorkspace(directory);
     const sessionId = placement
       ? addSessionToPane(placement.paneId, directory, { provider }, placement.afterSessionId)
@@ -814,9 +933,9 @@ export default function App() {
         updateSession(sessionId, (current) => ({ ...current, capabilities }));
       })
       .catch((error) => setError(sessionId, error, "读取 Provider 能力失败"));
-    void savePreference({ lastWorkspace: directory, recentWorkspaces: [] });
+    void savePreference({ lastWorkspace: directory });
     return sessionId;
-  }, [addSession, addSessionToPane, agentClient, bridge, savePreference, setError, updateSession]);
+  }, [addSession, addSessionToPane, agentClient, bridge, ensureProviderInitialized, savePreference, setError, updateSession]);
 
   useEffect(() => {
     const handleNewSessionShortcut = (event: KeyboardEvent) => {
@@ -841,7 +960,7 @@ export default function App() {
     const next = await bridge.chooseWorkspace(session.cwd || workspace);
     if (!next) return;
     setWorkspace(next);
-    await savePreference({ lastWorkspace: next, recentWorkspaces: [] });
+    await savePreference({ lastWorkspace: next });
     updateSession(sessionId, (current) => (current.threadId ? current : { ...current, cwd: next, updatedAt: Date.now() }));
   }, [bridge, savePreference, updateSession, workspace]);
 
@@ -1283,12 +1402,13 @@ export default function App() {
       if (session) setError(sessionId, new Error("当前会话还没有保存到本机历史。"), "当前会话还没有保存到本机历史。");
       return;
     }
+    if (sessionHasActiveWork(session)) {
+      setError(sessionId, new Error("正在运行的会话不可删除，请先停止任务并处理待处理请求。"), "正在运行的会话不可删除");
+      return;
+    }
     const providerTitle = providerDisplayName(session.provider);
     const title = session.title || `${providerTitle} 会话`;
-    const runningNotice = session.status === "working" || session.pendingApprovals.length
-      ? "\n\n当前任务会先停止，待处理请求会被取消。"
-      : "";
-    if (!window.confirm(`确认永久删除这条会话？\n\n${title}\n\n这会从本机 ${providerTitle} 历史中删除会话内容，不可恢复。${runningNotice}`)) return;
+    if (!window.confirm(`确认永久删除这条会话？\n\n${title}\n\n这会从本机 ${providerTitle} 历史中删除会话内容，不可恢复。`)) return;
     if (!window.confirm("最后确认：真的要永久删除这条本机会话吗？")) return;
     try {
       // The native history must not be deleted while a Query is still alive.
@@ -1398,6 +1518,7 @@ export default function App() {
     const existing = Object.values(sessionsRef.current).find((session) => session.provider === entry.provider && session.threadId === entry.id && sameDirectory(session.cwd, entry.cwd));
     let registeredCwd: string;
     try {
+      await ensureProviderInitialized(entry.provider);
       registeredCwd = await registerHistoricalWorkspace((cwd) => bridge.registerWorkspace(cwd), entry.cwd);
     } catch (error) {
       if (existing) {
@@ -1477,25 +1598,142 @@ export default function App() {
       setError(sessionId, error, "恢复或读取历史会话失败");
     }
     return sessionId;
-  }, [activateSessionTab, addSession, bridge, persistCompactionSnapshot, requestForSession, setError, updateSession]);
+  }, [activateSessionTab, addSession, bridge, ensureProviderInitialized, persistCompactionSnapshot, requestForSession, setError, updateSession]);
 
   const isHistoryWorking = useCallback((threadId: string, provider?: AgentProvider) => (
-    Object.values(sessionsRef.current).some((session) => session.threadId === threadId && (!provider || session.provider === provider) && session.status === "working")
+    Object.values(sessionsRef.current).some((session) => session.threadId === threadId && (!provider || session.provider === provider) && sessionHasActiveWork(session))
   ), []);
 
   const runHistoryAction = useCallback(async (entry: HistoryThread, action: HistoryAction, value?: string) => {
-    const sessionId = await openHistory(entry);
-    if (!sessionId) return;
-    await new Promise<void>((resolve) => window.requestAnimationFrame(() => resolve()));
-    if (action === "rename" && value) await renameSession(sessionId, value);
-    else if (action === "pin") await toggleThreadPin(sessionId);
-    else if (action === "favorite") await toggleSessionFavorite(sessionId);
-    else if (action === "export") await exportSession(sessionId);
-    else if (action === "handoffCodex") await handoffSession(sessionId, "codex");
-    else if (action === "handoffClaude") await handoffSession(sessionId, "claude");
-    else if (action === "fork") await forkSession(sessionId);
-    else if (action === "delete") await deleteSession(sessionId);
-  }, [deleteSession, exportSession, forkSession, handoffSession, openHistory, renameSession, toggleSessionFavorite, toggleThreadPin]);
+    const existing = Object.values(sessionsRef.current).find((session) => session.provider === entry.provider && session.threadId === entry.id && sameDirectory(session.cwd, entry.cwd));
+    if (existing) {
+      if (action === "rename" && value) await renameSession(existing.id, value);
+      else if (action === "pin") await toggleThreadPin(existing.id);
+      else if (action === "favorite") await toggleSessionFavorite(existing.id);
+      else if (action === "export") await exportSession(existing.id);
+      else if (action === "handoffCodex") await handoffSession(existing.id, "codex");
+      else if (action === "handoffClaude") await handoffSession(existing.id, "claude");
+      else if (action === "fork") await forkSession(existing.id);
+      else if (action === "delete") await deleteSession(existing.id);
+      return;
+    }
+
+    const reportError = (error: unknown, fallback: string) => {
+      const currentLayout = layoutRef.current;
+      const pane = currentLayout.panes.find((candidate) => candidate.id === currentLayout.activePaneId) ?? currentLayout.panes[0];
+      if (pane?.activeTabId) setError(pane.activeTabId, error, fallback);
+    };
+    const key = nativeSessionKey(entry.provider, entry.id);
+
+    if (action === "favorite") {
+      const favorites = preferencesRef.current.favoriteSessions || [];
+      const isFavorite = favorites.includes(key) || favorites.includes(entry.id);
+      const favoriteSessions = isFavorite ? favorites.filter((id) => id !== key && id !== entry.id) : [...favorites, key];
+      const favoriteSessionSummaries = { ...(preferencesRef.current.favoriteSessionSummaries || {}) };
+      if (isFavorite) {
+        delete favoriteSessionSummaries[key];
+        delete favoriteSessionSummaries[entry.id];
+      } else {
+        favoriteSessionSummaries[key] = favoriteSessionSummary(entry);
+      }
+      try {
+        await savePreference({ favoriteSessions, favoriteSessionSummaries });
+        setHistory((current) => sortHistory(current.map((candidate) => candidate.provider === entry.provider && candidate.id === entry.id ? { ...candidate, isFavorite: !isFavorite } : candidate)));
+      } catch (error) {
+        reportError(error, "收藏状态更新失败");
+      }
+      return;
+    }
+
+    try {
+      const cwd = await registerHistoricalWorkspace((directory) => bridge.registerWorkspace(directory), entry.cwd);
+      const params = { cwd, threadId: entry.id };
+      const context = { canonicalCwd: cwd, nativeSessionId: entry.id };
+      const readValue = await agentClient.request(entry.provider, "readSession", { ...params, includeTurns: true }, context);
+      const seed = emptySession(`history-action-${Date.now()}`, cwd, "", "", entry.provider);
+      seed.threadId = entry.id;
+      seed.title = entry.title;
+      const source = hydrateAgentSession(seed, entry.provider, asRecord(readValue).thread);
+      source.threadId = entry.id;
+      source.title = entry.title || source.title;
+
+      if (action === "rename" && value) {
+        const name = value.trim();
+        if (!name || name === entry.title) return;
+        await agentClient.request(entry.provider, "renameSession", { ...params, name }, context);
+        const patch: Partial<DesktopPreferences> = { sessionAliases: { ...(preferencesRef.current.sessionAliases || {}), [key]: name } };
+        if (isFavoriteSession(preferencesRef.current, entry.provider, entry.id)) {
+          patch.favoriteSessionSummaries = {
+            ...(preferencesRef.current.favoriteSessionSummaries || {}),
+            [key]: favoriteSessionSummary({ ...entry, title: name, updatedAt: Date.now() }),
+          };
+        }
+        await savePreference(patch);
+        setHistory((current) => sortHistory(current.map((candidate) => candidate.provider === entry.provider && candidate.id === entry.id ? { ...candidate, title: name, titleLower: name.toLowerCase() } : candidate)));
+      } else if (action === "pin") {
+        const nextPinned = !entry.isPinned;
+        await agentClient.request(entry.provider, "updateSessionMetadata", { ...params, isPinned: nextPinned }, context);
+        setHistory((current) => sortHistory(current.map((candidate) => candidate.provider === entry.provider && candidate.id === entry.id ? { ...candidate, isPinned: nextPinned } : candidate)));
+      } else if (action === "export") {
+        await bridge.saveTextFile(sessionMarkdown(source), `${source.title || "agent-session"}.md`);
+      } else if (action === "handoffCodex" || action === "handoffClaude") {
+        const targetProvider: AgentProvider = action === "handoffCodex" ? "codex" : "claude";
+        const packageInfo = await bridge.createHandoffPackage({ cwd, title: source.title, threadId: entry.id, content: handoffMarkdown(source) });
+        const nextSessionId = await createSessionInDirectory(cwd, targetProvider);
+        if (!nextSessionId) return;
+        updateSession(nextSessionId, (current) => ({ ...current, title: `${source.title || "新会话"} 接力` }));
+        const handoffMessage = sessionMessages.createQueuedMessage(packageInfo.prompt, "handoff");
+        window.setTimeout(() => {
+          void runMessage(nextSessionId, handoffMessage).then((accepted) => {
+            if (!accepted) restoreMessagesToDraft(nextSessionId, [handoffMessage]);
+          });
+        }, 0);
+      } else if (action === "fork") {
+        const result = asRecord(await agentClient.request(entry.provider, "forkSession", params, context));
+        const thread = asRecord(result.thread);
+        const threadId = stringValue(thread.id);
+        if (!threadId) throw new Error("没有拿到分支会话 ID");
+        const title = `${source.title || entry.title} 分支`;
+        const forkCwd = stringValue(result.cwd, stringValue(thread.cwd, cwd));
+        const forkedSessionId = addSession(forkCwd, { threadId, title, provider: entry.provider });
+        providerEventRef.current?.bindSession(entry.provider, threadId, forkedSessionId);
+        updateSession(forkedSessionId, (current) => ({
+          ...hydrateAgentSession(current, entry.provider, { ...thread, name: title }),
+          threadId,
+          title,
+          model: stringValue(result.model) || source.model,
+          effort: stringValue(result.reasoningEffort) || source.effort,
+          resumed: false,
+          tokenUsage: tokenUsageForModel(current, stringValue(result.model) || source.model, preferencesRef.current),
+        }));
+        persistCompactionSnapshot(forkedSessionId);
+        setHistory((current) => upsertHistoryEntry(current, { id: threadId, provider: entry.provider, title, cwd: forkCwd }));
+        void requestForSession(forkedSessionId, "renameSession", { threadId, name: title }).catch((error) => setError(forkedSessionId, error, "分支重命名失败"));
+      } else if (action === "delete") {
+        const providerTitle = providerDisplayName(entry.provider);
+        if (!window.confirm(`确认永久删除这条会话？\n\n${entry.title}\n\n这会从本机 ${providerTitle} 历史中删除会话内容，不可恢复。`)) return;
+        if (!window.confirm("最后确认：真的要永久删除这条本机会话吗？")) return;
+        await agentClient.request(entry.provider, "deleteSession", params, context);
+        const aliases = { ...(preferencesRef.current.sessionAliases || {}) };
+        const favoriteSessionSummaries = { ...(preferencesRef.current.favoriteSessionSummaries || {}) };
+        delete aliases[key]; delete aliases[entry.id]; delete favoriteSessionSummaries[key]; delete favoriteSessionSummaries[entry.id];
+        const compactionCounts = { ...(preferencesRef.current.compactionCounts || preferencesRef.current.codexCompactionCounts || {}) };
+        delete compactionCounts[key]; delete compactionCounts[entry.id];
+        const legacyCodexCompactionCounts = { ...(preferencesRef.current.codexCompactionCounts || {}) };
+        if (entry.provider === "codex") { delete legacyCodexCompactionCounts[key]; delete legacyCodexCompactionCounts[entry.id]; }
+        await savePreference({
+          sessionAliases: aliases,
+          favoriteSessions: (preferencesRef.current.favoriteSessions || []).filter((id) => id !== key && id !== entry.id),
+          favoriteSessionSummaries,
+          compactionCounts,
+          ...(entry.provider === "codex" ? { codexCompactionCounts: legacyCodexCompactionCounts } : {}),
+        });
+        setHistory((current) => current.filter((candidate) => candidate.provider !== entry.provider || candidate.id !== entry.id));
+      }
+    } catch (error) {
+      reportError(normalizeAgentRequestError(entry.provider, action === "pin" ? "updateSessionMetadata" : action === "rename" ? "renameSession" : action === "delete" ? "deleteSession" : action === "fork" ? "forkSession" : "readSession", error), "历史会话操作失败");
+    }
+  }, [addSession, agentClient, bridge, createSessionInDirectory, deleteSession, exportSession, forkSession, handoffSession, persistCompactionSnapshot, renameSession, requestForSession, restoreMessagesToDraft, runMessage, savePreference, sessionMessages, setError, toggleSessionFavorite, toggleThreadPin, updateSession]);
 
   const addImages = useCallback(async (sessionId: string, files: File[]) => {
     const session = sessionsRef.current[sessionId];
@@ -1537,7 +1775,8 @@ export default function App() {
   const onDraftChange = useCallback((sessionId: string, value: string) => {
     if (value) draftsRef.current.set(sessionId, value);
     else draftsRef.current.delete(sessionId);
-  }, []);
+    scheduleWorkspaceStateSave();
+  }, [scheduleWorkspaceStateSave]);
 
   const toggleDetails = useCallback((sessionId: string) => {
     updateSession(sessionId, (current) => ({ ...current, detailsOpen: !current.detailsOpen }));
@@ -1561,8 +1800,14 @@ export default function App() {
     for (const sessionId of providerSessionIds) {
       settingsCoordinatorRef.current.delete(sessionId);
     }
-    setSessions((current) => recoverProviderSessions(current, provider));
-    setProviderStartupStates((current) => ({ ...current, [provider]: "error" }));
+    const recoveredSessions = recoverProviderSessions(sessionsRef.current, provider);
+    sessionsRef.current = recoveredSessions;
+    setSessions(recoveredSessions);
+    setProviderStartupStates((current) => {
+      const next = { ...current, [provider]: "error" as const };
+      providerStartupStatesRef.current = next;
+      return next;
+    });
   }, [sessionMessages]);
 
   const reloadProviderSkills = useCallback((provider: AgentProvider) => {
@@ -1647,7 +1892,8 @@ export default function App() {
         sessionsRef.current = { "session-1": initial };
         setSessions({ "session-1": initial });
         setWorkspace("工作区不可用");
-        setProviderStartupStates({ codex: "error", claude: "error" });
+        providerStartupStatesRef.current = { codex: "error", claude: "error" };
+        setProviderStartupStates(providerStartupStatesRef.current);
         return;
       }
       const currentWorkspace = workspaceResult.value;
@@ -1659,7 +1905,7 @@ export default function App() {
       const startupModels = initialProviderModels(value.claudeModelCache, claudeVersionForCache(claudeRuntimeStatusRef.current));
       setProviderModels((current) => ({ ...current, claude: startupModels.claude }));
       setHistory((current) => applyLocalSessionMetadata(current, value));
-      const restored = parseUpdateWorkspaceState(value.workspaceState, currentWorkspace);
+      const restored = parseWorkspaceState(value.workspaceState, currentWorkspace);
       if (!restored) {
         const initial = emptySession("session-1", currentWorkspace, "", "", launchProvider || "codex");
         sessionsRef.current = { "session-1": initial };
@@ -1667,12 +1913,17 @@ export default function App() {
         if (preferencesResult.status === "rejected") {
           updateSession("session-1", (current) => ({ ...current, errorText: "本地偏好读取失败，已使用默认设置。" }));
         }
-        if (Object.keys(asRecord(value.workspaceState)).length) void bridge.savePreferences({ workspaceState: {} }).catch(() => undefined);
+        workspaceStateReadyRef.current = true;
+        setWorkspaceStateReady(true);
+        void ensureProviderInitialized(initial.provider);
         return;
       }
 
       const restoredSessionsBase = restored.truncated
-        ? Object.fromEntries(Object.entries(restored.sessions).map(([id, session]) => [id, { ...session, errorText: "更新恢复数据已按本地大小上限截断，请检查草稿和排队消息。" }]))
+        ? Object.fromEntries(Object.entries(restored.sessions).map(([id, session]) => [id, {
+          ...session,
+          errorText: `会话现场已按本地大小上限截断，请检查草稿和附件。${restored.truncationReasons.length ? ` 原因：${restored.truncationReasons.join("、")}` : ""}`,
+        }]))
         : restored.sessions;
       const preparedRestoredSessions = Object.fromEntries(Object.entries(restoredSessionsBase)
         .map(([id, session]) => [id, withPersistedCompaction(session, preferencesRef.current)]));
@@ -1682,10 +1933,17 @@ export default function App() {
       sessionsRef.current = restoredSessions;
       layoutRef.current = restored.layout;
       draftsRef.current = restored.drafts;
+      const restoredActivePane = restored.layout.panes.find((pane) => pane.id === restored.layout.activePaneId) || restored.layout.panes[0];
+      const restoredActiveWorkspace = restoredActivePane ? restoredSessions[restoredActivePane.activeTabId]?.cwd : "";
+      if (restoredActiveWorkspace) setWorkspace(restoredActiveWorkspace);
       workspaceRestoreIdsRef.current = new Set(restored.threadSessionIds.filter((sessionId) => !authorization.blockedSessionIds.has(sessionId)));
+      workspaceRestoreStoppedIdsRef.current = new Set(restored.stoppedSessionIds);
       setSessions(restoredSessions);
       setLayout(restored.layout);
       if (launchProvider) addSession(currentWorkspace, { provider: launchProvider });
+      const restoredProviders = new Set<AgentProvider>(Object.values(restoredSessions).map((session) => session.provider));
+      if (launchProvider) restoredProviders.add(launchProvider);
+      restoredProviders.forEach((provider) => { void ensureProviderInitialized(provider); });
       setSidebarCollapsed(restored.sidebarCollapsed);
       if (restored.drafts.size) setDraftRevisions(Object.fromEntries([...restored.drafts.keys()].map((sessionId) => [sessionId, 1])));
       workspaceRestoreInProgressRef.current = true;
@@ -1713,17 +1971,11 @@ export default function App() {
               return true;
             });
         }
-        const mergedQueuedMessages = { ...queuedMessagesRef.current };
-        for (const [sessionId, restoredMessages] of Object.entries(nextQueuedMessages)) {
-          const byId = new Map(restoredMessages.map((message) => [message.id, message]));
-          for (const message of mergedQueuedMessages[sessionId] || []) byId.set(message.id, message);
-          mergedQueuedMessages[sessionId] = [...byId.values()].sort((left, right) => (left.sequence ?? Number.MAX_SAFE_INTEGER) - (right.sequence ?? Number.MAX_SAFE_INTEGER));
-        }
         attachmentsRef.current = mergedAttachments;
-        queuedMessagesRef.current = mergedQueuedMessages;
         setAttachments(mergedAttachments);
-        setQueuedMessages(mergedQueuedMessages);
-        if (!authorization.blockedSessionIds.size) await bridge.savePreferences({ workspaceState: {} });
+        for (const [sessionId, restoredMessages] of Object.entries(nextQueuedMessages)) {
+          restoreMessagesToDraft(sessionId, restoredMessages);
+        }
       } catch (error) {
         if (active) {
           setSessions((current) => Object.fromEntries(Object.entries(current).map(([id, session]) => [id, {
@@ -1733,6 +1985,9 @@ export default function App() {
         }
       } finally {
         workspaceRestoreInProgressRef.current = false;
+        if (!active) return;
+        workspaceStateReadyRef.current = true;
+        setWorkspaceStateReady(true);
       }
     }).catch((error) => {
       if (!active) return;
@@ -1743,36 +1998,11 @@ export default function App() {
       initial.errorText = error instanceof Error ? error.message : "本地会话恢复失败，请重新启动软件。";
       sessionsRef.current = { "session-1": initial };
       setSessions({ "session-1": initial });
-      setProviderStartupStates({ codex: "error", claude: "error" });
-    });
-    void initializeProviders({
-      loadCodexModels: async () => {
-        const [value, defaults] = await Promise.all([
-          agentClient.request("codex", "listModels", { limit: 100, includeHidden: false }),
-          bridge.getCodexDefaults().catch(() => EMPTY_CODEX_DEFAULTS),
-        ]);
-        return { value, defaults };
-      },
-      loadCapabilities: (provider) => agentClient.request(provider, "getCapabilities") as Promise<AgentCapabilities>,
-      isActive: () => active,
-      applyCodexModels: ({ value, defaults }) => {
-        setCodexDefaults(defaults);
-        setProviderModels((current) => ({ ...current, codex: ((asRecord(value).data as unknown[]) || []).map((model) => normalizeAgentModel("codex", model)) }));
-      },
-      applyCapabilities: (provider, capabilities) => {
-        setProviderCapabilities((current) => ({ ...current, [provider]: capabilities }));
-        setSessions((current) => Object.fromEntries(Object.entries(current).map(([id, session]) => [id, session.provider === provider ? { ...session, capabilities } : session])));
-      },
-      reportError: (provider, phase, error) => {
-        const providerName = provider === "codex" ? "Codex" : "Claude Code";
-        const phaseName = phase === "models" ? "模型列表" : "能力";
-        const message = error instanceof Error ? `${providerName} ${phaseName}加载失败：${error.message}` : `${providerName} ${phaseName}加载失败。`;
-        setSessions((current) => Object.fromEntries(Object.entries(current).map(([id, session]) => [id, session.provider === provider ? { ...session, errorText: message } : session])));
-      },
-      setProviderState: (provider, state) => setProviderStartupStates((current) => ({ ...current, [provider]: state })),
+      providerStartupStatesRef.current = { codex: "error", claude: "error" };
+      setProviderStartupStates(providerStartupStatesRef.current);
     });
     return () => { active = false; };
-  }, [addSession, agentClient, bridge, updateSession]);
+  }, [addSession, bridge, ensureProviderInitialized, restoreMessagesToDraft, updateSession]);
 
   useEffect(() => {
     if (!workspaceRestoreIdsRef.current.size) return;
@@ -1802,14 +2032,22 @@ export default function App() {
           const preserve = providerEventRef.current?.changedSince(sessionId, readVersion) || { preserveRealtime: false, preserveLifecycle: false };
           updateSession(sessionId, (current) => {
             const persisted = persistedCompaction(preferencesRef.current, current);
-            return hydrateAgentSession(current, current.provider, asRecord(readValue).thread, {
+            const hydrated = hydrateAgentSession(current, current.provider, asRecord(readValue).thread, {
               ...preserve,
               ...(persisted ? { persistedCompactionCount: persisted.count, persistedCompactionEventIds: persisted.eventIds } : {}),
             });
+            return workspaceRestoreStoppedIdsRef.current.has(sessionId) ? {
+              ...hydrated,
+              status: "idle",
+              statusLabel: "任务已停止",
+              activeTurnId: null,
+              startedAt: null,
+              errorText: current.errorText || "上次退出软件时正在执行的任务已停止，请重新发送或继续。",
+            } : hydrated;
           });
           persistCompactionSnapshot(sessionId);
         },
-      }).catch((error) => setError(sessionId, error, "恢复或读取更新前会话失败"));
+      }).catch((error) => setError(sessionId, error, "恢复或读取上次会话失败"));
     }
   }, [persistCompactionSnapshot, providerStartupStates, requestForSession, sessions, setError, updateSession]);
 
@@ -1958,7 +2196,7 @@ export default function App() {
     splitDisabled: layout.panes.length >= 2,
     onChooseWorkspace: chooseWorkspace,
     onOpenPlugins: openPluginPanel,
-    onSplitPane: () => splitPane(layout.activePaneId || "pane-1", 2),
+    onSplitPane: () => splitPane(layout.activePaneId || "pane-1"),
   }), [chooseWorkspace, layout.activePaneId, layout.panes.length, openPluginPanel, providerCapabilities.claude.pluginMarketplace, providerCapabilities.codex.pluginMarketplace, splitPane]);
   const sidebarWorkspace = useMemo<SidebarProps["workspace"]>(() => ({
     viewModel: {
@@ -2163,11 +2401,11 @@ export default function App() {
           </div>)}
         </div>
       </div>
-      <div className="panes-grid" style={{ gridTemplateColumns: layout.panes.length === 3 ? "repeat(3, minmax(0, 1fr))" : layout.panes.length === 2 ? "repeat(2, minmax(0, 1fr))" : "minmax(0, 1fr)" }}>
+      <div className="panes-grid" style={{ gridTemplateColumns: layout.panes.length === 2 ? "repeat(2, minmax(0, 1fr))" : "minmax(0, 1fr)" }}>
         {layout.panes.map(renderPane)}
       </div>
     </div>
-    {pluginPanelOpen ? <Suspense fallback={<div className="plugin-overlay" role="dialog" aria-modal="true" aria-label="正在打开插件市场"><section className="plugin-panel lazy-panel-loading">正在打开插件市场</section></div>}><PluginPanel cwd={activeSession?.cwd || workspace} initialProvider={activeSession?.provider || "codex"} request={requestForPluginPanel} onClose={closePluginPanel} /></Suspense> : null}
+    {pluginPanelOpen ? <Suspense fallback={<div className="plugin-overlay" role="dialog" aria-modal="true" aria-label="正在打开插件市场"><section className="plugin-panel lazy-panel-loading">正在打开插件市场</section></div>}><PluginPanel cwd={activeSession?.cwd || workspace} initialProvider={activeSession?.provider || "codex"} request={requestForPluginPanel} chooseClaudeMarketplaceDirectory={bridge.chooseClaudeMarketplaceDirectory} onClose={closePluginPanel} /></Suspense> : null}
     {tabContextMenu && contextPane ? <div
       className="tab-context-menu"
       role="menu"
@@ -2189,7 +2427,7 @@ export default function App() {
       <button type="button" role="menuitem" disabled={!contextSession} onClick={() => { if (!contextSession) return; void handoffSession(contextSession.id, "codex"); }}><ArrowRight size={14} /><span>交接到 Codex</span></button>
       <button type="button" role="menuitem" disabled={!contextSession} onClick={() => { if (!contextSession) return; void handoffSession(contextSession.id, "claude"); }}><ArrowRight size={14} /><span>交接到 Claude Code</span></button>
       {contextSession?.capabilities.fork !== "unsupported" ? <button type="button" role="menuitem" disabled={!contextSession || contextSession.status === "working" || contextSession.capabilities.fork !== "supported"} onClick={() => { if (!contextSession) return; void forkSession(contextSession.id); }}><GitFork size={14} /><span>创建分支</span></button> : null}
-      {contextSession?.capabilities.delete !== "unsupported" ? <button className="danger" type="button" role="menuitem" disabled={!contextSession || contextSession.capabilities.delete !== "supported"} onClick={() => { if (!contextSession) return; void deleteSession(contextSession.id); }}><Trash2 size={14} /><span>永久删除本机会话</span></button> : null}
+      {contextSession?.capabilities.delete !== "unsupported" ? <button className="danger" type="button" role="menuitem" disabled={!contextSession || sessionHasActiveWork(contextSession) || contextSession.capabilities.delete !== "supported"} onClick={() => { if (!contextSession) return; void deleteSession(contextSession.id); }}><Trash2 size={14} /><span>永久删除本机会话</span></button> : null}
     </div> : null}
     {tabRenameTarget ? <div className="dialog-backdrop" onMouseDown={() => setTabRenameTarget(null)}>
       <form className="rename-dialog" role="dialog" aria-modal="true" aria-labelledby="tab-rename-dialog-title" onMouseDown={(event) => event.stopPropagation()} onSubmit={(event) => { event.preventDefault(); const name = tabRenameName.trim(); if (!name) return; const target = tabRenameTarget; setTabRenameTarget(null); void renameSession(target.sessionId, name); }}>

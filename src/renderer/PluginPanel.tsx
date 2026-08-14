@@ -1,4 +1,4 @@
-import { Check, Download, Package, RefreshCw, Search, Trash2, X } from "lucide-react";
+import { Check, Download, FolderOpen, Package, RefreshCw, Search, Trash2, X } from "lucide-react";
 import { memo, useCallback, useEffect, useMemo, useState } from "react";
 import type { AgentOperation, AgentProvider } from "../shared/agentProtocol";
 import { providerDisplayName } from "../shared/providerMetadata";
@@ -13,6 +13,7 @@ interface Props {
   cwd: string;
   initialProvider: AgentProvider;
   request: PluginRequest;
+  chooseClaudeMarketplaceDirectory: (defaultPath?: string) => Promise<string | null>;
   onClose: () => void;
 }
 
@@ -101,7 +102,7 @@ function parsePluginDetail(value: unknown, fallback: PluginEntry): PluginDetailD
   };
 }
 
-function PluginPanel({ cwd, initialProvider, request, onClose }: Props) {
+function PluginPanel({ cwd, initialProvider, request, chooseClaudeMarketplaceDirectory, onClose }: Props) {
   const [provider, setProvider] = useState<AgentProvider>(initialProvider);
   const [marketplaces, setMarketplaces] = useState<MarketplaceEntry[]>([]);
   const [loading, setLoading] = useState(true);
@@ -173,6 +174,11 @@ function PluginPanel({ cwd, initialProvider, request, onClose }: Props) {
     finally { setBusyId(""); }
   };
 
+  const chooseMarketplaceDirectory = async () => {
+    const selected = await chooseClaudeMarketplaceDirectory(source || cwd);
+    if (selected) setSource(selected);
+  };
+
   const upgradeMarketplace = async (name?: string) => {
     setBusyId(`upgrade:${name || "all"}`); setError("");
     try { await request(provider, "updateMarketplace", { cwd, marketplaceName: name || null }); await load(true); }
@@ -231,7 +237,7 @@ function PluginPanel({ cwd, initialProvider, request, onClose }: Props) {
         <header className="plugin-header"><div><span className="context-kicker">EXTENSIONS</span><h2><Package size={17} />插件市场</h2></div><button className="icon-button" onClick={onClose} title="关闭插件市场" aria-label="关闭插件市场"><X size={17} /></button></header>
         <div className="plugin-provider-tabs" role="tablist" aria-label="插件 Provider">{(["codex", "claude"] as AgentProvider[]).map((value) => <button key={value} role="tab" aria-selected={provider === value} className={provider === value ? "active" : ""} onClick={() => { setProvider(value); setQuery(""); closeDetail(); }}>{providerDisplayName(value)}</button>)}</div>
         <div className="plugin-toolbar"><label className="history-search"><Search size={14} /><input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="搜索插件" /></label><button className="icon-button" onClick={() => void load(true)} disabled={loading} title="刷新插件市场" aria-label="刷新插件市场"><RefreshCw size={14} /></button><button className="request-button secondary marketplace-add-trigger" onClick={() => setSourceOpen((open) => !open)}>添加市场</button></div>
-        {sourceOpen ? <div className="marketplace-add"><input value={source} onChange={(event) => setSource(event.target.value)} placeholder="本地路径或 Git URL" /><button className="request-button primary" disabled={!source.trim() || busyId === "marketplace"} onClick={() => void addMarketplace()}>{busyId === "marketplace" ? "添加中" : "添加"}</button></div> : null}
+        {sourceOpen ? <div className="marketplace-add"><input value={source} onChange={(event) => setSource(event.target.value)} placeholder="本地路径或 Git URL" />{provider === "claude" ? <button className="icon-button" type="button" onClick={() => void chooseMarketplaceDirectory()} title="选择本地市场目录" aria-label="选择本地市场目录"><FolderOpen size={14} /></button> : null}<button className="request-button primary" disabled={!source.trim() || busyId === "marketplace"} onClick={() => void addMarketplace()}>{busyId === "marketplace" ? "添加中" : "添加"}</button></div> : null}
         {error ? <div className="plugin-error" role="alert">{error}</div> : null}
         <div className="plugin-scroll">{loading ? <div className="plugin-empty">正在加载插件市场</div> : filtered.length ? filtered.map((plugin) => <article className="plugin-card" key={`${plugin.marketplace}:${plugin.id}`}>
           <div className="plugin-card-heading"><div className="plugin-mark"><Package size={16} /></div><div className="plugin-copy"><strong>{plugin.name}</strong><span>{plugin.shortDescription}</span></div><span className={`plugin-state ${plugin.installed ? "installed" : ""}`}>{plugin.installed ? <><Check size={11} />已安装</> : "可安装"}</span></div>

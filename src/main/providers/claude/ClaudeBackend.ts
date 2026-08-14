@@ -64,11 +64,11 @@ function validateClaudeMarketplaceName(value: string) {
   return value;
 }
 
-function validateClaudeMarketplaceSource(value: string, cwd: string) {
+function validateClaudeMarketplaceSource(value: string, cwd: string, isAuthorized: (directory: string) => boolean) {
   if (/^(?:https?|git):\/\//i.test(value) || /^git@[^:]+:[^\s]+$/i.test(value) || /^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+(?:#[A-Za-z0-9._/-]+)?$/.test(value)) return value;
   if (/^[.\\/]|^[A-Za-z]:[\\/]/.test(value)) {
     const resolved = canonicalWorkspace(path.resolve(cwd, value));
-    if (!existsSync(resolved) || !isWithinDirectory(resolved, cwd)) throw new Error("Claude 本地插件市场必须位于已授权工作区内。");
+    if (!existsSync(resolved) || (!isWithinDirectory(resolved, cwd) && !isAuthorized(resolved))) throw new Error("请选择本地插件市场目录后再添加。");
     return resolved;
   }
   throw new Error("Claude 插件市场来源格式无效。");
@@ -125,6 +125,7 @@ export class ClaudeBackend implements AgentBackend {
     private readonly credentialsReader: typeof readClaudeCredentials = readClaudeCredentials,
     private readonly gatewayFixtureReader?: () => ClaudeGatewayFixtureConfig | undefined,
     private readonly toolArgumentStallTimeoutMs = DEFAULT_TOOL_ARGUMENT_STALL_TIMEOUT_MS,
+    private readonly isMarketplacePathAuthorized: (directory: string) => boolean = () => false,
   ) {
     this.unsubscribe = runtime.subscribe((event) => this.handleWorkerEvent(event));
   }
@@ -399,7 +400,7 @@ export class ClaudeBackend implements AgentBackend {
           effort: typeof params.effort === "string" ? params.effort : session.effort,
           executablePath: managedClaudePath(),
           ...(env ? { env } : {}),
-          settingSources: credential.source === "settings" ? ["user", "project", "local"] : [],
+          settingSources: ["user", "project", "local"],
           ...(gatewayFixture ? { gatewayFixture } : {}),
         });
       } catch (error) {
@@ -482,7 +483,7 @@ export class ClaudeBackend implements AgentBackend {
         effort: session.effort || undefined,
         executablePath: managedClaudePath(),
         ...(env ? { env } : {}),
-        settingSources: credential.source === "settings" ? ["user", "project", "local"] : [],
+        settingSources: ["user", "project", "local"],
         ...(gatewayFixture ? { gatewayFixture } : {}),
       });
     } finally {
@@ -505,21 +506,21 @@ export class ClaudeBackend implements AgentBackend {
     const source = typeof params.source === "string" ? params.source : undefined;
     if (["details", "install", "uninstall", "update"].includes(operation) && plugin) validateClaudePluginName(plugin);
     if (["marketplaceUpdate", "marketplaceRemove"].includes(operation) && marketplace) validateClaudeMarketplaceName(marketplace);
-    const validatedSource = operation === "marketplaceAdd" && source ? validateClaudeMarketplaceSource(source, cwd) : source;
-    const credential = this.credentialsReader();
-    const env = credential.source === "process" ? credentialEnv(credential) : undefined;
+    const validatedSource = operation === "marketplaceAdd" && source ? validateClaudeMarketplaceSource(source, cwd, this.isMarketplacePathAuthorized) : source;
+    const authorizedLocalMarketplacePath = validatedSource && /^[.\\/]|^[A-Za-z]:[\\/]/.test(validatedSource) && !isWithinDirectory(validatedSource, cwd)
+      ? validatedSource
+      : undefined;
     const result = await this.runtime.request({
       type: "plugin",
       operation,
       cwd,
       executablePath: managedClaudePath(),
-      ...(env ? { env } : {}),
       ...(plugin ? { plugin } : {}),
       ...(marketplace ? { marketplace } : {}),
       ...(validatedSource ? { source: validatedSource } : {}),
+      ...(authorizedLocalMarketplacePath ? { authorizedLocalMarketplacePath } : {}),
       ...(Array.isArray(params.sparsePaths) ? { sparsePaths: params.sparsePaths.filter((entry): entry is string => typeof entry === "string").slice(0, 32) } : {}),
     });
-    if (env) for (const key of Object.keys(env)) delete env[key];
     if (operation !== "install" && operation !== "uninstall" && operation !== "update") return result;
     let reloaded = 0;
     for (const session of this.sessions.values()) {

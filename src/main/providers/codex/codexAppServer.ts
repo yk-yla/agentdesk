@@ -150,12 +150,7 @@ export class CodexAppServer implements CodexBackendRuntime {
     if (this.stopPromise) return this.stopPromise;
     const child = this.child;
     if (!child) return Promise.resolve();
-    const stopping = this.stopChild(child);
-    this.stopPromise = stopping;
-    void stopping.finally(() => {
-      if (this.stopPromise === stopping) this.stopPromise = null;
-    });
-    return stopping;
+    return this.stopRunningChild(child);
   }
 
   private write(message: JsonRpcMessage, child = this.child) {
@@ -217,8 +212,8 @@ export class CodexAppServer implements CodexBackendRuntime {
     const failProtocol = () => {
       if (protocolFailed) return;
       protocolFailed = true;
-      this.publish({ method: "client/error", params: { message: "Codex app-server 返回了超过 16 MB 的单条消息，连接已重置。" } });
-      void this.stopChild(child);
+      this.publish({ method: "client/server-exited", params: { reason: "protocolLimit", message: "Codex app-server 返回了超过 16 MB 的单条消息，连接已重置。" } });
+      void this.stopRunningChild(child);
     };
     child.stdout.setEncoding("utf8");
     child.stdout.on("data", (chunk: string) => {
@@ -289,5 +284,15 @@ export class CodexAppServer implements CodexBackendRuntime {
       forceTimer = setTimeout(() => void this.options.terminateTree(child).finally(finish), APP_SERVER_SHUTDOWN_GRACE_MS);
       try { child.stdin.end(); } catch { void this.options.terminateTree(child).finally(finish); }
     });
+  }
+
+  private stopRunningChild(child: ChildProcessWithoutNullStreams) {
+    if (this.stopPromise) return this.stopPromise;
+    const stopping = this.stopChild(child);
+    this.stopPromise = stopping;
+    void stopping.finally(() => {
+      if (this.stopPromise === stopping) this.stopPromise = null;
+    });
+    return stopping;
   }
 }

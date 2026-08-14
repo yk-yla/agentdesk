@@ -149,20 +149,17 @@ export class LayoutController {
     return [...closed];
   };
 
-  readonly splitPane = (paneId: string, targetCount: 2 | 3) => {
+  readonly splitPane = (paneId: string) => {
     const current = this.state.getLayout();
-    if (current.panes.length >= targetCount) return;
+    if (current.panes.length >= 2) return;
     const pane = current.panes.find((entry) => entry.id === paneId);
     if (!pane) return;
     const sourceSession = this.state.getSession(pane.activeTabId);
     const cwd = sourceSession?.cwd || "";
     const provider = sourceSession?.provider;
-    const additions = Array.from({ length: targetCount - current.panes.length }, () => {
-      const sessionId = this.services.createSession(cwd, provider ? { provider } : undefined);
-      return { id: this.nextPaneId(), tabIds: [sessionId], activeTabId: sessionId };
-    });
-    const lastPaneId = additions[additions.length - 1]?.id;
-    this.state.updateLayout((layout) => ({ ...layout, panes: [...layout.panes, ...additions], activePaneId: lastPaneId || layout.activePaneId }));
+    const sessionId = this.services.createSession(cwd, provider ? { provider } : undefined);
+    const addition = { id: this.nextPaneId(), tabIds: [sessionId], activeTabId: sessionId };
+    this.state.updateLayout((layout) => ({ ...layout, panes: [...layout.panes, addition], activePaneId: addition.id }));
   };
 
   readonly closePane = (paneId: string) => {
@@ -246,7 +243,7 @@ export class LayoutController {
           activePaneId: targetPaneId,
         };
       }
-      if (without.length >= 3) return current;
+      if (without.length >= 2) return current;
       const newPaneId = this.nextPaneId();
       return { ...current, panes: [...without, { id: newPaneId, tabIds: [sessionId], activeTabId: sessionId }], activePaneId: newPaneId, direction: split } as LayoutState;
     });

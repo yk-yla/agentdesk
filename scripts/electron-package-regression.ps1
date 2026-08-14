@@ -21,7 +21,7 @@ $applicationProcess = $null
 $attached = $false
 
 if (-not $PlaywrightWrapper) {
-  $PlaywrightWrapper = Join-Path $env:USERPROFILE ".claude\skills\playwright-cli\scripts\playwright-cli.ps1"
+  $PlaywrightWrapper = Join-Path $repoRoot "scripts\playwright-cli-wrapper.ps1"
 }
 if (-not (Test-Path -LiteralPath $PlaywrightWrapper -PathType Leaf)) {
   throw "找不到 playwright-cli wrapper：$PlaywrightWrapper"

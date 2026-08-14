@@ -33,6 +33,9 @@ interface DesktopIpcServices {
     register(cwd: unknown): Promise<string | null>;
   };
   preferences: PreferenceService;
+  workspaceSnapshot: {
+    complete(requestId: string, workspaceState: JsonObject): unknown;
+  };
   bossKey: {
     status(): unknown;
     change(accelerator: unknown): unknown;
@@ -43,6 +46,7 @@ interface DesktopIpcServices {
     copyImage(dataUrl: unknown): unknown;
     saveTextFile(input: unknown): unknown;
     createHandoff(input: unknown): unknown;
+    chooseClaudeMarketplaceDirectory(defaultPath: unknown): unknown;
     openTerminal(cwd: unknown): unknown;
     readLocalImage(filePath: unknown): unknown;
     openLocalPath(filePath: unknown): unknown;
@@ -106,7 +110,6 @@ export function sanitizePreferencesPatch(value: unknown): Partial<DesktopPrefere
     ...(typeof patch.theme === "string" && normalizeTheme(patch.theme) === patch.theme ? { theme: normalizeTheme(patch.theme) } : {}),
     ...(typeof patch.displayMode === "string" && (patch.displayMode === "simple" || patch.displayMode === "full") ? { displayMode: normalizeDisplayMode(patch.displayMode) } : {}),
     ...(typeof patch.lastWorkspace === "string" ? { lastWorkspace: patch.lastWorkspace } : {}),
-    ...(Array.isArray(patch.recentWorkspaces) ? { recentWorkspaces: patch.recentWorkspaces.filter((item): item is string => typeof item === "string").slice(0, 32) } : {}),
     ...(Array.isArray(patch.favoriteWorkspaces) ? { favoriteWorkspaces: patch.favoriteWorkspaces.filter((item): item is string => typeof item === "string").slice(0, 32) } : {}),
     ...(typeof patch.sidebarWidth === "number" && Number.isFinite(patch.sidebarWidth) ? { sidebarWidth: normalizeSidebarWidth(patch.sidebarWidth) } : {}),
     ...(typeof patch.baseFontSize === "number" && Number.isFinite(patch.baseFontSize) ? { baseFontSize: normalizeBaseFontSize(patch.baseFontSize) } : {}),
@@ -171,6 +174,15 @@ export function validateClientLog(value: unknown) {
   };
 }
 
+export function validateWorkspaceSnapshotSubmission(value: unknown) {
+  const submission = objectRecord(value);
+  const workspaceState = objectRecord(submission?.workspaceState);
+  if (!submission || typeof submission.requestId !== "string" || !/^[A-Za-z0-9-]{1,80}$/.test(submission.requestId) || !workspaceState) {
+    throw new Error("工作区快照响应无效。");
+  }
+  return { requestId: submission.requestId, workspaceState: workspaceState as JsonObject };
+}
+
 export function registerDesktopIpc(ipc: IpcRegistrar, services: DesktopIpcServices) {
   const rawHandle = ipc.handle.bind(ipc);
   ipc = {
@@ -201,6 +213,10 @@ export function registerDesktopIpc(ipc: IpcRegistrar, services: DesktopIpcServic
   ipc.handle("agentdesk:register-workspace", (_event, cwd: unknown) => services.workspace.register(cwd));
   ipc.handle("agentdesk:get-preferences", () => services.preferences.read());
   ipc.handle("agentdesk:save-preferences", (_event, patch: unknown) => services.preferences.write(sanitizePreferencesPatch(patch)));
+  ipc.handle("agentdesk:workspace-snapshot-save", (_event, value: unknown) => {
+    const submission = validateWorkspaceSnapshotSubmission(value);
+    return services.workspaceSnapshot.complete(submission.requestId, submission.workspaceState);
+  });
   ipc.handle("agentdesk:boss-key-status", () => services.bossKey.status());
   ipc.handle("agentdesk:boss-key-set", (_event, accelerator: unknown) => services.bossKey.change(accelerator));
   ipc.handle("agentdesk:get-codex-defaults", () => services.codexDefaults());
@@ -208,6 +224,7 @@ export function registerDesktopIpc(ipc: IpcRegistrar, services: DesktopIpcServic
   ipc.handle("agentdesk:copy-image", (_event, dataUrl: unknown) => services.files.copyImage(dataUrl));
   ipc.handle("agentdesk:save-text-file", (_event, input: unknown) => services.files.saveTextFile(input));
   ipc.handle("agentdesk:create-handoff", (_event, input: unknown) => services.files.createHandoff(input));
+  ipc.handle("agentdesk:choose-claude-marketplace-directory", (_event, defaultPath: unknown) => services.files.chooseClaudeMarketplaceDirectory(defaultPath));
   ipc.handle("agentdesk:open-windows-terminal", (_event, cwd: unknown) => services.files.openTerminal(cwd));
   ipc.handle("agentdesk:read-local-image", (_event, filePath: unknown) => services.files.readLocalImage(filePath));
   ipc.handle("agentdesk:open-local-path", (_event, filePath: unknown) => services.files.openLocalPath(filePath));

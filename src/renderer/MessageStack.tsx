@@ -26,9 +26,10 @@ interface MessageItemProps {
   message: Message;
   bridge: AgentBridge;
   provider: AgentProvider;
+  cwd: string;
 }
 
-function MessageItem({ message, bridge, provider }: MessageItemProps) {
+function MessageItem({ message, bridge, provider, cwd }: MessageItemProps) {
   const [copied, setCopied] = useState(false);
   const formattedTimestamp = formatMessageTimestamp(message.timestamp || 0);
   const showToolbar = message.role !== "system" && Boolean(formattedTimestamp);
@@ -74,6 +75,7 @@ function MessageItem({ message, bridge, provider }: MessageItemProps) {
               copyImage={bridge.copyImage}
               openLocalPath={bridge.openLocalPath}
               openExternal={bridge.openExternal}
+              cwd={cwd}
             />
           </Suspense>
           {message.streaming ? <span className="stream-caret" /> : null}
@@ -132,7 +134,7 @@ function MessageStackBase({ messages, visibleActivities, displayMode, bridge, cw
         return (
           <Fragment key={`${message.id}:${index}`}>
             {divider ? <div className={`message-time-divider ${divider.kind}`}><span>{divider.label}</span></div> : null}
-            <MemoMessageItem message={message} bridge={bridge} provider={provider} />
+            <MemoMessageItem message={message} bridge={bridge} provider={provider} cwd={cwd} />
           </Fragment>
         );
       })}
