@@ -1,14 +1,16 @@
-import { Check, Copy, X } from "lucide-react";
+import { Check, Copy } from "lucide-react";
 import { memo, useEffect, useMemo, useState, type ReactNode } from "react";
 import ReactMarkdown, { type Components } from "react-markdown";
 import remarkGfm from "remark-gfm";
 import type { ImageAttachment } from "./domain";
+import ImageLightbox from "./ImageLightbox";
 
 interface Props {
   text: string;
   images?: ImageAttachment[];
   streaming?: boolean;
   readLocalImage: (path: string) => Promise<string | null>;
+  copyImage: (dataUrl: string) => Promise<void>;
   openLocalPath: (path: string) => Promise<string>;
   openExternal: (url: string) => Promise<void>;
 }
@@ -96,14 +98,8 @@ function CodeBlock({ children }: { children: ReactNode }) {
  * memo + 稳定的 plugins/components 引用：
  * 未变化的历史消息不再随任意状态变化重新执行 Markdown/GFM 解析。
  */
-function MarkdownMessageBase({ text, images = NO_IMAGES, streaming = false, readLocalImage, openLocalPath, openExternal }: Props) {
+function MarkdownMessageBase({ text, images = NO_IMAGES, streaming = false, readLocalImage, copyImage, openLocalPath, openExternal }: Props) {
   const [previewSource, setPreviewSource] = useState<string | null>(null);
-  useEffect(() => {
-    if (!previewSource) return undefined;
-    const closeOnEscape = (event: KeyboardEvent) => { if (event.key === "Escape") setPreviewSource(null); };
-    window.addEventListener("keydown", closeOnEscape);
-    return () => window.removeEventListener("keydown", closeOnEscape);
-  }, [previewSource]);
 
   const components = useMemo<Components>(() => ({
     a: ({ href, children }) => <a href={href} onClick={(event) => { event.preventDefault(); if (href?.startsWith("http://") || href?.startsWith("https://")) void openExternal(href); else if (href) void openLocalPath(localPathFromHref(href)); }}>{children}</a>,
@@ -122,10 +118,7 @@ function MarkdownMessageBase({ text, images = NO_IMAGES, streaming = false, read
       {text ? (streaming
         ? <div className="streaming-plain-text">{text}</div>
         : <ReactMarkdown remarkPlugins={REMARK_PLUGINS} components={components}>{text}</ReactMarkdown>) : null}
-      {previewSource ? <div className="image-lightbox" role="dialog" aria-label="图片预览" onClick={() => setPreviewSource(null)}>
-        <button type="button" className="image-lightbox-close" onClick={() => setPreviewSource(null)} title="关闭预览" aria-label="关闭预览"><X size={19} /></button>
-        <img src={previewSource} alt="放大预览" onClick={(event) => event.stopPropagation()} />
-      </div> : null}
+      {previewSource ? <ImageLightbox source={previewSource} label="图片预览" copyImage={copyImage} onClose={() => setPreviewSource(null)} /> : null}
     </div>
   );
 }

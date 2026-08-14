@@ -239,6 +239,7 @@ export interface CodexBridge {
   getBossKeyStatus(): Promise<BossKeyStatus>;
   setBossKey(accelerator: string): Promise<BossKeyStatus>;
   saveClipboardImage(dataUrl: string, suggestedName?: string): Promise<SavedImage>;
+  copyImage(dataUrl: string): Promise<void>;
   saveTextFile(content: string, suggestedName?: string): Promise<SavedTextFile | null>;
   createHandoffPackage(input: { cwd: string; title: string; threadId: string; content: string }): Promise<HandoffPackage>;
   openWindowsTerminal(cwd: string): Promise<void>;

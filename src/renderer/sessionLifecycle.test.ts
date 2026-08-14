@@ -15,6 +15,7 @@ describe("session lifecycle close", () => {
     assert.deepEqual(calls, ["interrupt", "close"]);
     assert.match(String(result.interruptError), /interrupt failed/);
     assert.equal(result.closeError, undefined);
+    assert.equal(result.fatalError, undefined);
   });
 
   it("always closes resources when waiting for idle times out", async () => {
@@ -42,6 +43,20 @@ describe("session lifecycle close", () => {
     assert.deepEqual(calls, ["close"]);
     assert.equal(result.interruptError, undefined);
     assert.match(String(result.closeError), /close failed/);
+    assert.equal(result.fatalError, result.closeError);
+  });
+
+  it("treats interrupt failure as fatal when there is no backend resource to close", async () => {
+    const interruptError = new Error("interrupt failed");
+    const result = await closeSessionResources({
+      shouldInterrupt: true,
+      shouldClose: false,
+      interrupt: async () => { throw interruptError; },
+      waitForIdle: async () => undefined,
+      close: async () => undefined,
+    });
+
+    assert.equal(result.fatalError, interruptError);
   });
 
   it("supports batch partial success without masking a failed session", async () => {

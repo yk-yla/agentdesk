@@ -6,7 +6,7 @@ import type { AgentBackend } from "../../agent/AgentBackend";
 import type { AgentCapabilities, AgentEventEnvelope, AgentOperation, AgentRequestContext, InteractionRef, PendingInteractionKind, PendingInteractionStatus } from "../../../shared/agentProtocol";
 import type { JsonObject } from "../../../shared/protocol";
 import { credentialEnv, readClaudeCredentials } from "./claudeCredentials";
-import { canonicalWorkspace } from "../../localPathPolicy";
+import { canonicalWorkspace, isWithinDirectory } from "../../localPathPolicy";
 import type { ClaudeGatewayFixtureKind, ClaudeLifecycleFixtureKind, ClaudePluginOperation, ClaudeWorkerEvent } from "./claudeWorkerProtocol";
 import { resolveExecutableFromPath } from "../../executablePath";
 
@@ -64,9 +64,13 @@ function validateClaudeMarketplaceName(value: string) {
   return value;
 }
 
-function validateClaudeMarketplaceSource(value: string) {
+function validateClaudeMarketplaceSource(value: string, cwd: string) {
   if (/^(?:https?|git):\/\//i.test(value) || /^git@[^:]+:[^\s]+$/i.test(value) || /^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+(?:#[A-Za-z0-9._/-]+)?$/.test(value)) return value;
-  if (/^[.\\/]|^[A-Za-z]:[\\/]/.test(value) && !value.includes("..\\..") && !value.includes("../..")) return value;
+  if (/^[.\\/]|^[A-Za-z]:[\\/]/.test(value)) {
+    const resolved = canonicalWorkspace(path.resolve(cwd, value));
+    if (!existsSync(resolved) || !isWithinDirectory(resolved, cwd)) throw new Error("Claude 本地插件市场必须位于已授权工作区内。");
+    return resolved;
+  }
   throw new Error("Claude 插件市场来源格式无效。");
 }
 
@@ -192,6 +196,14 @@ export class ClaudeBackend implements AgentBackend {
   }
 
   async closeSession(context: AgentRequestContext) {
+    return this.closeSessionInternal(context, false);
+  }
+
+  async resetSession(context: AgentRequestContext) {
+    return this.closeSessionInternal(context, true);
+  }
+
+  private async closeSessionInternal(context: AgentRequestContext, releaseBeforeWorkerClose: boolean) {
     const session = this.sessionFor(context);
     if (!session) return;
     this.clearToolTracking(session);
@@ -200,9 +212,10 @@ export class ClaudeBackend implements AgentBackend {
     session.queryGeneration += 1;
     session.queryActive = false;
     session.turnId = null;
+    if (releaseBeforeWorkerClose) this.sessions.delete(session.clientSessionId);
     if (this.runtime.closeSession) await this.runtime.closeSession(session.clientSessionId, queryGeneration);
     else this.runtime.send({ type: "closeSession", sessionId: session.clientSessionId, queryGeneration });
-    this.sessions.delete(session.clientSessionId);
+    if (!releaseBeforeWorkerClose) this.sessions.delete(session.clientSessionId);
   }
 
   async close() {
@@ -406,27 +419,36 @@ export class ClaudeBackend implements AgentBackend {
 
   private async listModels(context: AgentRequestContext) {
     const session = this.requireSession(context);
-    const models = await this.control(session, "models");
+    const queryGeneration = session.queryGeneration;
+    const models = await this.controlAtGeneration(session, queryGeneration, "models");
+    this.assertCurrentQuery(session, queryGeneration);
     return { data: Array.isArray(models) ? models : [] };
   }
 
   private async listSkills(params: JsonObject, context: AgentRequestContext) {
     const session = this.requireSession(context);
-    const commands = await this.control(session, "commands");
+    const queryGeneration = session.queryGeneration;
+    const commands = await this.controlAtGeneration(session, queryGeneration, "commands");
+    this.assertCurrentQuery(session, queryGeneration);
     const cwd = typeof params.cwd === "string" ? params.cwd : session.cwd;
     return { data: [{ cwd, skills: Array.isArray(commands) ? commands : [] }] };
   }
 
   private async updateSessionSettings(params: JsonObject, context: AgentRequestContext) {
     const session = this.requireSession(context);
+    const queryGeneration = session.queryGeneration;
+    const queryWasActive = session.queryActive;
     if (typeof params.model === "string" && params.model) {
-      if (session.queryActive) await this.control(session, "setModel", params.model);
+      if (queryWasActive) await this.controlAtGeneration(session, queryGeneration, "setModel", params.model);
+      this.assertCurrentGeneration(session, queryGeneration, queryWasActive);
       session.model = params.model;
     }
     if (typeof params.effort === "string" && params.effort) {
-      if (session.queryActive) await this.control(session, "setEffort", params.effort);
+      if (queryWasActive) await this.controlAtGeneration(session, queryGeneration, "setEffort", params.effort);
+      this.assertCurrentGeneration(session, queryGeneration, queryWasActive);
       session.effort = params.effort;
     }
+    this.assertCurrentGeneration(session, queryGeneration, queryWasActive);
     this.emit(session, "claude/sessionSettingsUpdated", { nativeSessionId: session.nativeSessionId, model: session.model, effort: session.effort });
     return { ok: true, model: session.model, effort: session.effort };
   }
@@ -483,7 +505,7 @@ export class ClaudeBackend implements AgentBackend {
     const source = typeof params.source === "string" ? params.source : undefined;
     if (["details", "install", "uninstall", "update"].includes(operation) && plugin) validateClaudePluginName(plugin);
     if (["marketplaceUpdate", "marketplaceRemove"].includes(operation) && marketplace) validateClaudeMarketplaceName(marketplace);
-    if (operation === "marketplaceAdd" && source) validateClaudeMarketplaceSource(source);
+    const validatedSource = operation === "marketplaceAdd" && source ? validateClaudeMarketplaceSource(source, cwd) : source;
     const credential = this.credentialsReader();
     const env = credential.source === "process" ? credentialEnv(credential) : undefined;
     const result = await this.runtime.request({
@@ -494,7 +516,7 @@ export class ClaudeBackend implements AgentBackend {
       ...(env ? { env } : {}),
       ...(plugin ? { plugin } : {}),
       ...(marketplace ? { marketplace } : {}),
-      ...(source ? { source } : {}),
+      ...(validatedSource ? { source: validatedSource } : {}),
       ...(Array.isArray(params.sparsePaths) ? { sparsePaths: params.sparsePaths.filter((entry): entry is string => typeof entry === "string").slice(0, 32) } : {}),
     });
     if (env) for (const key of Object.keys(env)) delete env[key];
@@ -502,8 +524,10 @@ export class ClaudeBackend implements AgentBackend {
     let reloaded = 0;
     for (const session of this.sessions.values()) {
       if (session.cwd !== cwd || !session.queryActive) continue;
+      const queryGeneration = session.queryGeneration;
       try {
-        await this.control(session, "reloadPlugins");
+        await this.controlAtGeneration(session, queryGeneration, "reloadPlugins");
+        this.assertCurrentQuery(session, queryGeneration);
         reloaded += 1;
       } catch {
         // 插件管理成功不应因某个旧 Query 不支持热加载而回滚。
@@ -512,8 +536,9 @@ export class ClaudeBackend implements AgentBackend {
     return result && typeof result === "object" && !Array.isArray(result) ? { ...(result as JsonObject), reloaded } : { ok: true, reloaded };
   }
 
-  private async contextUsage(session: ClaudeSession) {
-    const result = await this.control(session, "contextUsage");
+  private async contextUsage(session: ClaudeSession, queryGeneration: number) {
+    const result = await this.controlAtGeneration(session, queryGeneration, "contextUsage");
+    this.assertCurrentQuery(session, queryGeneration);
     const value = result && typeof result === "object" ? result as Record<string, unknown> : {};
     return {
       used: typeof value.totalTokens === "number" && Number.isFinite(value.totalTokens) ? value.totalTokens : 0,
@@ -522,8 +547,28 @@ export class ClaudeBackend implements AgentBackend {
   }
 
   private control(session: ClaudeSession, action: Extract<import("./claudeWorkerProtocol").ClaudeWorkerCommand, { type: "control" }>["action"], value?: string) {
-    if (!session.queryActive) throw new Error("Claude Query 尚未启动，当前能力暂不可用。");
-    return this.runtime.request({ type: "control", sessionId: session.clientSessionId, queryGeneration: session.queryGeneration, action, ...(value ? { value } : {}) });
+    return this.controlAtGeneration(session, session.queryGeneration, action, value);
+  }
+
+  private controlAtGeneration(session: ClaudeSession, queryGeneration: number, action: Extract<import("./claudeWorkerProtocol").ClaudeWorkerCommand, { type: "control" }>["action"], value?: string) {
+    this.assertCurrentQuery(session, queryGeneration);
+    return this.runtime.request({ type: "control", sessionId: session.clientSessionId, queryGeneration, action, ...(value ? { value } : {}) });
+  }
+
+  private assertCurrentGeneration(session: ClaudeSession, queryGeneration: number, requireActive = false) {
+    if (this.sessions.get(session.clientSessionId) !== session
+      || session.queryGeneration !== queryGeneration
+      || (requireActive && !session.queryActive)) throw new Error("Claude Query 已失效。");
+  }
+
+  private assertCurrentQuery(session: ClaudeSession, queryGeneration: number) {
+    this.assertCurrentGeneration(session, queryGeneration, true);
+  }
+
+  private emitForQuery(session: ClaudeSession, queryGeneration: number, type: string, payload: unknown) {
+    if (this.sessions.get(session.clientSessionId) !== session || session.queryGeneration !== queryGeneration || !session.queryActive) return false;
+    this.emit(session, type, payload);
+    return true;
   }
 
   private interruptTurn(context: AgentRequestContext) {
@@ -561,15 +606,16 @@ export class ClaudeBackend implements AgentBackend {
         session.nativeSessionId = event.nativeSessionId;
         this.rememberNativeSession(session.cwd, event.nativeSessionId);
       }
+      const queryGeneration = event.queryGeneration;
       this.emit(session, "claude/ready", { nativeSessionId: event.nativeSessionId || session.nativeSessionId });
-      const emitCapability = (capabilities: Partial<AgentCapabilities>, extra: JsonObject = {}) => this.emit(session, "claude/capabilitiesUpdated", { nativeSessionId: session.nativeSessionId, capabilities, ...extra });
+      const emitCapability = (capabilities: Partial<AgentCapabilities>, extra: JsonObject = {}) => this.emitForQuery(session, queryGeneration, "claude/capabilitiesUpdated", { nativeSessionId: session.nativeSessionId, capabilities, ...extra });
       const unsupported = (error: unknown) => /不受支持|not supported|not a function|不存在/i.test(error instanceof Error ? error.message : String(error));
-      void this.control(session, "models").then((models) => {
+      void this.controlAtGeneration(session, queryGeneration, "models").then((models) => {
         const modelList = Array.isArray(models) ? models : [];
         const hasEffort = modelList.some((entry) => entry && typeof entry === "object" && Array.isArray((entry as Record<string, unknown>).supportedEffortLevels) && ((entry as Record<string, unknown>).supportedEffortLevels as unknown[]).length > 0);
         emitCapability({ models: "supported", effort: hasEffort ? "supported" : "unsupported" }, { models: modelList });
       }).catch((error) => emitCapability({ models: unsupported(error) ? "unsupported" : "temporarilyUnavailable", effort: unsupported(error) ? "unsupported" : "temporarilyUnavailable" }));
-      void this.control(session, "commands").then((commands) => {
+      void this.controlAtGeneration(session, queryGeneration, "commands").then((commands) => {
         const commandList = Array.isArray(commands) ? commands : [];
         const hasCompact = commandList.some((entry) => entry && typeof entry === "object" && (entry as Record<string, unknown>).name === "compact");
         emitCapability({ commands: "supported", compact: hasCompact ? "supported" : "unsupported" }, { commands: commandList });
@@ -577,16 +623,16 @@ export class ClaudeBackend implements AgentBackend {
         const state = unsupported(error) ? "unsupported" : "temporarilyUnavailable";
         emitCapability({ commands: state, compact: state });
       });
-      void this.control(session, "reloadSkills").then(() => emitCapability({ skills: "supported" })).catch((error) => emitCapability({ skills: unsupported(error) ? "unsupported" : "temporarilyUnavailable" }));
-      void this.control(session, "mcp").then(() => emitCapability({ mcp: "supported" })).catch((error) => emitCapability({ mcp: unsupported(error) ? "unsupported" : "temporarilyUnavailable" }));
-      void this.control(session, "reloadPlugins").then(() => emitCapability({ pluginsLoad: "supported" })).catch((error) => emitCapability({ pluginsLoad: unsupported(error) ? "unsupported" : "temporarilyUnavailable" }));
-      void this.control(session, "agents").then(() => emitCapability({ subagents: "supported" })).catch((error) => emitCapability({ subagents: unsupported(error) ? "unsupported" : "temporarilyUnavailable" }));
-      void this.contextUsage(session).then((usage) => {
+      void this.controlAtGeneration(session, queryGeneration, "reloadSkills").then(() => emitCapability({ skills: "supported" })).catch((error) => emitCapability({ skills: unsupported(error) ? "unsupported" : "temporarilyUnavailable" }));
+      void this.controlAtGeneration(session, queryGeneration, "mcp").then(() => emitCapability({ mcp: "supported" })).catch((error) => emitCapability({ mcp: unsupported(error) ? "unsupported" : "temporarilyUnavailable" }));
+      void this.controlAtGeneration(session, queryGeneration, "reloadPlugins").then(() => emitCapability({ pluginsLoad: "supported" })).catch((error) => emitCapability({ pluginsLoad: unsupported(error) ? "unsupported" : "temporarilyUnavailable" }));
+      void this.controlAtGeneration(session, queryGeneration, "agents").then(() => emitCapability({ subagents: "supported" })).catch((error) => emitCapability({ subagents: unsupported(error) ? "unsupported" : "temporarilyUnavailable" }));
+      void this.contextUsage(session, queryGeneration).then((usage) => {
         emitCapability({ contextUsage: "supported" });
-        this.emit(session, "claude/contextUsage", { nativeSessionId: session.nativeSessionId, ...usage });
+        this.emitForQuery(session, queryGeneration, "claude/contextUsage", { nativeSessionId: session.nativeSessionId, ...usage });
       }).catch((error) => {
         emitCapability({ contextUsage: unsupported(error) ? "unsupported" : "temporarilyUnavailable" });
-        this.emit(session, "claude/contextUsageFailed", {
+        this.emitForQuery(session, queryGeneration, "claude/contextUsageFailed", {
           nativeSessionId: session.nativeSessionId,
           phase: "ready",
           message: error instanceof Error ? error.message : String(error),
@@ -616,13 +662,16 @@ export class ClaudeBackend implements AgentBackend {
         session.pendingStart = undefined;
         session.turnId = null;
       }
-      if (payload.type === "result" && session.queryActive) void this.contextUsage(session)
-        .then((usage) => this.emit(session, "claude/contextUsage", { nativeSessionId: session.nativeSessionId, ...usage }))
-        .catch((error) => this.emit(session, "claude/contextUsageFailed", {
+      if (payload.type === "result" && session.queryActive) {
+        const queryGeneration = event.queryGeneration;
+        void this.contextUsage(session, queryGeneration)
+        .then((usage) => this.emitForQuery(session, queryGeneration, "claude/contextUsage", { nativeSessionId: session.nativeSessionId, ...usage }))
+        .catch((error) => this.emitForQuery(session, queryGeneration, "claude/contextUsageFailed", {
           nativeSessionId: session.nativeSessionId,
           phase: "result",
           message: error instanceof Error ? error.message : String(error),
         }));
+      }
       return;
     }
     if (event.type === "interactionPending") {

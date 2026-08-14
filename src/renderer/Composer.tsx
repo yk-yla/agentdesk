@@ -1,8 +1,9 @@
 import { ChevronDown, Clock3, CornerDownRight, FolderOpen, ImagePlus, X } from "lucide-react";
-import { memo, useEffect, useState, type DragEvent, type FormEvent, type KeyboardEvent, type ReactNode } from "react";
+import { memo, useState, type DragEvent, type FormEvent, type KeyboardEvent, type ReactNode } from "react";
 import CommandSuggestions from "./CommandSuggestionMenu";
 import { useCommandSuggestions, type CommandSuggestion, type CommandUsage } from "./commandSuggestions";
 import { type ImageAttachment, type PendingSteerMessage, type QueuedMessage, type SkillOption } from "./domain";
+import ImageLightbox from "./ImageLightbox";
 import type { AgentCapabilities } from "../shared/agentProtocol";
 
 interface Props {
@@ -17,6 +18,7 @@ interface Props {
   pendingSteers: PendingSteerMessage[];
   working: boolean;
   toolbar: ReactNode;
+  copyImage: (dataUrl: string) => Promise<void>;
   getDraft: (sessionId: string) => string;
   onDraftChange: (sessionId: string, value: string) => void;
   onSend: (sessionId: string, text: string, mode?: "submit" | "queue") => void;
@@ -33,7 +35,7 @@ interface Props {
  */
 function ComposerBase({
   sessionId, cwd, threadId, skills, recentCommandUsage, capabilities, attachments, queuedMessages, pendingSteers, working, toolbar,
-  getDraft, onDraftChange, onSend, onCycleEffort, onAddImages, onRemoveImage,
+  copyImage, getDraft, onDraftChange, onSend, onCycleEffort, onAddImages, onRemoveImage,
   onRemoveQueuedMessage, onChooseDirectory,
 }: Props) {
   const [value, setValue] = useState(() => getDraft(sessionId));
@@ -42,13 +44,6 @@ function ComposerBase({
   const [dismissedSuggestionsFor, setDismissedSuggestionsFor] = useState<string | null>(null);
   const { suggestions, selectedIndex, moveSelection, selectIndex } = useCommandSuggestions(value, skills, capabilities, recentCommandUsage);
   const visibleSuggestions = dismissedSuggestionsFor === value ? [] : suggestions;
-
-  useEffect(() => {
-    if (!previewSource) return undefined;
-    const closeOnEscape = (event: globalThis.KeyboardEvent) => { if (event.key === "Escape") setPreviewSource(null); };
-    window.addEventListener("keydown", closeOnEscape);
-    return () => window.removeEventListener("keydown", closeOnEscape);
-  }, [previewSource]);
 
   const update = (next: string) => {
     setValue(next);
@@ -184,10 +179,7 @@ function ComposerBase({
         />
       </form>
       {dragging ? <div className="image-drop-overlay"><ImagePlus size={18} /><span>松开添加图片</span></div> : null}
-      {previewSource ? <div className="image-lightbox" role="dialog" aria-label="待发送图片预览" onClick={() => setPreviewSource(null)}>
-        <button type="button" className="image-lightbox-close" onClick={() => setPreviewSource(null)} title="关闭预览" aria-label="关闭预览"><X size={19} /></button>
-        <img src={previewSource} alt="放大预览" onClick={(event) => event.stopPropagation()} />
-      </div> : null}
+      {previewSource ? <ImageLightbox source={previewSource} label="待发送图片预览" copyImage={copyImage} onClose={() => setPreviewSource(null)} /> : null}
     </div>
   );
 }

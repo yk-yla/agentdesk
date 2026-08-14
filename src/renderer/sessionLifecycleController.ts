@@ -9,6 +9,7 @@ export interface EnsureThreadOptions {
   adopt: (value: unknown) => string;
   isStartTimeout: (error: unknown) => boolean;
   onStartTimeout: () => void;
+  onStartLateTimeout?: () => void | Promise<void>;
 }
 
 export class SessionLifecycleController {
@@ -44,6 +45,7 @@ export class SessionLifecycleController {
       options.adopt,
       options.isStartTimeout,
       options.onStartTimeout,
+      options.onStartLateTimeout,
     );
   }
 

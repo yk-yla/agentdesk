@@ -9,9 +9,17 @@ interface EventWithPreventDefault {
 interface WindowWebContents {
   send(channel: string, payload: unknown): void;
   getURL(): string;
+  reload(): void;
   setWindowOpenHandler(handler: (details: { url: string }) => { action: "deny" }): void;
   on(event: "will-navigate", listener: (event: EventWithPreventDefault, url: string) => void): void;
-  on(event: "before-input-event", listener: (event: EventWithPreventDefault, input: { type: string; control: boolean; alt: boolean; key: string }) => void): void;
+  on(event: "before-input-event", listener: (event: EventWithPreventDefault, input: RendererKeyInput) => void): void;
+}
+
+interface RendererKeyInput {
+  type: string;
+  control: boolean;
+  alt: boolean;
+  key: string;
 }
 
 export interface DesktopWindow {
@@ -53,7 +61,7 @@ export interface WindowLifecycleDependencies {
   createTray(iconPath: string): DesktopTray;
   buildMenu(template: Array<Record<string, unknown>>): unknown;
   shortcuts: ShortcutRegistry;
-  writeBossKey(accelerator: string): void;
+  writeBossKey(accelerator: string): void | Promise<void>;
   openExternal(url: string): Promise<unknown>;
   publish(message: JsonRpcMessage): void;
   appPath(): string;
@@ -85,6 +93,12 @@ export function isSameRendererLocation(currentValue: string, nextValue: string) 
   } catch {
     return false;
   }
+}
+
+export function isRendererReloadShortcut(input: RendererKeyInput) {
+  if (input.type !== "keyDown") return false;
+  const key = input.key.toLowerCase();
+  return key === "f5" || (input.control && key === "r");
 }
 
 export class WindowLifecycle {
@@ -153,6 +167,10 @@ export class WindowLifecycle {
     if (developmentUrl) void window.loadURL(developmentUrl);
     else void window.loadFile(path.join(this.dependencies.appPath(), "build/renderer/index.html"));
     window.webContents.on("before-input-event", (event, input) => {
+      if (isRendererReloadShortcut(input)) {
+        event.preventDefault();
+        return;
+      }
       if (input.type === "keyDown" && input.control && !input.alt && input.key.toLowerCase() === "w") {
         event.preventDefault();
         this.dependencies.publish({ method: "client/close-active-tab", params: {} });
@@ -198,6 +216,17 @@ export class WindowLifecycle {
     this.window.webContents.send(channel, payload);
   }
 
+  reloadRenderer(webContents: unknown) {
+    if (!this.isCurrentRenderer(webContents)) return false;
+    this.window?.webContents.reload();
+    return true;
+  }
+
+  isCurrentRenderer(webContents: unknown) {
+    const window = this.window;
+    return Boolean(!this.quitting && window && !window.isDestroyed() && window.webContents === webContents);
+  }
+
   currentState(): DesktopWindowState {
     return { maximized: Boolean(this.window && !this.window.isDestroyed() && this.window.isMaximized()) };
   }
@@ -230,11 +259,11 @@ export class WindowLifecycle {
     return this.bossKeyState();
   }
 
-  changeBossKey(value: unknown) {
+  async changeBossKey(value: unknown) {
     const accelerator = normalizeBossKeyAccelerator(value);
     if (!accelerator) throw new Error("老板键格式无效，请使用 F1-F24 单键或带 Ctrl、Alt、Shift、Win 的组合键。");
     if (accelerator === this.registeredBossKey && this.dependencies.shortcuts.isRegistered(accelerator)) {
-      this.dependencies.writeBossKey(accelerator);
+      await this.dependencies.writeBossKey(accelerator);
       this.bossKeyStatus = { accelerator, registered: true, message: `老板键 ${accelerator} 已启用。` };
       return this.bossKeyState();
     }
@@ -243,7 +272,7 @@ export class WindowLifecycle {
     }
     const previous = this.registeredBossKey;
     try {
-      this.dependencies.writeBossKey(accelerator);
+      await this.dependencies.writeBossKey(accelerator);
     } catch (error) {
       this.dependencies.shortcuts.unregister(accelerator);
       throw error;

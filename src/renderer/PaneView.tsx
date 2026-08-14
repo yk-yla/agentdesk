@@ -278,6 +278,7 @@ function PaneView(props: PaneViewProps) {
           queuedMessages={props.queuedMessages}
           pendingSteers={props.pendingSteers}
           working={session.status === "working"}
+          copyImage={bridge.copyImage}
           getDraft={props.getDraft}
           onDraftChange={props.onDraftChange}
           onSend={props.onSend}

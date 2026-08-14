@@ -3,7 +3,7 @@ import { existsSync, mkdirSync, readFileSync } from "node:fs";
 import path from "node:path";
 import type { CodexCliUpdateStatus } from "../shared/protocol";
 import { SingleFlight } from "./asyncOperation";
-import { writeTextFileAtomic } from "./atomicFile";
+import { writeTextFileAtomicAsync } from "./atomicFile";
 import { ProcessSupervisor } from "./processSupervisor";
 import { CLI_VERSION_PATTERN, compareVersions } from "./version";
 
@@ -145,7 +145,7 @@ export class CodexCliUpdateManager {
       try {
         const latestVersion = await this.readLatestVersion();
         const checkedAt = Date.now();
-        this.writeCache({ latestVersion, checkedAt });
+        await this.writeCache({ latestVersion, checkedAt });
         this.scheduleCheck(CLI_CHECK_INTERVAL_MS);
         return this.setStatus({
           phase: compareVersions(latestVersion, currentVersion) > 0 ? "available" : "upToDate",
@@ -205,7 +205,7 @@ export class CodexCliUpdateManager {
         if (installedVersion !== latestVersion) throw new Error(`更新后检测到版本 ${installedVersion || "未知"}，不是 ${latestVersion}。`);
         const restartError = await restoreLocalAppServer();
         const checkedAt = Date.now();
-        this.writeCache({ latestVersion: installedVersion, checkedAt });
+        await this.writeCache({ latestVersion: installedVersion, checkedAt });
         if (!this.dependencies.isQuitting()) this.scheduleCheck(CLI_CHECK_INTERVAL_MS);
         const message = restartError
           ? `已更新到 ${installedVersion}，但${restartError}`
@@ -265,9 +265,9 @@ export class CodexCliUpdateManager {
     }
   }
 
-  private writeCache(cache: CodexCliUpdateCache) {
+  private async writeCache(cache: CodexCliUpdateCache) {
     mkdirSync(this.dependencies.userDataPath(), { recursive: true });
-    writeTextFileAtomic(this.cachePath(), JSON.stringify(cache, null, 2));
+    await writeTextFileAtomicAsync(this.cachePath(), JSON.stringify(cache, null, 2));
   }
 
   private readInstalledVersion() {

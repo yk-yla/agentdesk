@@ -2,6 +2,7 @@ import { parentPort } from "node:worker_threads";
 import { randomUUID } from "node:crypto";
 import { spawn } from "node:child_process";
 import { createRequire } from "node:module";
+import { existsSync, realpathSync } from "node:fs";
 import path from "node:path";
 import {
   deleteSession,
@@ -126,10 +127,18 @@ function safeMarketplaceName(value: unknown) {
   return name;
 }
 
-function safeMarketplaceSource(value: unknown) {
+function safeMarketplaceSource(value: unknown, cwd: string) {
   const source = safeCliText(value, "插件市场来源", 2_048);
   if (/^(?:https?|git):\/\//i.test(source) || /^git@[^:]+:[^\s]+$/i.test(source) || /^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+(?:#[A-Za-z0-9._/-]+)?$/.test(source)) return source;
-  if (/^[.\\/]|^[A-Za-z]:[\\/]/.test(source) && !source.includes("..\\..") && !source.includes("../..")) return source;
+  if (/^[.\\/]|^[A-Za-z]:[\\/]/.test(source)) {
+    const root = realpathSync(cwd);
+    const candidate = path.resolve(root, source);
+    if (!existsSync(candidate)) throw new Error("Claude 本地插件市场不存在。");
+    const resolved = realpathSync(candidate);
+    const relative = path.relative(root, resolved);
+    if (relative === ".." || relative.startsWith(`..${path.sep}`) || path.isAbsolute(relative)) throw new Error("Claude 本地插件市场必须位于已授权工作区内。");
+    return resolved;
+  }
   throw new Error("Claude 插件市场来源必须是 HTTP(S)、Git、GitHub 仓库或受控本地路径。");
 }
 
@@ -281,7 +290,7 @@ async function pluginRequest(command: Extract<ClaudeWorkerCommand, { type: "plug
       return { marketplaces: entries.map((item) => { const record = item && typeof item === "object" && !Array.isArray(item) ? item as Record<string, unknown> : {}; return { name: typeof record.name === "string" ? record.name : "未命名市场", path: typeof record.path === "string" ? record.path : "", plugins: [] }; }) };
     }
     case "marketplaceAdd": {
-      const source = safeMarketplaceSource(command.source);
+      const source = safeMarketplaceSource(command.source, command.cwd);
       await runClaudePluginCli(command, ["plugin", "marketplace", "add", "--scope", "user", source]);
       return { ok: true };
     }

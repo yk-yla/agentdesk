@@ -25,7 +25,7 @@ import PaneView from "./PaneView";
 import { appendRawEvent, clearRawEvents } from "./rawEventStore";
 import Sidebar, { type HistoryAction, type SidebarProps } from "./Sidebar";
 import { handoffMarkdown, sessionMarkdown } from "./sessionTools";
-import { createUpdateWorkspaceState, loadSavedImages, parseUpdateWorkspaceState } from "./workspaceState";
+import { authorizeRestoredSessionWorkspaces, createUpdateWorkspaceState, loadSavedImages, parseUpdateWorkspaceState } from "./workspaceState";
 import { SessionSettingsCoordinator } from "./sessionSettingsCoordinator";
 import { recoverProviderSessions } from "./providerRecovery";
 import { SessionLifecycleController } from "./sessionLifecycleController";
@@ -41,6 +41,7 @@ import { installRendererDiagnostics, trackUiEvent } from "./rendererDiagnostics"
 import { initializeProviders, providerCanRestore, type ProviderStartupState } from "./providerInitialization";
 import type { CommandUsage } from "./commandSuggestions";
 import { TurnTelemetry } from "./turnTelemetry";
+import { PreferenceSaveCoordinator } from "./preferenceSaveCoordinator";
 
 const PluginPanel = lazy(() => import("./PluginPanel"));
 
@@ -209,6 +210,7 @@ export default function App() {
   const queuedMessagesRef = useRef(queuedMessages);
   const pendingSteersRef = useRef(pendingSteers);
   const preferencesRef = useRef(preferences);
+  const preferenceSaveCoordinatorRef = useRef(new PreferenceSaveCoordinator());
   const claudeRuntimeStatusRef = useRef(claudeRuntimeStatus);
   const tabContextMenuRef = useRef(tabContextMenu);
   sessionsRef.current = sessions;
@@ -437,7 +439,7 @@ export default function App() {
         await agentClient.request(session.provider, "closeSession", {}, context);
       },
     }).then((result) => {
-      const error = result.closeError ?? result.interruptError;
+      const error = result.fatalError;
       if (!error) return;
       updateSession(sessionId, (current) => ({ ...current, statusLabel: result.closeError ? "关闭失败" : "停止任务失败", errorText: error instanceof Error ? error.message : "关闭会话失败。" }));
       throw error;
@@ -534,9 +536,34 @@ export default function App() {
   }, [closeActiveTab]);
 
   const savePreference = useCallback(async (patch: Partial<DesktopPreferences>) => {
-    const next = await bridge.savePreferences(patch);
-    setPreferences((current) => ({ ...current, ...next }));
-    setHistory((current) => applyLocalSessionMetadata(current, next));
+    const ticket = preferenceSaveCoordinatorRef.current.begin(patch);
+    const previous = preferencesRef.current;
+    const optimistic = { ...previous, ...patch };
+    preferencesRef.current = optimistic;
+    setPreferences((current) => ({ ...current, ...patch }));
+    setHistory((current) => applyLocalSessionMetadata(current, optimistic));
+
+    let next: DesktopPreferences;
+    try {
+      next = await bridge.savePreferences(patch);
+    } catch (error) {
+      // If the write failed and no newer write replaced this field, restore the
+      // last known persisted value before propagating the error to the caller.
+      const rollback = preferenceSaveCoordinatorRef.current.accept(ticket, previous);
+      if (Object.keys(rollback).length) {
+        const merged = { ...preferencesRef.current, ...rollback };
+        preferencesRef.current = merged;
+        setPreferences((current) => ({ ...current, ...rollback }));
+        setHistory((current) => applyLocalSessionMetadata(current, merged));
+      }
+      throw error;
+    }
+    const accepted = preferenceSaveCoordinatorRef.current.accept(ticket, next);
+    if (!Object.keys(accepted).length) return;
+    const merged = { ...preferencesRef.current, ...accepted };
+    preferencesRef.current = merged;
+    setPreferences((current) => ({ ...current, ...accepted }));
+    setHistory((current) => applyLocalSessionMetadata(current, merged));
   }, [bridge]);
 
   const rememberCommandUse = useCallback((key: string) => {
@@ -958,6 +985,7 @@ export default function App() {
             errorText: "不会重复创建会话；服务返回结果后将自动继续。",
           }));
       },
+      onStartLateTimeout: () => requestForSession(sessionId, "closeSession", {}).then(() => undefined),
     });
   }, [adoptStartedThread, requestForSession, updateSession]);
 
@@ -1646,15 +1674,15 @@ export default function App() {
       const restoredSessionsBase = restored.truncated
         ? Object.fromEntries(Object.entries(restored.sessions).map(([id, session]) => [id, { ...session, errorText: "更新恢复数据已按本地大小上限截断，请检查草稿和排队消息。" }]))
         : restored.sessions;
-      const restoredSessions = Object.fromEntries(Object.entries(restoredSessionsBase)
+      const preparedRestoredSessions = Object.fromEntries(Object.entries(restoredSessionsBase)
         .map(([id, session]) => [id, withPersistedCompaction(session, preferencesRef.current)]));
-      await Promise.all([...new Set(Object.values(restoredSessions).map((session) => session.cwd))]
-        .map((cwd) => bridge.registerWorkspace(cwd)));
+      const authorization = await authorizeRestoredSessionWorkspaces(preparedRestoredSessions, (cwd) => bridge.registerWorkspace(cwd));
+      const restoredSessions = authorization.sessions;
       if (!active) return;
       sessionsRef.current = restoredSessions;
       layoutRef.current = restored.layout;
       draftsRef.current = restored.drafts;
-      workspaceRestoreIdsRef.current = new Set(restored.threadSessionIds);
+      workspaceRestoreIdsRef.current = new Set(restored.threadSessionIds.filter((sessionId) => !authorization.blockedSessionIds.has(sessionId)));
       setSessions(restoredSessions);
       setLayout(restored.layout);
       if (launchProvider) addSession(currentWorkspace, { provider: launchProvider });
@@ -1695,7 +1723,7 @@ export default function App() {
         queuedMessagesRef.current = mergedQueuedMessages;
         setAttachments(mergedAttachments);
         setQueuedMessages(mergedQueuedMessages);
-        await bridge.savePreferences({ workspaceState: {} });
+        if (!authorization.blockedSessionIds.size) await bridge.savePreferences({ workspaceState: {} });
       } catch (error) {
         if (active) {
           setSessions((current) => Object.fromEntries(Object.entries(current).map(([id, session]) => [id, {
@@ -1706,6 +1734,16 @@ export default function App() {
       } finally {
         workspaceRestoreInProgressRef.current = false;
       }
+    }).catch((error) => {
+      if (!active) return;
+      const currentWorkspace = workspaceRef.current === "正在连接工作区" ? "" : workspaceRef.current;
+      const initial = emptySession("session-1", currentWorkspace);
+      initial.status = "error";
+      initial.statusLabel = "本地会话恢复失败";
+      initial.errorText = error instanceof Error ? error.message : "本地会话恢复失败，请重新启动软件。";
+      sessionsRef.current = { "session-1": initial };
+      setSessions({ "session-1": initial });
+      setProviderStartupStates({ codex: "error", claude: "error" });
     });
     void initializeProviders({
       loadCodexModels: async () => {

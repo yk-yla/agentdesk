@@ -1,7 +1,7 @@
 import { existsSync, mkdirSync, readFileSync, unlinkSync } from "node:fs";
 import path from "node:path";
 import type { DesktopUpdateStatus } from "../shared/protocol";
-import { writeTextFileAtomic } from "./atomicFile";
+import { writeTextFileAtomicAsync } from "./atomicFile";
 
 const UPDATE_OWNER = "yxb715";
 const UPDATE_REPOSITORY = "agentdesk";
@@ -84,13 +84,13 @@ export class DesktopUpdateManager {
     return status;
   }
 
-  saveToken(token: string) {
+  async saveToken(token: string) {
     const value = token.trim();
     if (value.length < 20 || value.length > 512) throw new Error("GitHub 授权码格式不正确。");
     if (!this.dependencies.storage.isEncryptionAvailable()) throw new Error("当前系统无法安全保存 GitHub 授权码。");
     const filePath = this.authPath();
     mkdirSync(path.dirname(filePath), { recursive: true });
-    writeTextFileAtomic(filePath, JSON.stringify({ encryptedToken: this.dependencies.storage.encryptString(value).toString("base64") }));
+    await writeTextFileAtomicAsync(filePath, JSON.stringify({ encryptedToken: this.dependencies.storage.encryptString(value).toString("base64") }));
     return this.setStatus({ phase: "idle", message: "GitHub 授权已保存。", tokenConfigured: true, availableVersion: undefined, progress: undefined });
   }
 

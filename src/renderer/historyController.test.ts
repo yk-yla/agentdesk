@@ -118,6 +118,21 @@ describe("HistoryController", () => {
     assert.deepEqual(JSON.parse(harness.cursor || "{}"), { codex: "codex-next", claude: "claude-next" });
   });
 
+  it("keeps Claude history when Codex history fails", async () => {
+    const calls: AgentProvider[] = [];
+    const harness = createHarness(async (provider) => {
+      calls.push(provider);
+      if (provider === "codex") throw new Error("codex unavailable");
+      return listValue("claude-thread", provider);
+    });
+
+    harness.controller.loadInitial("D:\\work");
+    await waitFor(() => !harness.loading);
+
+    assert.deepEqual(calls.sort(), ["claude", "codex"]);
+    assert.deepEqual(harness.entries.map((entry) => entry.id), ["claude-thread"]);
+  });
+
   it("ignores pages that finish after the workspace changes", async () => {
     const oldRequest = deferred<unknown>();
     const harness = createHarness(async (provider, _operation, params) => {
@@ -165,7 +180,7 @@ describe("HistoryController", () => {
     const first = harness.controller.refresh();
     const second = harness.controller.refresh();
     assert.equal(first, second);
-    assert.equal(calls, 1);
+    assert.equal(calls, 2);
     pending.resolve(listValue("codex", "codex"));
     await first;
     assert.equal(calls, 2);
@@ -187,6 +202,19 @@ describe("HistoryController", () => {
 
     assert.equal(harness.searchLoading, false);
     assert.deepEqual(harness.searchResults?.map((entry) => entry.id).sort(), ["claude-second", "codex-second"]);
+  });
+
+  it("keeps Claude search results when Codex search fails", async () => {
+    const harness = createHarness(async (provider, operation) => {
+      if (operation !== "searchSessions") return listValue("unused", provider);
+      if (provider === "codex") throw new Error("codex unavailable");
+      return searchValue("claude-result", provider);
+    });
+
+    await harness.controller.search("query");
+
+    assert.equal(harness.searchLoading, false);
+    assert.deepEqual(harness.searchResults?.map((entry) => entry.id), ["claude-result"]);
   });
 
   it("merges later search pages without duplicating an existing thread", async () => {

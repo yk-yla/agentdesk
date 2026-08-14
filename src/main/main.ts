@@ -1,4 +1,4 @@
-import { app, BrowserWindow, dialog, globalShortcut, ipcMain, Menu, net, Notification, safeStorage, shell, Tray, type NotificationConstructorOptions } from "electron";
+import { app, BrowserWindow, clipboard, dialog, globalShortcut, ipcMain, Menu, nativeImage, net, Notification, safeStorage, shell, Tray, type NotificationConstructorOptions } from "electron";
 import { autoUpdater } from "electron-updater";
 import { spawnSync } from "node:child_process";
 import { existsSync, mkdirSync, promises as fsPromises, readFileSync, statSync, writeFileSync } from "node:fs";
@@ -10,7 +10,7 @@ import { parse as parseToml } from "smol-toml";
 import type { CodexDefaults, HandoffPackage, JsonRpcMessage, SavedImage, SavedTextFile } from "../shared/protocol";
 import { createBackendRegistry } from "./agent/backendRegistry";
 import { prepareAgentRequest } from "./agent/requestAdapterRegistry";
-import { writeTextFileAtomic } from "./atomicFile";
+import { writeTextFileAtomicAsync } from "./atomicFile";
 import { DesktopNotificationRetention, normalizeDesktopNotification } from "./desktopNotification";
 import { CoalescingAsyncTask } from "./asyncOperation";
 import { canonicalPath, isExecutableLocalPath, isWithinDirectory } from "./localPathPolicy";
@@ -22,7 +22,6 @@ import { prepareClaudeTurnParams } from "./providers/claude/claudeImageInput";
 import { ClaudeWorkerHost } from "./providers/claude/claudeWorkerHost";
 import { readClaudeCredentials } from "./providers/claude/claudeCredentials";
 import { managedClaudeExecutablePath } from "./providers/claude/claudeUpdater";
-import { trustedThreadWorkspaces } from "./threadWorkspaceAuthorization";
 import { resolveExecutableFromPath } from "./executablePath";
 import { runShutdownSteps, ShutdownCoordinator } from "./shutdownCoordinator";
 import { PreferencesStore } from "./preferencesStore";
@@ -36,6 +35,9 @@ import { FileLogger, logErrorDetails } from "./logger";
 import { launchWindowsTerminal } from "./windowsTerminal";
 import { requestedProviderFromArgs, requestedWorkspaceFromArgs, startupWorkspace } from "./workspaceArgs";
 import { WorkspaceAuthorizationRegistry, type WorkspaceAuthorizationSource } from "./workspaceAuthorizationRegistry";
+import { WorkspaceGrantStore } from "./workspaceGrantStore";
+import { parseClipboardImageDataUrl } from "./clipboardImageData";
+import { isClipboardImageSizeAllowed } from "../shared/imagePolicy";
 
 const MAX_AUTHORIZED_LOCAL_PATHS = 4_096;
 const MAX_AUTHORIZED_WORKSPACE_PATHS = 64;
@@ -71,6 +73,7 @@ function readCodexDefaults(): CodexDefaults {
 }
 
 const preferencesStore = new PreferencesStore(() => path.join(app.getPath("userData"), "preferences.json"));
+const workspaceGrantStore = new WorkspaceGrantStore(() => path.join(app.getPath("userData"), "workspace-grants.json"), MAX_AUTHORIZED_WORKSPACE_PATHS);
 const appLogger = new FileLogger(() => path.join(app.getPath("userData"), "logs"));
 const desktopNotificationRetention = new DesktopNotificationRetention<Notification>();
 
@@ -81,7 +84,7 @@ const windowLifecycle = new WindowLifecycle({
   createTray: (iconPath) => new Tray(iconPath),
   buildMenu: (template) => Menu.buildFromTemplate(template as Electron.MenuItemConstructorOptions[]),
   shortcuts: globalShortcut,
-  writeBossKey: (accelerator) => { preferencesStore.write({ bossKey: accelerator }); },
+  writeBossKey: (accelerator) => preferencesStore.write({ bossKey: accelerator }).then(() => undefined),
   openExternal: (url) => shell.openExternal(url),
   publish: (message) => emitToRenderer(message),
   appPath: () => app.getAppPath(),
@@ -132,11 +135,33 @@ function attachmentsPath() {
 const authorizedLocalPaths = new Set<string>();
 const authorizedClaudeImagePaths = new Set<string>();
 const authorizedWorkspacePaths = new WorkspaceAuthorizationRegistry(MAX_AUTHORIZED_WORKSPACE_PATHS);
+const pendingWorkspaceAuthorizationRequests = new Map<string, Promise<string | null>>();
+let workspaceAuthorizationPromptQueue = Promise.resolve();
 
 function registerAuthorizedWorkspacePath(directory: string, source: WorkspaceAuthorizationSource = "explicit") {
   if (!existingDirectory(directory)) return;
   const resolved = canonicalPath(directory);
   authorizedWorkspacePaths.register(resolved, source);
+}
+
+async function grantAuthorizedWorkspacePath(directory: string) {
+  if (!existingDirectory(directory)) throw new Error("工作区不存在。");
+  const resolved = canonicalPath(directory);
+  await workspaceGrantStore.grant(resolved);
+  authorizedWorkspacePaths.register(resolved, "explicit");
+  return resolved;
+}
+
+function isAuthorizedWorkspacePath(directory: string) {
+  const resolved = canonicalPath(directory);
+  return authorizedWorkspacePaths.paths().some((authorized) => isWithinDirectory(resolved, authorized));
+}
+
+function requireAuthorizedWorkspacePath(directory: string) {
+  const resolved = canonicalPath(directory);
+  if (!existingDirectory(resolved)) throw new Error("工作区不存在。");
+  if (!isAuthorizedWorkspacePath(resolved)) throw new Error("该工作区未获得授权。");
+  return resolved;
 }
 
 function registerAuthorizedLocalPath(filePath: string) {
@@ -172,14 +197,14 @@ function registerAuthorizedImageReferences(value: unknown) {
   const record = value as Record<string, unknown>;
   const type = record.type;
   if ((type === "localImage" || type === "imageView" || type === "imageGeneration") && typeof record.path === "string") {
-    registerAuthorizedLocalPath(record.path);
+    const resolved = canonicalPath(record.path);
+    if (isWithinDirectory(resolved, attachmentsPath()) || isAuthorizedWorkspacePath(resolved)) registerAuthorizedLocalPath(resolved);
   }
-  if (type === "imageGeneration" && typeof record.savedPath === "string") registerAuthorizedLocalPath(record.savedPath);
+  if (type === "imageGeneration" && typeof record.savedPath === "string") {
+    const resolved = canonicalPath(record.savedPath);
+    if (isWithinDirectory(resolved, attachmentsPath()) || isAuthorizedWorkspacePath(resolved)) registerAuthorizedLocalPath(resolved);
+  }
   Object.values(record).forEach(registerAuthorizedImageReferences);
-}
-
-function registerAuthorizedThreadWorkspaces(method: string, payload: unknown) {
-  trustedThreadWorkspaces(method, payload).forEach((directory) => registerAuthorizedWorkspacePath(directory, "provider"));
 }
 
 function isAllowedLocalPath(filePath: string) {
@@ -227,8 +252,30 @@ async function registerWorkspace(cwdValue: unknown) {
   if (typeof cwdValue !== "string") throw new Error("工作区无效。");
   const cwd = canonicalPath(cwdValue);
   if (!existsSync(cwd) || !statSync(cwd).isDirectory()) throw new Error("工作区不存在。");
-  registerAuthorizedWorkspacePath(cwd);
-  return cwd;
+  if (isAuthorizedWorkspacePath(cwd)) return cwd;
+  const pending = pendingWorkspaceAuthorizationRequests.get(cwd);
+  if (pending) return pending;
+  const request = workspaceAuthorizationPromptQueue.then(async () => {
+    if (isAuthorizedWorkspacePath(cwd)) return cwd;
+    const result = await dialog.showMessageBox({
+      type: "question",
+      title: "授权工作区",
+      message: "允许 AgentDesk 访问此工作区吗？",
+      detail: cwd,
+      buttons: ["允许访问", "取消"],
+      defaultId: 1,
+      cancelId: 1,
+      noLink: true,
+    });
+    return result.response === 0 ? grantAuthorizedWorkspacePath(cwd) : null;
+  });
+  workspaceAuthorizationPromptQueue = request.then(() => undefined, () => undefined);
+  pendingWorkspaceAuthorizationRequests.set(cwd, request);
+  try {
+    return await request;
+  } finally {
+    if (pendingWorkspaceAuthorizationRequests.get(cwd) === request) pendingWorkspaceAuthorizationRequests.delete(cwd);
+  }
 }
 
 async function closeClaudeGatewayFixture() {
@@ -330,6 +377,15 @@ function saveClipboardImage(dataUrl: string, suggestedName?: string): SavedImage
   return { path: filePath, dataUrl: `data:${match[1]};base64,${payload.toString("base64")}`, name: path.basename(filePath) };
 }
 
+function copyImageToClipboard(dataUrl: string) {
+  const parsed = parseClipboardImageDataUrl(dataUrl);
+  const image = nativeImage.createFromBuffer(parsed.data);
+  if (image.isEmpty()) throw new Error("无法读取待复制图片。");
+  const size = image.getSize();
+  if (!isClipboardImageSizeAllowed(size.width, size.height)) throw new Error("待复制图片尺寸校验失败。");
+  clipboard.writeImage(image);
+}
+
 function scheduleAttachmentCleanup() {
   const directory = attachmentsPath();
   void attachmentCleanupTask.request(async () => {
@@ -376,8 +432,7 @@ function runLocalCommand(command: string, args: string[], cwd: string) {
 
 function openWindowsTerminal(cwd: string) {
   if (process.platform !== "win32") throw new Error("Windows Terminal 仅支持 Windows。" );
-  const resolved = canonicalPath(cwd);
-  if (!existingDirectory(resolved)) throw new Error("目标目录不存在。" );
+  const resolved = requireAuthorizedWorkspacePath(cwd);
   launchWindowsTerminal(resolved);
 }
 
@@ -421,10 +476,9 @@ async function saveTextFile(content: string, suggestedName?: string): Promise<Sa
   return { path: target };
 }
 
-function createHandoffPackage(input: { cwd: string; title: string; threadId: string; content: string }): HandoffPackage {
+async function createHandoffPackage(input: { cwd: string; title: string; threadId: string; content: string }): Promise<HandoffPackage> {
   if (!input || typeof input.cwd !== "string" || typeof input.content !== "string") throw new Error("交接参数无效。");
-  const cwd = path.resolve(input.cwd);
-  if (!existsSync(cwd) || !statSync(cwd).isDirectory()) throw new Error(`目录不存在：${cwd}`);
+  const cwd = requireAuthorizedWorkspacePath(input.cwd);
   if (input.content.length > 20 * 1024 * 1024) throw new Error("交接内容过大。");
   const directory = path.join(app.getPath("userData"), "handoffs");
   mkdirSync(directory, { recursive: true });
@@ -442,7 +496,7 @@ function createHandoffPackage(input: { cwd: string; title: string; threadId: str
     gitState,
     "```",
   ].join("\n");
-  writeTextFileAtomic(filePath, `${content.trim()}\n`);
+  await writeTextFileAtomicAsync(filePath, `${content.trim()}\n`);
   registerAuthorizedLocalPath(filePath);
   const prompt = `请先读取交接文件：${filePath}\n\n这是从“${input.title || "Codex 会话"}”交接来的任务。请以当前本地代码和 Git 状态为准，确认任务范围后继续完成未完成事项；不要把交接文件当作项目源码修改。`;
   return { path: filePath, prompt };
@@ -490,8 +544,6 @@ const codexAppServer = new CodexAppServer({
   logger: appLogger,
   inspectMessage(message, requestMethod) {
     registerAuthorizedImageReferences(message);
-    if (message.method) registerAuthorizedThreadWorkspaces(message.method, message.params);
-    if (requestMethod && !message.error) registerAuthorizedThreadWorkspaces(requestMethod, message.result);
   },
 });
 
@@ -505,7 +557,7 @@ const claudeWorkerHost = new ClaudeWorkerHost(claudeWorkerPath, {
   reportCleanupFailure: (message) => appLogger.log("error", "claude.worker.cleanup_failed", { message }),
 });
 let claudeBackend: ClaudeBackend;
-const backendManager = createBackendRegistry([new CodexBackend(codexAppServer), (claudeBackend = new ClaudeBackend(claudeWorkerHost, undefined, readClaudeCredentialsForQuery, () => claudeGatewayFixture || claudeLifecycleFixture ? { kind: claudeGatewayFixture?.kind || "offline", ...(claudeGatewayFixture?.timeoutMs ? { timeoutMs: claudeGatewayFixture.timeoutMs } : {}), ...(claudeLifecycleFixture ? { lifecycle: claudeLifecycleFixture } : {}) } : undefined))], appLogger, (cwd) => authorizedWorkspacePaths.has(canonicalPath(cwd)));
+const backendManager = createBackendRegistry([new CodexBackend(codexAppServer), (claudeBackend = new ClaudeBackend(claudeWorkerHost, undefined, readClaudeCredentialsForQuery, () => claudeGatewayFixture || claudeLifecycleFixture ? { kind: claudeGatewayFixture?.kind || "offline", ...(claudeGatewayFixture?.timeoutMs ? { timeoutMs: claudeGatewayFixture.timeoutMs } : {}), ...(claudeLifecycleFixture ? { lifecycle: claudeLifecycleFixture } : {}) } : undefined))], appLogger, (cwd) => isAuthorizedWorkspacePath(cwd));
 
 claudeUpdateManager = new ClaudeUpdateManager({
   appPath: () => app.getAppPath(),
@@ -533,21 +585,24 @@ const hasLock = windowLifecycle.acquireSingleInstance((argv) => {
   const nextWorkspace = requestedWorkspace(argv);
   const nextProvider = requestedProviderFromArgs(argv);
   if (nextWorkspace) {
-    registerAuthorizedWorkspacePath(nextWorkspace);
-    rememberWorkspace(nextWorkspace);
-    emitToRenderer({ method: "client/open-workspace", params: { workspace: nextWorkspace, ...(nextProvider ? { provider: nextProvider } : {}) } });
+    void grantAuthorizedWorkspacePath(nextWorkspace).then(async () => {
+      await rememberWorkspace(nextWorkspace);
+      emitToRenderer({ method: "client/open-workspace", params: { workspace: nextWorkspace, ...(nextProvider ? { provider: nextProvider } : {}) } });
+    }).catch((error) => appLogger.log("error", "workspace.second_instance_failed", logErrorDetails(error)));
   }
 });
 if (hasLock) {
-  app.whenReady().then(() => {
+  app.whenReady().then(async () => {
     appLogger.log("info", "app.started", { version: app.getVersion(), packaged: app.isPackaged, argv: process.argv });
     const explicitWorkspace = requestedWorkspace(process.argv);
     const startupPreferences = preferencesStore.read();
-    const savedWorkspace = existingDirectory(startupPreferences.lastWorkspace);
-    workspacePath = startupWorkspace(explicitWorkspace, savedWorkspace, workspacePath);
     authorizedWorkspacePaths.clear();
-    registerAuthorizedWorkspacePath(workspacePath);
-    rememberWorkspace(workspacePath);
+    workspaceGrantStore.read().reverse().forEach((directory) => registerAuthorizedWorkspacePath(directory));
+    const savedWorkspace = existingDirectory(startupPreferences.lastWorkspace);
+    const authorizedSavedWorkspace = savedWorkspace && isAuthorizedWorkspacePath(savedWorkspace) ? savedWorkspace : null;
+    workspacePath = startupWorkspace(explicitWorkspace, authorizedSavedWorkspace, workspacePath);
+    await grantAuthorizedWorkspacePath(workspacePath);
+    await rememberWorkspace(workspacePath);
     appLogger.log("info", "workspace.selected", { workspace: workspacePath, explicit: Boolean(explicitWorkspace), restored: false });
     registerDesktopIpc(ipcMain, {
       logger: appLogger,
@@ -558,8 +613,8 @@ if (hasLock) {
           const result = await dialog.showOpenDialog({ properties: ["openDirectory"], defaultPath: defaultPath || workspacePath });
           if (result.canceled || !result.filePaths[0]) return null;
           const selected = path.resolve(result.filePaths[0]);
-          registerAuthorizedWorkspacePath(selected);
-          rememberWorkspace(selected);
+          await grantAuthorizedWorkspacePath(selected);
+          await rememberWorkspace(selected);
           return selected;
         },
         register: registerWorkspace,
@@ -575,6 +630,10 @@ if (hasLock) {
           if (!input || typeof input !== "object" || Array.isArray(input) || typeof (input as { dataUrl?: unknown }).dataUrl !== "string") throw new Error("剪贴板图片无效。");
           const value = input as { dataUrl: string; suggestedName?: unknown };
           return saveClipboardImage(value.dataUrl, typeof value.suggestedName === "string" ? value.suggestedName : undefined);
+        },
+        copyImage: (dataUrl) => {
+          if (typeof dataUrl !== "string") throw new Error("待复制图片无效。");
+          copyImageToClipboard(dataUrl);
         },
         saveTextFile: (input) => {
           if (!input || typeof input !== "object" || Array.isArray(input) || typeof (input as { content?: unknown }).content !== "string") throw new Error("导出内容无效。");
@@ -705,8 +764,24 @@ if (hasLock) {
 
 app.on("before-quit", (event) => windowLifecycle.handleBeforeQuit(event, closeAllBackendsForExit, () => codexCliUpdateManager.dispose()));
 
+let rendererRecoveryInFlight = false;
 app.on("render-process-gone", (_event, webContents, details) => {
   appLogger.log("error", "electron.render_process_gone", { webContentsId: webContents.id, details });
+  if (details.reason === "clean-exit" || rendererRecoveryInFlight || !windowLifecycle.isCurrentRenderer(webContents)) return;
+  rendererRecoveryInFlight = true;
+  const reset = backendManager.resetRendererSessions().then(() => "reset" as const).catch((error) => {
+    appLogger.log("error", "electron.renderer_session_reset_failed", logErrorDetails(error));
+    return "failed" as const;
+  });
+  let recoveryTimer: ReturnType<typeof setTimeout> | undefined;
+  const timeout = new Promise<"timeout">((resolve) => { recoveryTimer = setTimeout(() => resolve("timeout"), 5_000); });
+  void Promise.race([reset, timeout]).then((result) => {
+    if (result === "timeout") appLogger.log("warn", "electron.renderer_session_reset_timeout");
+  }).finally(() => {
+    if (recoveryTimer) clearTimeout(recoveryTimer);
+    rendererRecoveryInFlight = false;
+    if (windowLifecycle.reloadRenderer(webContents)) appLogger.log("info", "electron.renderer_reloaded", { webContentsId: webContents.id });
+  });
 });
 
 app.on("child-process-gone", (_event, details) => {

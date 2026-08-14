@@ -1,9 +1,19 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 import { asRecord, emptySession } from "./domain";
-import { createUpdateWorkspaceState, parseUpdateWorkspaceState } from "./workspaceState";
+import { authorizeRestoredSessionWorkspaces, createUpdateWorkspaceState, parseUpdateWorkspaceState } from "./workspaceState";
 
 describe("update workspace state budgets", () => {
+  it("keeps authorized restored sessions and marks only denied workspaces", async () => {
+    const allowed = emptySession("allowed", "C:\\allowed");
+    const denied = emptySession("denied", "C:\\denied");
+    const result = await authorizeRestoredSessionWorkspaces({ allowed, denied }, async (cwd) => cwd.includes("allowed") ? cwd : null);
+    assert.equal(result.sessions.allowed.status, "idle");
+    assert.equal(result.sessions.denied.status, "error");
+    assert.match(result.sessions.denied.errorText, /未获授权/);
+    assert.deepEqual([...result.blockedSessionIds], ["denied"]);
+  });
+
   it("restores each tab with its original Provider", () => {
     const codex = emptySession("codex-session", "C:\\work", "gpt", "medium", "codex");
     const claude = emptySession("claude-session", "C:\\work", "sonnet", "high", "claude");

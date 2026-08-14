@@ -4,7 +4,7 @@ import type { AppLogger } from "../logger";
 import { logErrorDetails } from "../logger";
 import { randomUUID } from "node:crypto";
 import { normalizeFavoriteSessionSummaries } from "../../shared/favoriteSessions";
-import { normalizeBaseFontSize, normalizeClaudeModelCache, normalizeCompactionCounts, normalizeCodexCompactionCounts, normalizeDisplayMode, normalizeLastReasoningEfforts, normalizeModelContextWindows, normalizeSidebarWidth, normalizeTheme } from "../preferencesStore";
+import { normalizeBaseFontSize, normalizeClaudeModelCache, normalizeCompactionCounts, normalizeCodexCompactionCounts, normalizeDisplayMode, normalizeLastReasoningEfforts, normalizeModelContextWindows, normalizeRecentCommandUsage, normalizeSidebarWidth, normalizeTheme } from "../preferencesStore";
 
 const AGENT_PROVIDERS = new Set<AgentProvider>(["codex", "claude"]);
 const AGENT_OPERATIONS = new Set<AgentOperation>([
@@ -21,7 +21,7 @@ interface IpcRegistrar {
 
 interface PreferenceService {
   read(): DesktopPreferences;
-  write(patch: Partial<DesktopPreferences>): DesktopPreferences;
+  write(patch: Partial<DesktopPreferences>): DesktopPreferences | Promise<DesktopPreferences>;
 }
 
 interface DesktopIpcServices {
@@ -40,6 +40,7 @@ interface DesktopIpcServices {
   codexDefaults(): unknown;
   files: {
     saveClipboardImage(input: unknown): unknown;
+    copyImage(dataUrl: unknown): unknown;
     saveTextFile(input: unknown): unknown;
     createHandoff(input: unknown): unknown;
     openTerminal(cwd: unknown): unknown;
@@ -120,6 +121,7 @@ export function sanitizePreferencesPatch(value: unknown): Partial<DesktopPrefere
       return cache ? { claudeModelCache: cache } : {};
     })() : {}),
     ...(objectRecord(patch.lastReasoningEfforts) ? { lastReasoningEfforts: normalizeLastReasoningEfforts(patch.lastReasoningEfforts) } : {}),
+    ...(objectRecord(patch.recentCommandUsage) ? { recentCommandUsage: normalizeRecentCommandUsage(patch.recentCommandUsage) } : {}),
     ...(objectRecord(patch.compactionCounts) ? { compactionCounts: normalizeCompactionCounts(patch.compactionCounts) } : {}),
     ...(objectRecord(patch.codexCompactionCounts) ? { codexCompactionCounts: normalizeCodexCompactionCounts(patch.codexCompactionCounts) } : {}),
     ...(objectRecord(patch.workspaceState) ? { workspaceState: patch.workspaceState as JsonObject } : {}),
@@ -203,6 +205,7 @@ export function registerDesktopIpc(ipc: IpcRegistrar, services: DesktopIpcServic
   ipc.handle("agentdesk:boss-key-set", (_event, accelerator: unknown) => services.bossKey.change(accelerator));
   ipc.handle("agentdesk:get-codex-defaults", () => services.codexDefaults());
   ipc.handle("agentdesk:save-clipboard-image", (_event, input: unknown) => services.files.saveClipboardImage(input));
+  ipc.handle("agentdesk:copy-image", (_event, dataUrl: unknown) => services.files.copyImage(dataUrl));
   ipc.handle("agentdesk:save-text-file", (_event, input: unknown) => services.files.saveTextFile(input));
   ipc.handle("agentdesk:create-handoff", (_event, input: unknown) => services.files.createHandoff(input));
   ipc.handle("agentdesk:open-windows-terminal", (_event, cwd: unknown) => services.files.openTerminal(cwd));

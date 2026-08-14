@@ -42,4 +42,13 @@ describe("ThreadStartCoordinator", () => {
     coordinator.rejectAll(new Error("server exited"));
     await assert.rejects(pending, /server exited/);
   });
+
+  it("rejects a timed-out start when no late response arrives", async () => {
+    const coordinator = new ThreadStartCoordinator(10);
+    const timeout = new Error("timeout");
+    let cleanupCount = 0;
+    const pending = coordinator.start("session-1", async () => { throw timeout; }, () => "", (error) => error === timeout, () => undefined, async () => { cleanupCount += 1; });
+    await assert.rejects(pending, /后台确认超时/);
+    assert.equal(cleanupCount, 1);
+  });
 });

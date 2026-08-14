@@ -36,6 +36,9 @@ const bridge: Omit<CodexBridge, "request" | "respond" | "onMessage"> = {
   saveClipboardImage(dataUrl: string, suggestedName?: string) {
     return ipcRenderer.invoke("agentdesk:save-clipboard-image", { dataUrl, suggestedName });
   },
+  copyImage(dataUrl: string) {
+    return ipcRenderer.invoke("agentdesk:copy-image", dataUrl);
+  },
   saveTextFile(content: string, suggestedName?: string) {
     return ipcRenderer.invoke("agentdesk:save-text-file", { content, suggestedName });
   },
@@ -147,6 +150,7 @@ const agentBridge: AgentBridge = {
   getBossKeyStatus: bridge.getBossKeyStatus,
   setBossKey: bridge.setBossKey,
   saveClipboardImage: bridge.saveClipboardImage,
+  copyImage: bridge.copyImage,
   saveTextFile: bridge.saveTextFile,
   createHandoffPackage: bridge.createHandoffPackage,
   openWindowsTerminal: bridge.openWindowsTerminal,

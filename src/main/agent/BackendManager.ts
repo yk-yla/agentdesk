@@ -85,6 +85,30 @@ export class BackendManager {
     return this.closePromise;
   }
 
+  async resetRendererSessions() {
+    const registrations = this.sessions.rendererSessions();
+    const failures: unknown[] = [];
+    this.sessions.clearRendererSessions();
+    await Promise.all(registrations.map(async ({ provider, context, queryActive }) => {
+      const backend = this.backends.get(provider);
+      if (!backend) return;
+      if (queryActive && context.nativeSessionId) {
+        try {
+          await backend.request("interruptTurn", { threadId: context.nativeSessionId }, context);
+        } catch (error) {
+          failures.push(error);
+        }
+      }
+      try {
+        await (backend.resetSession?.(context) ?? backend.closeSession(context));
+      } catch (error) {
+        failures.push(error);
+      }
+    }));
+    if (failures.length) this.logger?.log("warn", "provider.renderer_session_reset_partial", { count: failures.length });
+    return { reset: registrations.length, failures: failures.length };
+  }
+
   private require(provider: AgentProvider) {
     const backend = this.backends.get(provider);
     if (!backend) throw new Error(`Provider 暂不可用：${provider}`);

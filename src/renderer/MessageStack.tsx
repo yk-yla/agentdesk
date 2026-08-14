@@ -71,6 +71,7 @@ function MessageItem({ message, bridge, provider }: MessageItemProps) {
               images={message.images || EMPTY_IMAGES}
               streaming={message.streaming}
               readLocalImage={bridge.readLocalImage}
+              copyImage={bridge.copyImage}
               openLocalPath={bridge.openLocalPath}
               openExternal={bridge.openExternal}
             />

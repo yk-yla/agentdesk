@@ -49,6 +49,21 @@ describe("BackendManager", () => {
     assert.equal(closes, 0);
   });
 
+  it("releases renderer-owned sessions before a renderer reload", async () => {
+    const manager = new BackendManager();
+    const codex = backend("codex", { thread: { id: "thread-1", cwd: process.cwd() } });
+    let closes = 0;
+    codex.closeSession = async () => { closes += 1; };
+    manager.register(codex);
+    const context = { sessionId: "client-1", canonicalCwd: process.cwd(), queryGeneration: 0 };
+
+    await manager.request("codex", "startSession", { cwd: process.cwd() }, context);
+    assert.deepEqual(await manager.resetRendererSessions(), { reset: 1, failures: 0 });
+    await manager.request("codex", "startSession", { cwd: process.cwd() }, context);
+
+    assert.equal(closes, 1);
+  });
+
   it("closes every provider once and reports partial failures", async () => {
     const manager = new BackendManager();
     let codexCloses = 0;

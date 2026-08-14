@@ -16,6 +16,7 @@ class FakeRuntime implements ClaudeWorkerRuntime {
   readSessionResult: unknown = { info: null, messages: [] };
   failControl = new Set<string>();
   unsupportedControl = new Set<string>();
+  controlWaiters = new Map<string, Promise<unknown>>();
   send(command: ClaudeWorkerCommand) { this.commands.push(command); }
   async request(command: Exclude<ClaudeWorkerCommand, { type: "start" | "send" | "interrupt" | "closeSession" | "testHoldRequests" | "testFatal" | "close" }>) {
     this.requests.push(command);
@@ -31,6 +32,8 @@ class FakeRuntime implements ClaudeWorkerRuntime {
     }
     if (command.type === "searchSessions") return this.searchResult;
     if (command.type === "control") {
+      const waiter = this.controlWaiters.get(command.action);
+      if (waiter) return waiter;
       if (this.unsupportedControl.has(command.action)) throw new Error(`${command.action} is not supported`);
       if (this.failControl.has(command.action)) throw new Error(`${command.action} temporarily unavailable`);
       if (command.action === "models") return [{ value: "claude-test", supportedEffortLevels: ["medium"] }];
@@ -392,6 +395,49 @@ describe("ClaudeBackend", () => {
     const backend = testBackend(runtime);
     const result = await backend.request("searchSessions", { cwd: process.cwd(), searchTerm: "rare", limit: 25, cursor: "0" }, { canonicalCwd: process.cwd() }) as { nextCursor: string };
     assert.equal(result.nextCursor, "100");
+    await backend.close();
+  });
+
+  it("allows local marketplaces only inside the authorized workspace", async (test) => {
+    const workspace = mkdtempSync(path.join(tmpdir(), "agentdesk-claude-marketplace-workspace-"));
+    const outside = mkdtempSync(path.join(tmpdir(), "agentdesk-claude-marketplace-outside-"));
+    test.after(() => rmSync(workspace, { recursive: true, force: true }));
+    test.after(() => rmSync(outside, { recursive: true, force: true }));
+    const marketplace = path.join(workspace, "marketplace");
+    mkdirSync(marketplace);
+    const runtime = new FakeRuntime();
+    const backend = testBackend(runtime);
+
+    await backend.request("addMarketplace", { cwd: workspace, source: marketplace }, { canonicalCwd: workspace });
+    const request = runtime.requests.at(-1) as Extract<ClaudeWorkerCommand, { type: "plugin" }>;
+    assert.equal(request.source, marketplace);
+    await assert.rejects(
+      backend.request("addMarketplace", { cwd: workspace, source: outside }, { canonicalCwd: workspace }),
+      /必须位于已授权工作区内/,
+    );
+    await backend.close();
+  });
+
+  it("drops capability responses from an older Query generation", async () => {
+    const runtime = new FakeRuntime();
+    let resolveModels!: (value: unknown) => void;
+    runtime.controlWaiters.set("models", new Promise((resolve) => { resolveModels = resolve; }));
+    const backend = testBackend(runtime);
+    const events: AgentEventEnvelope[] = [];
+    backend.subscribeEvents((event) => events.push(event));
+    const sessionId = "generation-client";
+    const cwd = process.cwd();
+    await backend.request("startSession", { cwd }, { sessionId, canonicalCwd: cwd });
+    await backend.request("startTurn", { input: [{ type: "text", text: "test" }] }, { sessionId, canonicalCwd: cwd });
+    const start = runtime.commands.at(-1) as Extract<ClaudeWorkerCommand, { type: "start" }>;
+    runtime.listener?.({ type: "ready", sessionId, queryGeneration: start.queryGeneration });
+    await new Promise((resolve) => setImmediate(resolve));
+    await backend.request("compactSession", {}, { sessionId, canonicalCwd: cwd });
+    resolveModels([{ value: "old-model", supportedEffortLevels: [] }]);
+    await new Promise((resolve) => setImmediate(resolve));
+    const staleModels = events.filter((event) => event.type === "claude/capabilitiesUpdated")
+      .some((event) => Array.isArray((event.payload as { models?: unknown[] }).models));
+    assert.equal(staleModels, false);
     await backend.close();
   });
 

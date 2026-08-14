@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
-import { isSafeExternalUrl, isSameRendererLocation, WindowLifecycle, type WindowLifecycleDependencies } from "./windowLifecycle";
+import { isRendererReloadShortcut, isSafeExternalUrl, isSameRendererLocation, WindowLifecycle, type WindowLifecycleDependencies } from "./windowLifecycle";
 
 function createLifecycle(overrides: Partial<WindowLifecycleDependencies> = {}) {
   const registered = new Set<string>();
@@ -45,6 +45,13 @@ describe("WindowLifecycle policies", () => {
     assert.equal(isSameRendererLocation("http://localhost:5173/?a=1", "http://localhost:5173/#next"), true);
     assert.equal(isSameRendererLocation("http://localhost:5173/", "https://example.com/"), false);
     assert.equal(isSameRendererLocation("file:///C:/AgentDesk/index.html", "file:///C:/AgentDesk/index.html#next"), true);
+  });
+
+  it("blocks renderer reload shortcuts", () => {
+    assert.equal(isRendererReloadShortcut({ type: "keyDown", control: false, alt: false, key: "F5" }), true);
+    assert.equal(isRendererReloadShortcut({ type: "keyDown", control: true, alt: false, key: "r" }), true);
+    assert.equal(isRendererReloadShortcut({ type: "keyUp", control: true, alt: false, key: "r" }), false);
+    assert.equal(isRendererReloadShortcut({ type: "keyDown", control: false, alt: false, key: "r" }), false);
   });
 
   it("creates the tray once and configures its restore actions", () => {
@@ -123,14 +130,14 @@ describe("WindowLifecycle policies", () => {
     assert.match(JSON.stringify(messages), /close failed/);
   });
 
-  it("keeps the previous boss key when persistence fails", () => {
+  it("keeps the previous boss key when persistence fails", async () => {
     const { lifecycle, registered } = createLifecycle({
       writeBossKey: (accelerator) => {
         if (accelerator === "Alt+Q") throw new Error("write failed");
       },
     });
     lifecycle.registerBossKey("F2");
-    assert.throws(() => lifecycle.changeBossKey("Alt+Q"), /write failed/);
+    await assert.rejects(() => lifecycle.changeBossKey("Alt+Q"), /write failed/);
     assert.equal(registered.has("F2"), true);
     assert.equal(registered.has("Alt+Q"), false);
   });

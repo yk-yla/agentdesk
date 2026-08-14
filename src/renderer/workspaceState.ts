@@ -50,6 +50,34 @@ export interface RestoredWorkspaceState {
   truncated: boolean;
 }
 
+export async function authorizeRestoredSessionWorkspaces(
+  sessions: Record<string, SessionState>,
+  registerWorkspace: (cwd: string) => Promise<string | null>,
+) {
+  const failures = new Map<string, string>();
+  await Promise.all([...new Set(Object.values(sessions).map((session) => session.cwd))].map(async (cwd) => {
+    try {
+      if (!await registerWorkspace(cwd)) failures.set(cwd, `工作区未获授权：${cwd}`);
+    } catch (error) {
+      failures.set(cwd, error instanceof Error ? error.message : `工作区恢复失败：${cwd}`);
+    }
+  }));
+  if (!failures.size) return { sessions, blockedSessionIds: new Set<string>() };
+  const blockedSessionIds = new Set<string>();
+  const next = Object.fromEntries(Object.entries(sessions).map(([id, session]) => {
+    const failure = failures.get(session.cwd);
+    if (!failure) return [id, session];
+    blockedSessionIds.add(id);
+    return [id, {
+      ...session,
+      status: "error" as const,
+      statusLabel: "工作区未获授权",
+      errorText: `本地会话未恢复：${failure}`,
+    }];
+  }));
+  return { sessions: next, blockedSessionIds };
+}
+
 function stateId(value: unknown) {
   const id = stringValue(value).slice(0, 240);
   return /^[a-z0-9][a-z0-9_-]{0,239}$/i.test(id) ? id : "";

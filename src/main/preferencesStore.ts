@@ -3,7 +3,8 @@ import path from "node:path";
 import { DEFAULT_BASE_FONT_SIZE, MAX_BASE_FONT_SIZE, MIN_BASE_FONT_SIZE, type ClaudeModelCache, type ClaudeModelCacheModel, type CompactionRecord, type DesktopPreferences, type DisplayMode, type ThemeId } from "../shared/protocol";
 import { DEFAULT_BOSS_KEY, normalizeBossKeyAccelerator } from "../shared/bossKey";
 import { normalizeFavoriteSessionSummaries } from "../shared/favoriteSessions";
-import { writeTextFileAtomic } from "./atomicFile";
+import { writeTextFileAtomicAsync } from "./atomicFile";
+import { quarantineCorruptFile } from "./corruptFile";
 
 const MAX_PREFERENCES_BYTES = 4 * 1024 * 1024;
 const MAX_MODEL_CONTEXT_WINDOW_CACHE_ENTRIES = 256;
@@ -178,26 +179,45 @@ export function normalizePreferences(value: unknown): DesktopPreferences {
 }
 
 export class PreferencesStore {
+  private writeQueue: Promise<void> = Promise.resolve();
+
   constructor(private readonly resolvePath: () => string) {}
 
-  read(): DesktopPreferences {
+  private readCurrent() {
+    const filePath = this.resolvePath();
     try {
-      const filePath = this.resolvePath();
-      if (statSync(filePath).size > MAX_PREFERENCES_BYTES) return normalizePreferences({});
+      if (statSync(filePath).size > MAX_PREFERENCES_BYTES) {
+        return { value: normalizePreferences({}), safeToWrite: quarantineCorruptFile(filePath) !== undefined };
+      }
       const parsed = JSON.parse(readFileSync(filePath, "utf8")) as unknown;
-      return normalizePreferences(parsed);
-    } catch {
-      return normalizePreferences({});
+      if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+        return { value: normalizePreferences({}), safeToWrite: quarantineCorruptFile(filePath) !== undefined };
+      }
+      return { value: normalizePreferences(parsed), safeToWrite: true };
+    } catch (error) {
+      const code = error && typeof error === "object" && "code" in error ? error.code : "";
+      if (code === "ENOENT") return { value: normalizePreferences({}), safeToWrite: true };
+      return { value: normalizePreferences({}), safeToWrite: quarantineCorruptFile(filePath) !== undefined };
     }
   }
 
+  read(): DesktopPreferences {
+    return this.readCurrent().value;
+  }
+
   write(patch: Partial<DesktopPreferences>) {
-    const next = normalizePreferences({ ...this.read(), ...patch });
-    const filePath = this.resolvePath();
-    mkdirSync(path.dirname(filePath), { recursive: true });
-    const serialized = JSON.stringify(next, null, 2);
-    if (Buffer.byteLength(serialized, "utf8") > MAX_PREFERENCES_BYTES) throw new Error("本地偏好数据过大，请先减少草稿或排队消息。");
-    writeTextFileAtomic(filePath, serialized);
-    return next;
+    const operation = this.writeQueue.then(async () => {
+      const current = this.readCurrent();
+      if (!current.safeToWrite) throw new Error("本地偏好文件损坏且无法备份，已停止保存以避免覆盖原文件。");
+      const next = normalizePreferences({ ...current.value, ...patch });
+      const filePath = this.resolvePath();
+      mkdirSync(path.dirname(filePath), { recursive: true });
+      const serialized = JSON.stringify(next, null, 2);
+      if (Buffer.byteLength(serialized, "utf8") > MAX_PREFERENCES_BYTES) throw new Error("本地偏好数据过大，请先减少草稿或排队消息。");
+      await writeTextFileAtomicAsync(filePath, serialized);
+      return next;
+    });
+    this.writeQueue = operation.then(() => undefined, () => undefined);
+    return operation;
   }
 }

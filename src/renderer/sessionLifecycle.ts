@@ -9,6 +9,7 @@ export interface CloseSessionResourcesOptions {
 export interface CloseSessionResourcesResult {
   interruptError?: unknown;
   closeError?: unknown;
+  fatalError?: unknown;
 }
 
 export function reuseSessionClose<T>(active: Map<string, Promise<T>>, sessionId: string, create: () => Promise<T>) {
@@ -45,5 +46,10 @@ export async function closeSessionResources(options: CloseSessionResourcesOption
       closeError = error;
     }
   }
-  return { ...(interruptError === undefined ? {} : { interruptError }), ...(closeError === undefined ? {} : { closeError }) };
+  const fatalError = closeError ?? (options.shouldClose ? undefined : interruptError);
+  return {
+    ...(interruptError === undefined ? {} : { interruptError }),
+    ...(closeError === undefined ? {} : { closeError }),
+    ...(fatalError === undefined ? {} : { fatalError }),
+  };
 }

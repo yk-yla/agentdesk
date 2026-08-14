@@ -1,29 +1,30 @@
 import assert from "node:assert/strict";
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { describe, it } from "node:test";
 import { DEFAULT_PREFERENCES, normalizeClaudeModelCache, normalizePreferences, normalizeRecentCommandUsage, PreferencesStore } from "./preferencesStore";
 
-function withStore(run: (store: PreferencesStore, filePath: string) => void) {
+async function withStore(run: (store: PreferencesStore, filePath: string) => void | Promise<void>) {
   const directory = mkdtempSync(path.join(tmpdir(), "agentdesk-preferences-"));
   const filePath = path.join(directory, "preferences.json");
   try {
-    run(new PreferencesStore(() => filePath), filePath);
+    await run(new PreferencesStore(() => filePath), filePath);
   } finally {
     rmSync(directory, { recursive: true, force: true });
   }
 }
 
 describe("PreferencesStore", () => {
-  it("returns independent defaults for missing and malformed files", () => {
-    withStore((store, filePath) => {
+  it("returns independent defaults for missing and malformed files", async () => {
+    await withStore((store, filePath) => {
       const missing = store.read();
       missing.recentWorkspaces.push("mutated");
       assert.deepEqual(store.read(), DEFAULT_PREFERENCES);
 
       writeFileSync(filePath, "{broken", "utf8");
       assert.deepEqual(store.read(), DEFAULT_PREFERENCES);
+      assert.equal(readdirSync(path.dirname(filePath)).some((name) => name.startsWith("preferences.json.corrupt=")), true);
     });
   });
 
@@ -81,7 +82,7 @@ describe("PreferencesStore", () => {
     assert.deepEqual(normalizeRecentCommandUsage({ "command:old": 1, "skill:new": 3, "command:middle": 2, invalid: 4 }), { "skill:new": 3, "command:middle": 2, "command:old": 1 });
   });
 
-  it("accepts only the three supported themes and migrates removed themes", () => {
+  it("accepts only the three supported themes and migrates removed themes", async () => {
     const themes = ["github-light", "modern-dark", "github-dark-dimmed"] as const;
     for (const theme of themes) {
       assert.equal(normalizePreferences({ theme }).theme, theme);
@@ -90,9 +91,9 @@ describe("PreferencesStore", () => {
       assert.equal(normalizePreferences({ theme: removedTheme }).theme, "github-light");
     }
 
-    withStore((store) => {
+    await withStore(async (store) => {
       for (const theme of themes) {
-        store.write({ theme });
+        await store.write({ theme });
         assert.equal(store.read().theme, theme);
       }
     });
@@ -114,10 +115,10 @@ describe("PreferencesStore", () => {
     assert.equal(preferences.claudeModelCache?.models[0]?.id, "sonnet");
   });
 
-  it("merges, validates and atomically persists patches", () => {
-    withStore((store, filePath) => {
-      store.write({ lastWorkspace: "first", theme: "modern-dark", bossKey: "Alt+Q", lastReasoningEfforts: { codex: "xhigh", claude: "high" } });
-      const result = store.write({ lastWorkspace: "second", sidebarWidth: 100, baseFontSize: 13 });
+  it("merges, validates and atomically persists patches", async () => {
+    await withStore(async (store, filePath) => {
+      await store.write({ lastWorkspace: "first", theme: "modern-dark", bossKey: "Alt+Q", lastReasoningEfforts: { codex: "xhigh", claude: "high" } });
+      const result = await store.write({ lastWorkspace: "second", sidebarWidth: 100, baseFontSize: 13 });
 
       assert.equal(result.lastWorkspace, "second");
       assert.equal(result.theme, "modern-dark");
@@ -129,14 +130,38 @@ describe("PreferencesStore", () => {
     });
   });
 
-  it("rejects writes and ignores files above the 4 MB limit", () => {
-    withStore((store, filePath) => {
-      assert.throws(
-        () => store.write({ workspaceState: { draft: "x".repeat(4 * 1024 * 1024) } }),
+  it("quarantines a corrupt file before writing new preferences", async () => {
+    await withStore(async (store, filePath) => {
+      writeFileSync(filePath, "{broken", "utf8");
+      await store.write({ theme: "modern-dark" });
+
+      assert.equal(JSON.parse(readFileSync(filePath, "utf8")).theme, "modern-dark");
+      assert.equal(readdirSync(path.dirname(filePath)).some((name) => name.startsWith("preferences.json.corrupt=")), true);
+    });
+  });
+
+  it("serializes concurrent patches without losing fields", async () => {
+    await withStore(async (store) => {
+      await Promise.all([
+        store.write({ lastWorkspace: "concurrent-workspace" }),
+        store.write({ theme: "modern-dark" }),
+      ]);
+
+      const result = store.read();
+      assert.equal(result.lastWorkspace, "concurrent-workspace");
+      assert.equal(result.theme, "modern-dark");
+    });
+  });
+
+  it("rejects writes and quarantines files above the 4 MB limit", async () => {
+    await withStore(async (store, filePath) => {
+      await assert.rejects(
+        store.write({ workspaceState: { draft: "x".repeat(4 * 1024 * 1024) } }),
         /本地偏好数据过大/,
       );
       writeFileSync(filePath, " ".repeat(4 * 1024 * 1024 + 1), "utf8");
       assert.deepEqual(store.read(), DEFAULT_PREFERENCES);
+      assert.equal(readdirSync(path.dirname(filePath)).some((name) => name.startsWith("preferences.json.corrupt=")), true);
     });
   });
 });

@@ -53,7 +53,7 @@ describe("DesktopUpdateManager", () => {
   });
 
   it("keeps check, download and install as separate user actions", async () => withManager(async (manager, updater) => {
-    manager.saveToken("github-token-with-enough-length");
+    await manager.saveToken("github-token-with-enough-length");
     assert.equal((await manager.check()).phase, "available");
     assert.equal(updater.autoDownload, false);
     assert.equal((await manager.download()).phase, "downloaded");

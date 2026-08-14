@@ -107,6 +107,14 @@ export class HistoryController {
     this.state.mergeEntries(applyLocalSessionMetadata(entries, this.services.getPreferences()));
   }
 
+  private logProviderFailure(provider: AgentProvider, operation: "listSessions" | "searchSessions", error: unknown) {
+    this.services.log?.("warn", "renderer.history_provider.failed", {
+      provider,
+      operation,
+      error: error instanceof Error ? { name: error.name, message: error.message, stack: error.stack } : { message: String(error) },
+    });
+  }
+
   private async fetchProvider(provider: AgentProvider, cursor: string | null, maxPages: number, onPage: (entries: HistoryThread[]) => void) {
     let nextCursor = cursor;
     for (let page = 0; page < maxPages; page += 1) {
@@ -126,9 +134,21 @@ export class HistoryController {
   private async fetchMerged(cursor: string | null, maxPages: number, onPage: (entries: HistoryThread[]) => void) {
     const decoded = decodeHistoryCursor(cursor);
     const next = { ...decoded };
-    for (const provider of ["codex", "claude"] as const) {
-      next[provider] = await this.fetchProvider(provider, decoded[provider], maxPages, onPage);
+    const providers = (["codex", "claude"] as const).filter((provider) => cursor === null || decoded[provider] !== null);
+    const results = await Promise.allSettled(providers.map((provider) => this.fetchProvider(provider, decoded[provider], maxPages, onPage)));
+    let firstError: unknown;
+    let successCount = 0;
+    for (const [index, result] of results.entries()) {
+      const provider = providers[index];
+      if (result.status === "fulfilled") {
+        next[provider] = result.value;
+        successCount += 1;
+      } else {
+        firstError ??= result.reason;
+        this.logProviderFailure(provider, "listSessions", result.reason);
+      }
     }
+    if (!successCount && firstError !== undefined) throw firstError;
     return encodeHistoryCursor(next);
   }
 
@@ -210,10 +230,18 @@ export class HistoryController {
   private async searchPage(cursor: string | null) {
     const cursors = decodeHistoryCursor(cursor);
     const providers = (["codex", "claude"] as const).filter((provider) => cursor === null || cursors[provider] !== null);
-    const values = await Promise.all(providers.map(async (provider) => ({
-      provider,
-      value: await this.services.request(provider, "searchSessions", this.searchParams(provider, cursors[provider])),
-    })));
+    const results = await Promise.allSettled(providers.map((provider) => this.services.request(provider, "searchSessions", this.searchParams(provider, cursors[provider]))));
+    const values: Array<{ provider: AgentProvider; value: unknown }> = [];
+    let firstError: unknown;
+    for (const [index, result] of results.entries()) {
+      const provider = providers[index];
+      if (result.status === "fulfilled") values.push({ provider, value: result.value });
+      else {
+        firstError ??= result.reason;
+        this.logProviderFailure(provider, "searchSessions", result.reason);
+      }
+    }
+    if (!values.length && firstError !== undefined) throw firstError;
     const next = { ...cursors };
     for (const { provider, value } of values) {
       const cursorValue = asRecord(value).nextCursor;

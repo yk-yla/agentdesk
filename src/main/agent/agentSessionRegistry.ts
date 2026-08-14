@@ -11,6 +11,12 @@ interface RegisteredSession {
   queryActive: boolean;
 }
 
+export interface RendererSessionRegistration {
+  provider: AgentProvider;
+  context: AgentRequestContext;
+  queryActive: boolean;
+}
+
 interface RegisteredInteraction {
   provider: AgentProvider;
   sessionId: string;
@@ -275,6 +281,23 @@ export class AgentSessionRegistry {
     for (const session of [...this.sessions.values()]) if (session.provider === provider) this.releaseSession(session.clientSessionId);
     for (const [sessionId, grant] of this.closedSessions) if (grant.provider === provider) this.closedSessions.delete(sessionId);
     for (const key of this.knownNativeSessions.keys()) if (key.startsWith(`${provider}\u0000`)) this.knownNativeSessions.delete(key);
+  }
+
+  rendererSessions(): RendererSessionRegistration[] {
+    return [...this.sessions.values()].map((session) => ({
+      provider: session.provider,
+      context: {
+        sessionId: session.clientSessionId,
+        canonicalCwd: session.canonicalCwd,
+        ...(session.nativeSessionId ? { nativeSessionId: session.nativeSessionId } : {}),
+        queryGeneration: session.queryGeneration,
+      },
+      queryActive: session.queryActive,
+    }));
+  }
+
+  clearRendererSessions() {
+    for (const sessionId of [...this.sessions.keys()]) this.releaseSession(sessionId);
   }
 
   private rememberListedSessions(provider: AgentProvider, result: unknown, fallbackCwd?: string) {

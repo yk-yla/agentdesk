@@ -3,7 +3,7 @@ import { existsSync, mkdtempSync, readFileSync, renameSync, rmSync, unlinkSync, 
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { describe, it } from "node:test";
-import { writeTextFileAtomic } from "./atomicFile";
+import { writeTextFileAtomic, writeTextFileAtomicAsync } from "./atomicFile";
 
 describe("atomic text file writes", () => {
   it("replaces an existing file without leaving a temporary file", () => {
@@ -39,13 +39,36 @@ describe("atomic text file writes", () => {
     }
   });
 
-  it("retries transient Windows file locks before failing the write", () => {
+  it("does not block the main thread on a transient Windows file lock", () => {
     const directory = mkdtempSync(path.join(tmpdir(), "codex-atomic-retry-"));
     try {
       const target = path.join(directory, "preferences.json");
       let attempts = 0;
       writeFileSync(target, "old", "utf8");
-      writeTextFileAtomic(target, "new", {
+      assert.throws(() => writeTextFileAtomic(target, "new", {
+        write: writeFileSync,
+        rename: (source, destination) => {
+          attempts += 1;
+          const error = new Error("simulated Windows lock") as NodeJS.ErrnoException;
+          error.code = "EPERM";
+          throw error;
+        },
+        unlink: unlinkSync,
+      }), /simulated Windows lock/);
+      assert.equal(attempts, 1);
+      assert.equal(readFileSync(target, "utf8"), "old");
+    } finally {
+      rmSync(directory, { recursive: true, force: true });
+    }
+  });
+
+  it("retries transient Windows file locks asynchronously", async () => {
+    const directory = mkdtempSync(path.join(tmpdir(), "codex-atomic-async-retry-"));
+    try {
+      const target = path.join(directory, "preferences.json");
+      let attempts = 0;
+      writeFileSync(target, "old", "utf8");
+      await writeTextFileAtomicAsync(target, "new", {
         write: writeFileSync,
         rename: (source, destination) => {
           attempts += 1;
