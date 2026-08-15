@@ -44,6 +44,7 @@ export interface PaneViewProps {
   onStartGoal: (sessionId: string, objective: string) => void;
   onStopGoal: (sessionId: string) => void;
   onClearError: (sessionId: string) => void;
+  onRetryReadOnly: (sessionId: string) => void;
   onRespondApproval: (sessionId: string, result: JsonObject) => void;
   onInterrupt: (sessionId: string) => void;
   getDraft: (sessionId: string) => string;
@@ -191,7 +192,7 @@ function PaneView(props: PaneViewProps) {
       aria-label="选择模型"
       className="select-control model-select"
       title={model ? `${model.displayName}${session.resolvedModel ? ` · 实际 ${session.resolvedModel}` : ""}` : session.model}
-      disabled={!supports("models")}
+      disabled={!supports("models") || session.readOnly}
     >
       {models.length ? models.map((entry) => <option value={entry.id} key={entry.id}>{entry.displayName}</option>) : <option value="">加载模型</option>}
     </select> : null}
@@ -201,20 +202,20 @@ function PaneView(props: PaneViewProps) {
       aria-label="选择思考等级"
       className="select-control effort-select"
       title={`思考等级：${session.effort}`}
-      disabled={!supports("effort")}
+      disabled={!supports("effort") || session.readOnly}
     >
       {efforts.map((effort) => <option value={effort} key={effort}>{effort}</option>)}
     </select> : null}
     {session.capabilities.contextUsage !== "unsupported" ? <span className="context-usage" title={temporarilyUnavailable("contextUsage") ? "发送首条消息后查询上下文用量" : "最近一次上下文用量"}>{formatCount(session.tokenUsage.used)}/{session.tokenUsage.total ? formatCount(session.tokenUsage.total) : "?"}</span> : null}
-    {session.capabilities.compact !== "unsupported" ? <button className="compact-count" disabled={!supports("compact")} onClick={() => props.onCompact(session.id)} title={temporarilyUnavailable("compact") ? "发送首条消息后可压缩上下文" : "手动压缩上下文"}>压缩 {session.compactionCount}</button> : null}
+    {session.capabilities.compact !== "unsupported" ? <button className="compact-count" disabled={!supports("compact") || session.readOnly} onClick={() => props.onCompact(session.id)} title={temporarilyUnavailable("compact") ? "发送首条消息后可压缩上下文" : "手动压缩上下文"}>压缩 {session.compactionCount}</button> : null}
     <button className={`detail-toggle ${session.detailsOpen ? "selected" : ""}`} onClick={() => props.onToggleDetails(session.id)} title="查看详情"><PanelRight size={15} /><span>详情</span></button>
     <details ref={composerMoreRef} className="composer-more">
       <summary title="更多会话操作" aria-label="更多会话操作"><MoreHorizontal size={16} /></summary>
       <div className="composer-more-menu">
         {session.capabilities.contextUsage !== "unsupported" ? <span className="composer-more-status">上下文 {formatCount(session.tokenUsage.used)}/{session.tokenUsage.total ? formatCount(session.tokenUsage.total) : "?"}</span> : null}
-        <button type="button" className={session.collaborationMode === "default" ? "selected" : ""} onClick={(event) => { props.onSetCollaborationMode(session.id, "default"); event.currentTarget.closest("details")?.removeAttribute("open"); }}><Play size={14} /><span>执行模式</span></button>
-        {supports("plans") ? <button type="button" className={session.collaborationMode === "plan" ? "selected" : ""} onClick={(event) => { props.onSetCollaborationMode(session.id, "plan"); event.currentTarget.closest("details")?.removeAttribute("open"); }}><ListChecks size={14} /><span>计划模式</span></button> : null}
-        {session.capabilities.compact !== "unsupported" ? <button type="button" disabled={!supports("compact")} onClick={(event) => { props.onCompact(session.id); event.currentTarget.closest("details")?.removeAttribute("open"); }}><RefreshCw size={14} /><span>压缩上下文 ({session.compactionCount})</span></button> : null}
+        <button type="button" disabled={session.readOnly} className={session.collaborationMode === "default" ? "selected" : ""} onClick={(event) => { props.onSetCollaborationMode(session.id, "default"); event.currentTarget.closest("details")?.removeAttribute("open"); }}><Play size={14} /><span>执行模式</span></button>
+        {supports("plans") ? <button type="button" disabled={session.readOnly} className={session.collaborationMode === "plan" ? "selected" : ""} onClick={(event) => { props.onSetCollaborationMode(session.id, "plan"); event.currentTarget.closest("details")?.removeAttribute("open"); }}><ListChecks size={14} /><span>计划模式</span></button> : null}
+        {session.capabilities.compact !== "unsupported" ? <button type="button" disabled={!supports("compact") || session.readOnly} onClick={(event) => { props.onCompact(session.id); event.currentTarget.closest("details")?.removeAttribute("open"); }}><RefreshCw size={14} /><span>压缩上下文 ({session.compactionCount})</span></button> : null}
         <button type="button" className={session.detailsOpen ? "selected" : ""} onClick={(event) => { props.onToggleDetails(session.id); event.currentTarget.closest("details")?.removeAttribute("open"); }}><PanelRight size={14} /><span>详情</span></button>
         {supports("goals") ? <button type="button" className={session.detailsOpen && session.detailView === "goal" ? "selected" : ""} onClick={(event) => { if (!session.detailsOpen) props.onToggleDetails(session.id); props.onSetDetailView(session.id, "goal"); event.currentTarget.closest("details")?.removeAttribute("open"); }}><Target size={14} /><span>目标</span></button> : null}
       </div>
@@ -222,7 +223,7 @@ function PaneView(props: PaneViewProps) {
   </div>, [
     efforts, model?.displayName, models, props.onCompact, props.onSetCollaborationMode, props.onSetDetailView,
     props.onSetSessionSetting, props.onToggleDetails, session.collaborationMode,
-    session.compactionCount, session.detailView, session.detailsOpen, session.effort, session.id, session.model,
+    session.compactionCount, session.detailView, session.detailsOpen, session.effort, session.id, session.model, session.readOnly,
     session.tokenUsage.total, session.tokenUsage.used,
   ]);
 
@@ -263,10 +264,11 @@ function PaneView(props: PaneViewProps) {
       </div>
 
       <div className="composer-area">
-        {session.errorText ? <div className="error-banner" role="alert"><CircleDot size={15} /><span>{session.errorText}</span><button className="bare-button" onClick={() => props.onClearError(session.id)} title="关闭" aria-label="关闭错误提示"><X size={14} /></button></div> : null}
-        {session.pendingApprovals[0] ? <div className="server-request-wrap"><ServerRequestPanel request={session.pendingApprovals[0]} bridge={bridge} onRespond={(result) => props.onRespondApproval(session.id, result)} />{session.pendingApprovals.length > 1 ? <span className="server-request-count">另有 {session.pendingApprovals.length - 1} 个请求等待处理</span> : null}</div> : null}
-        {session.status === "working" ? <div className={`working-strip${session.retryState ? " retrying" : ""}`}>{session.retryState ? <RefreshCw className="retry-icon spin" size={14} /> : <span className="working-dot" />}<div className="working-copy"><span>{session.retryState ? `正在重试… 第 ${session.retryState.attempt} 次` : session.statusLabel} (<ElapsedTimer startedAt={session.startedAt} /> · Esc 停止)</span></div><button className="stop-button" onClick={() => props.onInterrupt(session.id)} title="停止任务"><Square size={13} fill="currentColor" /><span>停止</span></button>{session.retryState ? <span className="retry-detail"><CornerDownRight size={12} />{session.retryState.message}{session.retryState.additionalDetails ? `：${session.retryState.additionalDetails}` : ""}</span> : null}</div> : null}
-        <Composer
+        {session.readOnly ? <div className="read-only-banner" role="status"><CircleDot size={15} /><span>该会话正被其他程序使用，当前为只读模式。</span><button type="button" onClick={() => props.onToggleDetails(session.id)}>{session.detailsOpen ? "关闭详情" : "查看详情"}</button><button type="button" onClick={() => props.onRetryReadOnly(session.id)}>重新尝试编辑</button></div> : null}
+        {!session.readOnly && session.errorText ? <div className="error-banner" role="alert"><CircleDot size={15} /><span>{session.errorText}</span><button className="bare-button" onClick={() => props.onClearError(session.id)} title="关闭" aria-label="关闭错误提示"><X size={14} /></button></div> : null}
+        {session.pendingApprovals[0] && !session.readOnly ? <div className="server-request-wrap"><ServerRequestPanel request={session.pendingApprovals[0]} bridge={bridge} onRespond={(result) => props.onRespondApproval(session.id, result)} />{session.pendingApprovals.length > 1 ? <span className="server-request-count">另有 {session.pendingApprovals.length - 1} 个请求等待处理</span> : null}</div> : null}
+        {session.status === "working" ? <div className={`working-strip${session.retryState ? " retrying" : ""}${session.readOnly ? " read-only-working" : ""}`}>{session.retryState && !session.readOnly ? <RefreshCw className="retry-icon spin" size={14} /> : <span className="working-dot" />}<div className="working-copy"><span>{session.readOnly ? "其他程序正在执行此会话" : session.retryState ? `正在重试… 第 ${session.retryState.attempt} 次` : session.statusLabel}{!session.readOnly ? ` (<ElapsedTimer startedAt={session.startedAt} /> · Esc 停止)` : null}</span></div>{!session.readOnly ? <button className="stop-button" onClick={() => props.onInterrupt(session.id)} title="停止任务"><Square size={13} fill="currentColor" /><span>停止</span></button> : null}{session.retryState && !session.readOnly ? <span className="retry-detail"><CornerDownRight size={12} />{session.retryState.message}{session.retryState.additionalDetails ? `：${session.retryState.additionalDetails}` : ""}</span> : null}</div> : null}
+        {!session.readOnly ? <Composer
           key={`${session.id}-${props.draftRevision}`}
           sessionId={session.id}
           cwd={session.cwd}
@@ -288,7 +290,7 @@ function PaneView(props: PaneViewProps) {
           onRemoveQueuedMessage={props.onRemoveQueuedMessage}
           onChooseDirectory={props.onChooseDirectory}
           toolbar={composerToolbar}
-        />
+        /> : null}
       </div>
 
       {session.detailsOpen ? (
@@ -307,6 +309,7 @@ function PaneView(props: PaneViewProps) {
             subagents={session.subagents}
             capabilities={session.capabilities}
             working={session.status === "working"}
+            readOnly={Boolean(session.readOnly)}
             onStartGoal={props.onStartGoal}
             onStopGoal={props.onStopGoal}
           />

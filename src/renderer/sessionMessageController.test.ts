@@ -80,6 +80,32 @@ function message(id: string, text: string, queueKind: QueuedMessage["queueKind"]
 }
 
 describe("SessionMessageController", () => {
+  it("does not submit or queue messages for a read-only session", async () => {
+    const harness = createHarness();
+    harness.sessions.session.readOnly = true;
+
+    harness.controller.sendMessage("session", "should stay local");
+    await harness.controller.runMessage("session", message("input-1", "should stay local")).then((accepted) => assert.equal(accepted, false));
+
+    assert.equal(harness.requests.length, 0);
+    assert.equal(harness.sessions.session.messages.length, 0);
+    assert.match(harness.sessions.session.errorText, /只读模式/);
+  });
+
+  it("switches to read-only when a turn discovers an external writer", async () => {
+    const harness = createHarness(async (operation) => {
+      if (operation === "startTurn") throw new CodexRequestError({ method: "startTurn", message: "thread thread-1 already has an active writer" });
+      return {};
+    });
+
+    harness.controller.sendMessage("session", "blocked by bridge");
+    await waitFor(() => harness.sessions.session.readOnly === true);
+
+    assert.equal(harness.sessions.session.status, "error");
+    assert.equal(harness.sessions.session.messages.length, 0);
+    assert.match(harness.sessions.session.errorText, /只读模式/);
+  });
+
   it("sends a normal message, consumes attachments, and updates the active turn", async () => {
     const harness = createHarness();
     harness.attachments.session = [{ path: "D:\\image.png", dataUrl: "data:image/png;base64,eA==", name: "image.png" }];

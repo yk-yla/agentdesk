@@ -6,6 +6,7 @@ import type { TurnTelemetry } from "./turnTelemetry";
 import {
   actualTurnIdFromInterruptMismatch,
   actualTurnIdFromMismatch,
+  isCodexActiveWriterConflict,
   codexRequestMethod,
   inputForMessage,
   insertRejectedSteer,
@@ -93,6 +94,10 @@ export class SessionMessageController {
     const { state, services } = this.options;
     const session = state.getSession(sessionId);
     if (!session) return false;
+    if (session.readOnly) {
+      this.setError(sessionId, new Error("当前会话正被其他程序使用，已切换为只读模式。"), "当前会话已切换为只读模式。");
+      return false;
+    }
     const clientUserMessageId = message.clientUserMessageId || `client-${this.nextInputId("message")}`;
     const localCommand = message.text.trim();
     const requiredCapability = localCommand === "/compact" ? "compact" : localCommand === "/review" ? "review" : localCommand === "/mcp" ? "mcp" : null;
@@ -167,6 +172,20 @@ export class SessionMessageController {
       this.rememberHistory(session, stringValue(result.reviewThreadId, threadId), nextTitle);
       return true;
     } catch (error) {
+      if (session.provider === "codex" && isCodexActiveWriterConflict(error)) {
+        state.updateSession(sessionId, (current) => ({
+          ...current,
+          readOnly: true,
+          status: "error",
+          statusLabel: "已切换为只读",
+          activeTurnId: null,
+          startedAt: null,
+          errorText: "该会话正被其他程序使用，当前为只读模式。",
+          messages: current.messages.filter((entry) => entry.clientId !== clientUserMessageId),
+        }));
+        telemetry?.failed(sessionId, "request_failed");
+        return false;
+      }
       const requestMethod = codexRequestMethod(error);
       if (isCodexRequestTimeout(error) && (requestMethod === "startTurn" || requestMethod === "startReview" || requestMethod === "compactSession")) {
         state.updateSession(sessionId, (current) => ({
@@ -204,6 +223,11 @@ export class SessionMessageController {
     };
 
     const current = state.getSession(sessionId);
+    if (current?.readOnly) {
+      removePending();
+      this.setError(sessionId, new Error("当前会话正被其他程序使用，已切换为只读模式。"), "当前会话已切换为只读模式。");
+      return;
+    }
     if (!current?.threadId || current.status !== "working" || !current.activeTurnId) {
       removePending();
       if (current && current.status !== "working") {
@@ -272,6 +296,10 @@ export class SessionMessageController {
     const { state, services } = this.options;
     const session = state.getSession(sessionId);
     if (!session) return;
+    if (session.readOnly) {
+      this.setError(sessionId, new Error("当前会话正被其他程序使用，已切换为只读模式。"), "当前会话已切换为只读模式。");
+      return;
+    }
     const sessionAttachments = state.getAttachments(sessionId);
     if (!text && !sessionAttachments.length) return;
     services.trackEvent?.("message.send", { provider: session.provider, mode, hasText: Boolean(text), imageCount: sessionAttachments.length });
@@ -332,7 +360,7 @@ export class SessionMessageController {
     for (const sessionId of sessionIds) {
       const session = this.options.state.getSession(sessionId);
       const queue = this.options.state.getQueued(sessionId);
-      if (!session || session.status !== "idle" || !queue.length) continue;
+      if (!session || session.readOnly || session.status !== "idle" || !queue.length) continue;
       const active = this.queueDraining.get(sessionId);
       if (active) {
         drains.push(active);
@@ -356,7 +384,7 @@ export class SessionMessageController {
   readonly interrupt = async (sessionId: string) => {
     const { state, services } = this.options;
     const session = state.getSession(sessionId);
-    if (!session?.threadId || session.status !== "working") return false;
+    if (!session?.threadId || session.readOnly || session.status !== "working") return false;
     services.trackEvent?.("turn.interrupt", { provider: session.provider });
     if (state.getPendingSteers(sessionId).length) this.submitPendingAfterInterrupt.add(sessionId);
     let turnId = session.activeTurnId || "";

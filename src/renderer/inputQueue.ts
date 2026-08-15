@@ -29,6 +29,12 @@ export function isCodexRequestTimeout(error: unknown) {
   return stringValue(asRecord(requestPayload(error)?.data).kind) === "requestTimeout";
 }
 
+export function isCodexActiveWriterConflict(error: unknown) {
+  const payload = requestPayload(error);
+  const message = payload?.message || (error instanceof Error ? error.message : String(error));
+  return /already has an active writer/i.test(message);
+}
+
 export function inputForMessage(message: Pick<QueuedMessage, "text" | "inputText" | "images" | "skills">): JsonObject[] {
   const input: JsonObject[] = [];
   // Skill 输入统一走普通文本，让 Codex 自己按 `$skill-name` 解析 Skill。

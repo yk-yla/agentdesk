@@ -179,6 +179,8 @@ export interface SessionState {
   effort: string;
   collaborationMode: CollaborationMode;
   resumed?: boolean;
+  /** Provider reports that another client currently owns this thread's writer. */
+  readOnly?: boolean;
   status: "idle" | "working" | "error";
   statusLabel: string;
   activeTurnId: string | null;

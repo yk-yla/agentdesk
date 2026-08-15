@@ -32,11 +32,12 @@ interface Props {
   onClose: (sessionId: string) => void;
   onSelectView: (sessionId: string, view: "activity" | "raw" | "goal" | "plan" | "agents") => void;
   working: boolean;
+  readOnly: boolean;
   onStartGoal: (sessionId: string, objective: string) => void;
   onStopGoal: (sessionId: string) => void;
 }
 
-function DetailsPanelBase({ sessionId, title, activities, goal, plan, subagents, compactionCount, capabilities, detailView, working, onClose, onSelectView, onStartGoal, onStopGoal }: Props) {
+function DetailsPanelBase({ sessionId, title, activities, goal, plan, subagents, compactionCount, capabilities, detailView, working, readOnly, onClose, onSelectView, onStartGoal, onStopGoal }: Props) {
   const [visibleCount, setVisibleCount] = useState(ACTIVITY_PAGE);
   const shownActivities = useMemo(
     () => (activities.length > visibleCount ? activities.slice(activities.length - visibleCount) : activities),
@@ -58,7 +59,7 @@ function DetailsPanelBase({ sessionId, title, activities, goal, plan, subagents,
         <button className={detailView === "raw" ? "active" : ""} onClick={() => onSelectView(sessionId, "raw")}>原始事件</button>
       </div>
       <div className="details-scroll">
-        {detailView === "goal" ? <GoalPanel goal={goal} working={working} onStart={(objective) => onStartGoal(sessionId, objective)} onStop={() => onStopGoal(sessionId)} />
+        {detailView === "goal" ? <GoalPanel goal={goal} working={working} readOnly={readOnly} onStart={(objective) => onStartGoal(sessionId, objective)} onStop={() => onStopGoal(sessionId)} />
           : detailView === "plan" ? <PlanPanel plan={plan} />
           : detailView === "agents" ? <SubagentPanel subagents={subagents} />
           : detailView === "activity"

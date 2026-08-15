@@ -15,7 +15,7 @@ import {
   type RoutedAgentEvent,
 } from "./agent/AgentEventRouter";
 import { createClaudeModelCache, sameClaudeModelCache } from "./agent/claudeModelCache";
-import { codexRequestMethod, isCodexRequestTimeout, mergeMessages } from "./inputQueue";
+import { codexRequestMethod, isCodexActiveWriterConflict, isCodexRequestTimeout, mergeMessages } from "./inputQueue";
 import {
   applyProviderModelDefaults, initialProviderCapabilities, initialProviderModels, newSessionDefaults, normalizeAgentRequestError, retargetEmptySession,
   providerDisconnectedMessage,
@@ -55,6 +55,9 @@ const NO_ATTACHMENTS: ImageAttachment[] = [];
 const NO_QUEUED_MESSAGES: QueuedMessage[] = [];
 const NO_PENDING_STEERS: PendingSteerMessage[] = [];
 const NO_SKILLS: SkillOption[] = [];
+const READ_ONLY_SESSION_OPERATIONS = new Set<AgentOperation>([
+  "readSession", "resumeSession", "getGoal", "readRateLimits", "listMcpServers", "listSkills", "closeSession",
+]);
 const INITIAL_UPDATE_STATUS: DesktopUpdateStatus = { phase: "idle", currentVersion: "", message: "仅在手动检查时连接 GitHub。", tokenConfigured: false, repositoryUrl: "https://github.com/yxb715/agentdesk" };
 const INITIAL_CLI_UPDATE_STATUS: CodexCliUpdateStatus = { phase: "idle", currentVersion: "", message: "正在读取 Codex CLI 版本。" };
 const INITIAL_CLAUDE_RUNTIME_STATUS: ClaudeRuntimeStatus = { phase: "idle", binarySource: "sdk", binaryVersion: "", sdkVersion: "", credentialsAvailable: false, credentialSource: "unavailable", credentialMessage: "正在读取 Claude 配置。", message: "仅在手动检查时连接 Claude Code 发布源。" };
@@ -379,6 +382,9 @@ export default function App() {
   const requestForSession = useCallback(async (sessionId: string, operation: AgentOperation, params: JsonObject) => {
     const session = sessionsRef.current[sessionId];
     const provider = session?.provider || "codex";
+    if (session?.readOnly && !READ_ONLY_SESSION_OPERATIONS.has(operation)) {
+      throw new Error("当前会话正被其他程序使用，已切换为只读模式。");
+    }
     const context = {
       sessionId,
       canonicalCwd: session?.cwd,
@@ -1085,6 +1091,7 @@ export default function App() {
   const ensureThread = useCallback(async (sessionId: string) => {
     const session = sessionsRef.current[sessionId];
     if (!session) throw new Error("会话不存在");
+    if (session.readOnly) throw new Error("当前会话正被其他程序使用，已切换为只读模式。");
     return sessionLifecycleRef.current.ensureThread(sessionId, {
       threadId: session.threadId,
       resumed: session.resumed === true,
@@ -1533,7 +1540,7 @@ export default function App() {
     }
     if (existing) {
       activateSessionTab(existing.id);
-      if (existing.resumed) return existing.id;
+      if (existing.resumed || existing.readOnly) return existing.id;
     }
     const currentLayout = layoutRef.current;
     const activePane = currentLayout.panes.find((pane) => pane.id === currentLayout.activePaneId) ?? currentLayout.panes[0];
@@ -1569,36 +1576,78 @@ export default function App() {
     providerEventRef.current?.bindSession(entry.provider, entry.id, sessionId);
 
     const readVersion = providerEventRef.current?.captureVersion(sessionId) || { event: 0, lifecycle: 0 };
+    let resumed = false;
+    const readHistoricalSession = () => requestForSession(sessionId, "readSession", { threadId: entry.id, includeTurns: true });
+    const applyHistoricalRead = (readValue: unknown) => {
+      const preserve = providerEventRef.current?.changedSince(sessionId, readVersion) || { preserveRealtime: false, preserveLifecycle: false };
+      updateSession(sessionId, (current) => {
+        const persisted = persistedCompaction(preferencesRef.current, current);
+        return hydrateAgentSession(current, current.provider, asRecord(readValue).thread, {
+          ...preserve,
+          ...(persisted ? { persistedCompactionCount: persisted.count, persistedCompactionEventIds: persisted.eventIds } : {}),
+        });
+      });
+      persistCompactionSnapshot(sessionId);
+    };
     try {
       await restoreHistoricalSession({
         resume: () => sessionLifecycleRef.current.resume(sessionId, () => (
           requestForSession(sessionId, "resumeSession", { threadId: entry.id, cwd: registeredCwd })
         )),
         applyResume: (resumeValue) => {
+          resumed = true;
           const resume = asRecord(resumeValue);
           updateSession(sessionId, (current) => {
             const model = stringValue(resume.model) || current.model;
             return { ...current, model, effort: stringValue(resume.reasoningEffort) || current.effort, resumed: true, tokenUsage: tokenUsageForModel(current, model, preferencesRef.current) };
           });
         },
-        read: () => requestForSession(sessionId, "readSession", { threadId: entry.id, includeTurns: true }),
-        applyRead: (readValue) => {
-          const preserve = providerEventRef.current?.changedSince(sessionId, readVersion) || { preserveRealtime: false, preserveLifecycle: false };
-          updateSession(sessionId, (current) => {
-            const persisted = persistedCompaction(preferencesRef.current, current);
-            return hydrateAgentSession(current, current.provider, asRecord(readValue).thread, {
-              ...preserve,
-              ...(persisted ? { persistedCompactionCount: persisted.count, persistedCompactionEventIds: persisted.eventIds } : {}),
-            });
-          });
-          persistCompactionSnapshot(sessionId);
-        },
+        read: readHistoricalSession,
+        applyRead: applyHistoricalRead,
       });
     } catch (error) {
-      setError(sessionId, error, "恢复或读取历史会话失败");
+      if (entry.provider === "codex" && !resumed && isCodexActiveWriterConflict(error)) {
+        let readValue: unknown;
+        try {
+          readValue = await readHistoricalSession();
+        } catch (readError) {
+          setError(sessionId, readError, "读取被其他程序占用的历史会话失败");
+          return sessionId;
+        }
+        updateSession(sessionId, (current) => ({
+          ...current,
+          readOnly: true,
+          resumed: false,
+          errorText: "该会话正被其他程序使用，当前为只读模式。",
+        }));
+        applyHistoricalRead(readValue);
+      } else {
+        setError(sessionId, error, "恢复或读取历史会话失败");
+      }
     }
     return sessionId;
   }, [activateSessionTab, addSession, bridge, ensureProviderInitialized, persistCompactionSnapshot, requestForSession, setError, updateSession]);
+
+  const retryReadOnlySession = useCallback(async (sessionId: string) => {
+    const session = sessionsRef.current[sessionId];
+    if (!session?.readOnly || !session.threadId) return;
+    try {
+      await requestForSession(sessionId, "resumeSession", { threadId: session.threadId, cwd: session.cwd });
+      const readValue = await requestForSession(sessionId, "readSession", { threadId: session.threadId, includeTurns: true });
+      updateSession(sessionId, (current) => ({
+        ...hydrateAgentSession(current, current.provider, asRecord(readValue).thread),
+        readOnly: false,
+        resumed: true,
+        errorText: "",
+      }));
+    } catch (error) {
+      if (session.provider === "codex" && isCodexActiveWriterConflict(error)) {
+        updateSession(sessionId, (current) => ({ ...current, readOnly: true, errorText: "该会话仍被其他程序使用，当前为只读模式。" }));
+      } else {
+        setError(sessionId, error, "恢复会话失败");
+      }
+    }
+  }, [requestForSession, setError, updateSession]);
 
   const isHistoryWorking = useCallback((threadId: string, provider?: AgentProvider) => (
     Object.values(sessionsRef.current).some((session) => session.threadId === threadId && (!provider || session.provider === provider) && sessionHasActiveWork(session))
@@ -2291,6 +2340,7 @@ export default function App() {
         onStartGoal={startGoal}
         onStopGoal={stopGoal}
         onClearError={clearError}
+        onRetryReadOnly={retryReadOnlySession}
         onRespondApproval={respondToApproval}
         onInterrupt={interrupt}
         getDraft={getDraft}
