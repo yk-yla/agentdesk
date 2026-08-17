@@ -53,6 +53,15 @@ describe("CodexBackend", () => {
     assert.equal(decodeCodexRpcError(error)?.message, "failed");
   });
 
+  it("keeps the all-workspace marker inside AgentDesk", async () => {
+    let method = "";
+    let providerParams = {};
+    const backend = new CodexBackend(runtime({ request: async (value, params) => { method = value; providerParams = params; return { data: [] }; } }));
+    await backend.request("listSessions", { allWorkspaces: true, limit: 50 }, {});
+    assert.equal(method, "thread/list");
+    assert.deepEqual(providerParams, { limit: 50 });
+  });
+
   it("wraps server events and validates interaction ownership", async () => {
     let emit: ((message: JsonRpcMessage) => void) | undefined;
     let responseId: number | string | undefined;

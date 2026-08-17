@@ -13,8 +13,8 @@ export type ClaudeWorkerCommand = ({ requestId?: string } & (
   | { type: "control"; sessionId: string; queryGeneration: number; action: "models" | "commands" | "agents" | "contextUsage" | "mcp" | "reloadSkills" | "reloadPlugins" | "setModel" | "setEffort"; value?: string }
   | { type: "plugin"; operation: ClaudePluginOperation; cwd: string; executablePath?: string; env?: Record<string, string>; configDir?: string; plugin?: string; marketplace?: string; source?: string; authorizedLocalMarketplacePath?: string; sparsePaths?: string[] }
   | { type: "closeSession"; sessionId: string; queryGeneration?: number }
-  | { type: "listSessions"; cwd: string; limit: number; offset: number; includeWorktrees: false }
-  | { type: "searchSessions"; cwd: string; searchTerm: string; limit: number; offset: number; includeWorktrees: false }
+  | { type: "listSessions"; cwd?: string; limit: number; offset: number; includeWorktrees: false }
+  | { type: "searchSessions"; cwd?: string; searchTerm: string; limit: number; offset: number; includeWorktrees: false }
   | { type: "getSessionInfo"; cwd: string; nativeSessionId: string }
   | { type: "readSession"; cwd: string; nativeSessionId: string; limit?: number; offset?: number }
   | { type: "forkSession"; cwd: string; nativeSessionId: string; title?: string }

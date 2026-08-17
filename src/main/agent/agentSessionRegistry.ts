@@ -109,7 +109,10 @@ export class AgentSessionRegistry {
       return;
     }
     if (operation === "listSessions" || operation === "searchSessions" || this.isWorkspaceScopedOperation(operation)) {
-      if (operation === "searchSessions" && provider === "codex" && !params.cwd && !context.canonicalCwd) return;
+      if ((operation === "listSessions" || operation === "searchSessions") && params.allWorkspaces === true) {
+        if (params.cwd || context.canonicalCwd) throw new Error("全部目录历史请求不能绑定单个工作区。");
+        return;
+      }
       const cwd = this.requireWorkspace(params, context);
       this.assertWorkspaceAuthorized(cwd);
       return;

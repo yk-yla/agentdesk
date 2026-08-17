@@ -33,4 +33,13 @@ describe("Claude history full-text search", () => {
     assert.equal(visibleSessionText({ text: "x".repeat(100) }, 32).length, 32);
     assert.ok(searchSnippet("a".repeat(1_000), "missing").length <= 800);
   });
+
+  it("searches a globally listed session without inventing a workspace", async () => {
+    let options: { dir?: string; limit: number; offset: number } | undefined;
+    await sessionSearchText({ sessionId: "global" }, undefined, async (_sessionId, value) => {
+      options = value;
+      return [];
+    });
+    assert.equal(options?.dir, undefined);
+  });
 });

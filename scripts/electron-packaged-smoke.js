@@ -66,7 +66,7 @@ async page => {
 
   const providerSmoke = await page.evaluate(async () => {
     const cwd = await window.agentDesk.getWorkspace();
-    const claudeList = await window.agentDesk.agentRequest("claude", "listSessions", { cwd, cursor: null, limit: 10 }, { canonicalCwd: cwd });
+    const claudeList = await window.agentDesk.agentRequest("claude", "listSessions", { allWorkspaces: true, cursor: null, limit: 10 });
     const claudeItems = claudeList && typeof claudeList === "object" && Array.isArray(claudeList.data) ? claudeList.data : [];
     const fixtureId = "11111111-1111-4111-8111-111111111111";
     const fixture = claudeItems.find((entry) => entry && typeof entry === "object" && entry.id === fixtureId);
@@ -75,14 +75,14 @@ async page => {
     const thread = claudeRead && typeof claudeRead === "object" && claudeRead.thread && typeof claudeRead.thread === "object" ? claudeRead.thread : null;
     const messages = thread && Array.isArray(thread.messages) ? thread.messages : [];
     const codexList = await window.agentDesk.agentRequest("codex", "listSessions", {
-      cwd,
+      allWorkspaces: true,
       cursor: null,
       limit: 10,
       sortKey: "recency_at",
       sortDirection: "desc",
       sourceKinds: ["cli", "vscode", "exec", "appServer"],
       archived: false,
-    }, { canonicalCwd: cwd });
+    });
     return {
       cwd,
       claudeFixtureFound: Boolean(fixture),
@@ -102,8 +102,8 @@ async page => {
       "窗口最大化切换 IPC 可用",
       "输入框鼠标和文字插入光标可见",
       "附件、外链和通知输入边界可用",
-      "Claude Worker 可加载并完成 listSessions/readSession",
-      "Codex Provider 可完成 listSessions",
+      "Claude Worker 可加载并完成跨目录 listSessions/readSession",
+      "Codex Provider 可完成跨目录 listSessions",
     ],
   };
 }

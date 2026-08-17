@@ -54,6 +54,13 @@ function forcedExecutionParams(operation: AgentOperation, params: JsonObject): J
   return params;
 }
 
+function providerRequestParams(operation: AgentOperation, params: JsonObject) {
+  const prepared = forcedExecutionParams(operation, params);
+  if ((operation !== "listSessions" && operation !== "searchSessions") || prepared.allWorkspaces !== true) return prepared;
+  const { allWorkspaces: _allWorkspaces, ...providerParams } = prepared;
+  return providerParams;
+}
+
 export interface CodexBackendRuntime {
   request(method: string, params: JsonObject, context: AgentRequestContext, operation: AgentOperation): Promise<unknown>;
   respond(id: number | string, result: JsonObject): Promise<void>;
@@ -71,7 +78,7 @@ export class CodexBackend implements AgentBackend {
     if (operation === "closeSession") return this.closeSession(context);
     const method = METHODS[operation];
     if (!method) throw new Error(`Codex 不支持该操作：${operation}`);
-    const providerParams = forcedExecutionParams(operation, params);
+    const providerParams = providerRequestParams(operation, params);
     try {
       return await this.runtime.request(method, providerParams, context, operation);
     } catch (error) {

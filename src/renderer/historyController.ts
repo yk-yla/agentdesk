@@ -17,6 +17,13 @@ export function sortHistory(entries: HistoryThread[]) {
   return [...entries].sort((left, right) => Number(right.isFavorite) - Number(left.isFavorite) || Number(right.isPinned) - Number(left.isPinned) || right.updatedAt - left.updatedAt);
 }
 
+export function sortHistoryByRecency(entries: HistoryThread[], liveActivity: Record<string, number> = {}) {
+  return [...entries].sort((left, right) => (
+    Math.max(right.updatedAt, liveActivity[`${right.provider}:${right.id}`] || 0)
+    - Math.max(left.updatedAt, liveActivity[`${left.provider}:${left.id}`] || 0)
+  ));
+}
+
 export function applyLocalSessionMetadata(entries: HistoryThread[], preferences: DesktopPreferences) {
   const aliases = preferences.sessionAliases || {};
   const favorites = new Set(preferences.favoriteSessions || []);
@@ -56,6 +63,13 @@ interface HistoryCursor {
   claude: string | null;
 }
 
+export type HistorySearchScope = "directory" | "allWorkspaces";
+
+interface HistoryRequestScope {
+  cwd?: string;
+  allWorkspaces?: true;
+}
+
 function decodeHistoryCursor(value: string | null): HistoryCursor {
   if (!value) return { codex: null, claude: null };
   try {
@@ -74,6 +88,8 @@ export interface HistoryControllerState {
   mergeEntries(entries: HistoryThread[]): void;
   setLoading(loading: boolean): void;
   setCursor(cursor: string | null): void;
+  setRecentLoading(loading: boolean): void;
+  setRecentCursor(cursor: string | null): void;
   setSearchResults(entries: HistoryThread[] | null, merge: boolean): void;
   setSearchLoading(loading: boolean): void;
   setSearchCursor(cursor: string | null): void;
@@ -90,10 +106,15 @@ export class HistoryController {
   private workspace = "";
   private historyCursor: string | null = null;
   private historyLoading = false;
+  private recentCursor: string | null = null;
+  private recentLoading = false;
+  private recentLoaded = false;
   private searchTerm = "";
   private searchCursor: string | null = null;
   private searchLoading = false;
+  private searchScope: HistorySearchScope = "directory";
   private historyGeneration = 0;
+  private recentGeneration = 0;
   private searchGeneration = 0;
   private refreshPromise: Promise<void> | null = null;
   private lastRefreshAt = 0;
@@ -116,13 +137,13 @@ export class HistoryController {
     });
   }
 
-  private async fetchProvider(provider: AgentProvider, cursor: string | null, maxPages: number, onPage: (entries: HistoryThread[]) => void) {
+  private async fetchProvider(provider: AgentProvider, cursor: string | null, maxPages: number, limit: number, scope: HistoryRequestScope, onPage: (entries: HistoryThread[]) => void) {
     let nextCursor = cursor;
     for (let page = 0; page < maxPages; page += 1) {
       const value = await this.services.request(provider, "listSessions", providerHistoryParams(provider, {
         cursor: nextCursor,
-        limit: 100,
-        cwd: this.workspace,
+        limit,
+        ...scope,
       }));
       onPage(threadFromList(value));
       const next = asRecord(value).nextCursor;
@@ -132,11 +153,11 @@ export class HistoryController {
     return nextCursor;
   }
 
-  private async fetchMerged(cursor: string | null, maxPages: number, onPage: (entries: HistoryThread[]) => void) {
+  private async fetchMerged(cursor: string | null, maxPages: number, limit: number, scope: HistoryRequestScope, onPage: (entries: HistoryThread[]) => void) {
     const decoded = decodeHistoryCursor(cursor);
     const next = { ...decoded };
     const providers = (["codex", "claude"] as const).filter((provider) => this.enabledProviders.has(provider) && (cursor === null || decoded[provider] !== null));
-    const results = await Promise.allSettled(providers.map((provider) => this.fetchProvider(provider, decoded[provider], maxPages, onPage)));
+    const results = await Promise.allSettled(providers.map((provider) => this.fetchProvider(provider, decoded[provider], maxPages, limit, scope, onPage)));
     let firstError: unknown;
     let successCount = 0;
     for (const [index, result] of results.entries()) {
@@ -170,7 +191,7 @@ export class HistoryController {
     const generation = ++this.historyGeneration;
     this.historyLoading = true;
     this.state.setLoading(true);
-    void this.fetchMerged(null, 5, (page) => {
+    void this.fetchMerged(null, 5, 100, { cwd: workspace }, (page) => {
       if (this.historyGeneration === generation) this.publishEntries(page);
     }).then((cursor) => {
       if (this.historyGeneration !== generation) return;
@@ -192,12 +213,16 @@ export class HistoryController {
   readonly refresh = () => {
     if (!this.services.isVisible() || this.refreshPromise || Date.now() - this.lastRefreshAt < 5_000) return this.refreshPromise || Promise.resolve();
     this.lastRefreshAt = Date.now();
-    const generation = this.historyGeneration;
-    const refresh = this.fetchMerged(null, 1, (page) => {
-      if (this.historyGeneration === generation) this.publishEntries(page);
-    }).catch(() => {
-      // 保留当前历史，下一次焦点或定时刷新继续尝试。
-    }).then(() => undefined).finally(() => {
+    const historyGeneration = this.historyGeneration;
+    const recentGeneration = this.recentGeneration;
+    const tasks: Promise<unknown>[] = [];
+    if (this.workspace) tasks.push(this.fetchMerged(null, 1, 100, { cwd: this.workspace }, (page) => {
+      if (this.historyGeneration === historyGeneration) this.publishEntries(page);
+    }));
+    if (this.recentLoaded) tasks.push(this.fetchMerged(null, 1, 50, { allWorkspaces: true }, (page) => {
+      if (this.recentGeneration === recentGeneration) this.publishEntries(page);
+    }));
+    const refresh = Promise.allSettled(tasks).then(() => undefined).finally(() => {
       if (this.refreshPromise === refresh) this.refreshPromise = null;
     });
     this.refreshPromise = refresh;
@@ -210,7 +235,7 @@ export class HistoryController {
     this.historyLoading = true;
     this.state.setLoading(true);
     try {
-      const cursor = await this.fetchMerged(this.historyCursor, 5, (page) => {
+      const cursor = await this.fetchMerged(this.historyCursor, 5, 100, { cwd: this.workspace }, (page) => {
         if (this.historyGeneration === generation) this.publishEntries(page);
       });
       if (this.historyGeneration !== generation) return;
@@ -223,16 +248,60 @@ export class HistoryController {
     }
   };
 
-  private searchParams(provider: AgentProvider, cursor: string | null) {
+  readonly loadRecent = async () => {
+    if (this.recentLoaded || this.recentLoading) return;
+    const generation = ++this.recentGeneration;
+    this.recentLoading = true;
+    this.state.setRecentLoading(true);
+    this.state.setRecentCursor(null);
+    try {
+      const cursor = await this.fetchMerged(null, 1, 50, { allWorkspaces: true }, (page) => {
+        if (this.recentGeneration === generation) this.publishEntries(page);
+      });
+      if (this.recentGeneration !== generation) return;
+      this.recentCursor = cursor;
+      this.recentLoaded = true;
+      this.state.setRecentCursor(cursor);
+    } catch (error) {
+      if (this.recentGeneration !== generation) return;
+      this.services.log?.("error", "renderer.recent_history_load.failed", { error: error instanceof Error ? { name: error.name, message: error.message, stack: error.stack } : { message: String(error) } });
+    } finally {
+      if (this.recentGeneration !== generation) return;
+      this.recentLoading = false;
+      this.state.setRecentLoading(false);
+    }
+  };
+
+  readonly loadMoreRecent = async () => {
+    if (!this.recentCursor || this.recentLoading) return;
+    const generation = this.recentGeneration;
+    this.recentLoading = true;
+    this.state.setRecentLoading(true);
+    try {
+      const cursor = await this.fetchMerged(this.recentCursor, 1, 50, { allWorkspaces: true }, (page) => {
+        if (this.recentGeneration === generation) this.publishEntries(page);
+      });
+      if (this.recentGeneration !== generation) return;
+      this.recentCursor = cursor;
+      this.state.setRecentCursor(cursor);
+    } finally {
+      if (this.recentGeneration !== generation) return;
+      this.recentLoading = false;
+      this.state.setRecentLoading(false);
+    }
+  };
+
+  private searchParams(provider: AgentProvider, cursor: string | null, scope: HistorySearchScope) {
+    const scopeParams = scope === "allWorkspaces" ? { allWorkspaces: true } : { cwd: this.workspace };
     return provider === "codex"
-      ? { searchTerm: this.searchTerm, cursor, limit: 100, sortKey: "recency_at", sortDirection: "desc", sourceKinds: ["cli", "vscode", "exec", "appServer"], archived: false }
-      : { searchTerm: this.searchTerm, cursor, limit: 100, cwd: this.workspace };
+      ? { searchTerm: this.searchTerm, cursor, limit: 100, sortKey: "recency_at", sortDirection: "desc", sourceKinds: ["cli", "vscode", "exec", "appServer"], archived: false, ...scopeParams }
+      : { searchTerm: this.searchTerm, cursor, limit: 100, ...scopeParams };
   }
 
-  private async searchPage(cursor: string | null) {
+  private async searchPage(cursor: string | null, scope: HistorySearchScope) {
     const cursors = decodeHistoryCursor(cursor);
     const providers = (["codex", "claude"] as const).filter((provider) => this.enabledProviders.has(provider) && (cursor === null || cursors[provider] !== null));
-    const results = await Promise.allSettled(providers.map((provider) => this.services.request(provider, "searchSessions", this.searchParams(provider, cursors[provider]))));
+    const results = await Promise.allSettled(providers.map((provider) => this.services.request(provider, "searchSessions", this.searchParams(provider, cursors[provider], scope))));
     const values: Array<{ provider: AgentProvider; value: unknown }> = [];
     let firstError: unknown;
     for (const [index, result] of results.entries()) {
@@ -253,10 +322,11 @@ export class HistoryController {
     return { entries, cursor: encodeHistoryCursor(next) };
   }
 
-  readonly search = async (query: string) => {
+  readonly search = async (query: string, scope: HistorySearchScope = "directory") => {
     const searchTerm = query.trim();
     const searchGeneration = ++this.searchGeneration;
     this.searchTerm = searchTerm;
+    this.searchScope = scope;
     this.searchCursor = null;
     if (!searchTerm) {
       this.searchLoading = false;
@@ -268,18 +338,18 @@ export class HistoryController {
     this.searchLoading = true;
     this.state.setSearchLoading(true);
     try {
-      const result = await this.searchPage(null);
-      if (this.searchGeneration !== searchGeneration || this.searchTerm !== searchTerm) return;
+      const result = await this.searchPage(null, scope);
+      if (this.searchGeneration !== searchGeneration || this.searchTerm !== searchTerm || this.searchScope !== scope) return;
       this.searchCursor = result.cursor;
       this.state.setSearchResults(result.entries, false);
       this.state.setSearchCursor(result.cursor);
     } catch {
-      if (this.searchGeneration !== searchGeneration || this.searchTerm !== searchTerm) return;
+      if (this.searchGeneration !== searchGeneration || this.searchTerm !== searchTerm || this.searchScope !== scope) return;
       this.searchCursor = null;
       this.state.setSearchResults([], false);
       this.state.setSearchCursor(null);
     } finally {
-      if (this.searchGeneration !== searchGeneration || this.searchTerm !== searchTerm) return;
+      if (this.searchGeneration !== searchGeneration || this.searchTerm !== searchTerm || this.searchScope !== scope) return;
       this.searchLoading = false;
       this.state.setSearchLoading(false);
     }
@@ -288,17 +358,18 @@ export class HistoryController {
   readonly loadMoreSearch = async () => {
     if (!this.searchTerm || !this.searchCursor || this.searchLoading) return;
     const searchTerm = this.searchTerm;
+    const scope = this.searchScope;
     const generation = this.searchGeneration;
     this.searchLoading = true;
     this.state.setSearchLoading(true);
     try {
-      const result = await this.searchPage(this.searchCursor);
-      if (this.searchGeneration !== generation || this.searchTerm !== searchTerm) return;
+      const result = await this.searchPage(this.searchCursor, scope);
+      if (this.searchGeneration !== generation || this.searchTerm !== searchTerm || this.searchScope !== scope) return;
       this.searchCursor = result.cursor;
       this.state.setSearchResults(result.entries, true);
       this.state.setSearchCursor(result.cursor);
     } finally {
-      if (this.searchGeneration !== generation || this.searchTerm !== searchTerm) return;
+      if (this.searchGeneration !== generation || this.searchTerm !== searchTerm || this.searchScope !== scope) return;
       this.searchLoading = false;
       this.state.setSearchLoading(false);
     }

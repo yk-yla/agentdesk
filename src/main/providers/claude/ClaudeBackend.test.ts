@@ -12,6 +12,7 @@ class FakeRuntime implements ClaudeWorkerRuntime {
   requests: ClaudeWorkerCommand[] = [];
   known = new Map<string, string>();
   listener: ((event: ClaudeWorkerEvent) => void) | null = null;
+  listResult: unknown = { data: [], hasMore: false };
   searchResult: unknown = { data: [], scannedCount: 0, hasMore: false };
   readSessionResult: unknown = { info: null, messages: [] };
   failControl = new Set<string>();
@@ -25,6 +26,7 @@ class FakeRuntime implements ClaudeWorkerRuntime {
       return cwd === command.cwd ? { id: command.nativeSessionId, cwd } : null;
     }
     if (command.type === "readSession") return this.readSessionResult;
+    if (command.type === "listSessions") return this.listResult;
     if (command.type === "forkSession") {
       const id = "33333333-3333-4333-8333-333333333333";
       this.known.set(id, command.cwd);
@@ -516,6 +518,27 @@ describe("ClaudeBackend", () => {
     const result = await backend.request("listPlugins", { cwd: process.cwd() }, { canonicalCwd: process.cwd() });
     assert.deepEqual(result, { marketplaces: [{ name: "Claude Code", path: "", plugins: [] }] });
     assert.equal(runtime.requests.some((command) => command.type === "plugin"), true);
+    await backend.close();
+  });
+
+  it("lists and searches all workspaces without granting a fallback cwd", async () => {
+    const runtime = new FakeRuntime();
+    const cwd = path.resolve(process.cwd());
+    const listedId = "77777777-7777-4777-8777-777777777777";
+    const searchedId = "88888888-8888-4888-8888-888888888888";
+    runtime.listResult = { data: [{ id: listedId, cwd, name: "listed" }], hasMore: false };
+    runtime.searchResult = { data: [{ thread: { id: searchedId, cwd, name: "searched" }, snippet: "match" }], scannedCount: 1, hasMore: false };
+    const backend = testBackend(runtime);
+
+    await backend.request("listSessions", { allWorkspaces: true, limit: 50 }, {});
+    await backend.request("searchSessions", { allWorkspaces: true, searchTerm: "match", limit: 50 }, {});
+    const historyRequests = runtime.requests.filter((command) => command.type === "listSessions" || command.type === "searchSessions");
+    assert.equal(historyRequests.length, 2);
+    assert.ok(historyRequests.every((command) => command.cwd === undefined));
+
+    await backend.request("readSession", { cwd, threadId: listedId }, {});
+    await backend.request("readSession", { cwd, threadId: searchedId }, {});
+    assert.equal(runtime.requests.some((command) => command.type === "getSessionInfo" && (command.nativeSessionId === listedId || command.nativeSessionId === searchedId)), false);
     await backend.close();
   });
 

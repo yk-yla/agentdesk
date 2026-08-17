@@ -95,6 +95,17 @@ describe("AgentSessionRegistry", () => {
     sessions.prepareRequest("codex", "readSession", { cwd, threadId: "history-1" }, { canonicalCwd: cwd });
   });
 
+  it("allows only explicit unscoped history requests without granting returned workspaces", () => {
+    const sessions = registry();
+    assert.throws(() => sessions.prepareRequest("codex", "listSessions", {}, {}), /缺少工作区/);
+    assert.throws(() => sessions.prepareRequest("claude", "searchSessions", { allWorkspaces: true, cwd, searchTerm: "x" }, {}), /不能绑定单个工作区/);
+
+    sessions.prepareRequest("codex", "listSessions", { allWorkspaces: true }, {});
+    sessions.completeRequest("codex", "listSessions", { allWorkspaces: true }, {}, { data: [{ id: "global-known", cwd }, { id: "global-other", cwd: otherCwd }] });
+    sessions.prepareRequest("codex", "readSession", { cwd, threadId: "global-known" }, { canonicalCwd: cwd });
+    assert.throws(() => sessions.prepareRequest("codex", "readSession", { cwd: otherCwd, threadId: "global-other" }, { canonicalCwd: otherCwd }), /未经过主进程授权/);
+  });
+
   it("binds Codex interactions to the active tab, query and request once", () => {
     const sessions = registry();
     startSession(sessions);

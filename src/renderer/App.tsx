@@ -31,7 +31,7 @@ import { recoverProviderSessions } from "./providerRecovery";
 import { SessionLifecycleController } from "./sessionLifecycleController";
 import { SessionMessageController } from "./sessionMessageController";
 import { nativeSessionKey, ProviderEventController } from "./providerEventController";
-import { applyLocalSessionMetadata, favoriteHistoryEntries, favoriteSessionSummary, HistoryController, isFavoriteSession, mergeHistory, sortHistory } from "./historyController";
+import { applyLocalSessionMetadata, favoriteHistoryEntries, favoriteSessionSummary, HistoryController, isFavoriteSession, mergeHistory, sortHistory, sortHistoryByRecency } from "./historyController";
 import { registerHistoricalWorkspace, restoreHistoricalSession } from "./historicalSessionRestore";
 import { LayoutController, type TabDropPosition, type TabDropTarget } from "./layoutController";
 import WindowTitleBar from "./WindowTitleBar";
@@ -177,6 +177,8 @@ export default function App() {
   const [history, setHistory] = useState<HistoryThread[]>([]);
   const [historyCursor, setHistoryCursor] = useState<string | null>(null);
   const [historyLoading, setHistoryLoading] = useState(false);
+  const [recentHistoryCursor, setRecentHistoryCursor] = useState<string | null>(null);
+  const [recentHistoryLoading, setRecentHistoryLoading] = useState(false);
   const [historySearchResults, setHistorySearchResults] = useState<HistoryThread[] | null>(null);
   const [historySearchLoading, setHistorySearchLoading] = useState(false);
   const [historySearchCursor, setHistorySearchCursor] = useState<string | null>(null);
@@ -205,6 +207,7 @@ export default function App() {
   const [sidebarWidth, setSidebarWidth] = useState(DEFAULT_SIDEBAR_WIDTH);
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
   const [workspaceStateReady, setWorkspaceStateReady] = useState(false);
+  const [workspaceRestoreRevision, setWorkspaceRestoreRevision] = useState(0);
 
   // 所有回调都通过 ref 读取最新状态，这样回调本身保持稳定，memo 才能真正拦住分栏。
   const sessionsRef = useRef(sessions);
@@ -243,6 +246,9 @@ export default function App() {
   const skillLoadsRef = useRef(new Map<string, Promise<void>>());
   const skillReloadTimersRef = useRef(new Map<AgentProvider, number>());
   const workspaceRestoreIdsRef = useRef(new Set<string>());
+  const workspaceRestoreInFlightIdsRef = useRef(new Set<string>());
+  const workspaceRestoreAttemptsRef = useRef(new Map<string, number>());
+  const workspaceRestoreRetryTimersRef = useRef(new Map<string, number>());
   const sessionLifecycleRef = useRef(new SessionLifecycleController());
   const sessionMessageRef = useRef<SessionMessageController | null>(null);
   const providerEventRef = useRef<ProviderEventController | null>(null);
@@ -561,6 +567,7 @@ export default function App() {
     if (selected) trackUiEvent("tab.switch", { provider: selected.provider });
     const session = selected;
     if (session?.cwd && !sameDirectory(workspaceRef.current, session.cwd)) setWorkspace(session.cwd);
+    if (workspaceRestoreIdsRef.current.has(sessionId)) setWorkspaceRestoreRevision((current) => current + 1);
   }, [setActiveTab]);
 
   const activateSessionTab = useCallback((sessionId: string) => {
@@ -1508,6 +1515,8 @@ export default function App() {
       mergeEntries: (entries) => setHistory((current) => mergeHistory(current, entries)),
       setLoading: setHistoryLoading,
       setCursor: setHistoryCursor,
+      setRecentLoading: setRecentHistoryLoading,
+      setRecentCursor: setRecentHistoryCursor,
       setSearchResults: (entries, merge) => setHistorySearchResults((current) => merge ? mergeHistory(current || [], entries || []) : entries),
       setSearchLoading: setHistorySearchLoading,
       setSearchCursor: setHistorySearchCursor,
@@ -1519,7 +1528,7 @@ export default function App() {
     });
   }
   const historyController = historyControllerRef.current;
-  const { refresh: refreshHistory, loadMore: loadMoreHistory, search: searchHistory, loadMoreSearch: loadMoreHistorySearch } = historyController;
+  const { refresh: refreshHistory, loadMore: loadMoreHistory, loadRecent: loadRecentHistory, loadMoreRecent: loadMoreRecentHistory, search: searchHistory, loadMoreSearch: loadMoreHistorySearch } = historyController;
 
   const openHistory = useCallback(async (entry: HistoryThread) => {
     const existing = Object.values(sessionsRef.current).find((session) => session.provider === entry.provider && session.threadId === entry.id && sameDirectory(session.cwd, entry.cwd));
@@ -1986,9 +1995,12 @@ export default function App() {
       const restoredActiveWorkspace = restoredActivePane ? restoredSessions[restoredActivePane.activeTabId]?.cwd : "";
       if (restoredActiveWorkspace) setWorkspace(restoredActiveWorkspace);
       workspaceRestoreIdsRef.current = new Set(restored.threadSessionIds.filter((sessionId) => !authorization.blockedSessionIds.has(sessionId)));
+      workspaceRestoreInFlightIdsRef.current.clear();
+      workspaceRestoreAttemptsRef.current.clear();
       workspaceRestoreStoppedIdsRef.current = new Set(restored.stoppedSessionIds);
       setSessions(restoredSessions);
       setLayout(restored.layout);
+      setWorkspaceRestoreRevision((current) => current + 1);
       if (launchProvider) addSession(currentWorkspace, { provider: launchProvider });
       const restoredProviders = new Set<AgentProvider>(Object.values(restoredSessions).map((session) => session.provider));
       if (launchProvider) restoredProviders.add(launchProvider);
@@ -2062,7 +2074,8 @@ export default function App() {
         continue;
       }
       if (!providerCanRestore(providerStartupStates, session.provider)) continue;
-      workspaceRestoreIdsRef.current.delete(sessionId);
+      if (workspaceRestoreInFlightIdsRef.current.has(sessionId)) continue;
+      workspaceRestoreInFlightIdsRef.current.add(sessionId);
       providerEventRef.current?.bindSession(session.provider, session.threadId, sessionId);
       const readVersion = providerEventRef.current?.captureVersion(sessionId) || { event: 0, lifecycle: 0 };
       void restoreHistoricalSession({
@@ -2096,9 +2109,33 @@ export default function App() {
           });
           persistCompactionSnapshot(sessionId);
         },
-      }).catch((error) => setError(sessionId, error, "恢复或读取上次会话失败"));
+      }).then(() => {
+        workspaceRestoreIdsRef.current.delete(sessionId);
+        workspaceRestoreAttemptsRef.current.delete(sessionId);
+        workspaceRestoreStoppedIdsRef.current.delete(sessionId);
+        const retryTimer = workspaceRestoreRetryTimersRef.current.get(sessionId);
+        if (retryTimer !== undefined) window.clearTimeout(retryTimer);
+        workspaceRestoreRetryTimersRef.current.delete(sessionId);
+      }).catch((error) => {
+        setError(sessionId, error, "恢复或读取上次会话失败");
+        const attempt = (workspaceRestoreAttemptsRef.current.get(sessionId) || 0) + 1;
+        workspaceRestoreAttemptsRef.current.set(sessionId, attempt);
+        if (attempt > 2 || workspaceRestoreRetryTimersRef.current.has(sessionId)) return;
+        const timer = window.setTimeout(() => {
+          workspaceRestoreRetryTimersRef.current.delete(sessionId);
+          if (workspaceRestoreIdsRef.current.has(sessionId)) setWorkspaceRestoreRevision((current) => current + 1);
+        }, attempt * 750);
+        workspaceRestoreRetryTimersRef.current.set(sessionId, timer);
+      }).finally(() => {
+        workspaceRestoreInFlightIdsRef.current.delete(sessionId);
+      });
     }
-  }, [persistCompactionSnapshot, providerStartupStates, requestForSession, sessions, setError, updateSession]);
+  }, [persistCompactionSnapshot, providerStartupStates, requestForSession, sessions, setError, updateSession, workspaceRestoreRevision]);
+
+  useEffect(() => () => {
+    for (const timer of workspaceRestoreRetryTimersRef.current.values()) window.clearTimeout(timer);
+    workspaceRestoreRetryTimersRef.current.clear();
+  }, []);
 
   useEffect(() => {
     let active = true;
@@ -2235,6 +2272,7 @@ export default function App() {
     const key = normalizedDirectory(sidebarCurrentCwd);
     return key ? history.filter((entry) => entry.cwdKey === key) : [];
   }, [history, sidebarCurrentCwd]);
+  const sidebarRecentHistory = useMemo(() => sortHistoryByRecency(history, liveThreadActivity), [history, liveThreadActivity]);
   const sidebarLayout = useMemo<SidebarProps["layout"]>(() => ({
     collapsed: sidebarCollapsed,
     onToggleCollapsed: toggleSidebarCollapsed,
@@ -2267,8 +2305,11 @@ export default function App() {
       activeCwd: sidebarCurrentCwd,
       directoryHistory: sidebarDirectoryHistory,
       favoriteHistory,
+      recentHistory: sidebarRecentHistory,
       historyHasMore: Boolean(historyCursor),
       historyLoading,
+      recentHasMore: Boolean(recentHistoryCursor),
+      recentLoading: recentHistoryLoading,
       historySearchResults,
       historySearchLoading,
       historySearchHasMore: Boolean(historySearchCursor),
@@ -2282,10 +2323,12 @@ export default function App() {
       onHistoryAction: runHistoryAction,
       isHistoryWorking,
       onLoadMoreHistory: loadMoreHistory,
+      onLoadRecent: () => { void loadRecentHistory(); },
+      onLoadMoreRecent: () => { void loadMoreRecentHistory(); },
       onSearchHistory: searchHistory,
       onLoadMoreHistorySearch: loadMoreHistorySearch,
     },
-  }), [activeSession?.provider, favoriteHistory, historyCursor, historyLoading, historySearchCursor, historySearchLoading, historySearchResults, isHistoryWorking, liveThreadActivity, loadMoreHistory, loadMoreHistorySearch, openHistory, providerCapabilities, runHistoryAction, searchHistory, sidebarActiveThreadId, sidebarCurrentCwd, sidebarDirectoryHistory]);
+  }), [activeSession?.provider, favoriteHistory, historyCursor, historyLoading, historySearchCursor, historySearchLoading, historySearchResults, isHistoryWorking, liveThreadActivity, loadMoreHistory, loadMoreHistorySearch, loadMoreRecentHistory, loadRecentHistory, openHistory, providerCapabilities, recentHistoryCursor, recentHistoryLoading, runHistoryAction, searchHistory, sidebarActiveThreadId, sidebarCurrentCwd, sidebarDirectoryHistory, sidebarRecentHistory]);
   const sidebarSettings = useMemo<SidebarProps["settings"]>(() => ({
     viewModel: {
       theme: preferences.theme,

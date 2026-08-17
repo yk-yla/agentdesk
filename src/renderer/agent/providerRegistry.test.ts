@@ -26,6 +26,9 @@ describe("renderer provider registry", () => {
     assert.equal(capabilities.claude.pluginMarketplace, "supported");
     assert.equal(providerHistoryParams("codex", { cursor: null, limit: 100, cwd: "C:\\w" }).archived, false);
     assert.equal(providerHistoryParams("claude", { cursor: null, limit: 100, cwd: "C:\\w" }).archived, undefined);
+    assert.deepEqual(providerHistoryParams("claude", { cursor: null, limit: 50, allWorkspaces: true }), { cursor: null, limit: 50, allWorkspaces: true });
+    assert.equal(providerHistoryParams("codex", { cursor: null, limit: 50, allWorkspaces: true }).allWorkspaces, true);
+    assert.equal(providerHistoryParams("codex", { cursor: null, limit: 50, allWorkspaces: true }).cwd, undefined);
   });
 
   it("normalizes provider errors without changing session ownership", () => {

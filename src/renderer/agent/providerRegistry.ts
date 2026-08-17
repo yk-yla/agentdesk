@@ -19,7 +19,7 @@ interface RendererProviderDefinition {
   affectsStartupState: boolean;
   sessionDefaults(models: ModelOption[], defaults: CodexDefaults): { model: string; effort: string };
   normalizeRequestError(error: unknown, operation: AgentOperation): Error;
-  historyParams(input: { cursor: string | null; limit: number; cwd?: string }): JsonObject;
+  historyParams(input: { cursor: string | null; limit: number; cwd?: string; allWorkspaces?: boolean }): JsonObject;
 }
 
 const CLAUDE_BOOTSTRAP_EFFORTS = ["low", "medium", "high", "xhigh", "max"];
@@ -59,7 +59,7 @@ const definitions: Record<AgentProvider, RendererProviderDefinition> = {
       return { model: model?.id || "", effort: defaultEffortFor(model, defaults) };
     },
     normalizeRequestError: normalizeCodexRequestError,
-    historyParams: ({ cursor, limit, cwd }) => ({ cursor, limit, sortKey: "recency_at", sortDirection: "desc", sourceKinds: ["cli", "vscode", "exec", "appServer"], archived: false, ...(cwd ? { cwd } : {}) }),
+    historyParams: ({ cursor, limit, cwd, allWorkspaces }) => ({ cursor, limit, sortKey: "recency_at", sortDirection: "desc", sourceKinds: ["cli", "vscode", "exec", "appServer"], archived: false, ...(allWorkspaces ? { allWorkspaces: true } : cwd ? { cwd } : {}) }),
   },
   claude: {
     initialCapabilities: CLAUDE_INITIAL_CAPABILITIES,
@@ -71,7 +71,7 @@ const definitions: Record<AgentProvider, RendererProviderDefinition> = {
     normalizeRequestError(error) {
       return error instanceof Error ? error : new Error("Claude Code 请求失败。" );
     },
-    historyParams: ({ cursor, limit, cwd }) => ({ cursor, limit, ...(cwd ? { cwd } : {}) }),
+    historyParams: ({ cursor, limit, cwd, allWorkspaces }) => ({ cursor, limit, ...(allWorkspaces ? { allWorkspaces: true } : cwd ? { cwd } : {}) }),
   },
 };
 
@@ -119,7 +119,7 @@ export function normalizeAgentRequestError(provider: AgentProvider, operation: A
   return definitions[provider].normalizeRequestError(error, operation);
 }
 
-export function providerHistoryParams(provider: AgentProvider, input: { cursor: string | null; limit: number; cwd?: string }) {
+export function providerHistoryParams(provider: AgentProvider, input: { cursor: string | null; limit: number; cwd?: string; allWorkspaces?: boolean }) {
   return definitions[provider].historyParams(input);
 }
 

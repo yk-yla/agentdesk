@@ -78,6 +78,7 @@ function Start-TestElectron {
     ELECTRON_RENDERER_URL = "http://127.0.0.1:$VitePort"
     CODEX_DESKTOP_CLI = $codexFixture
     CLAUDE_CONFIG_DIR = $claudeConfig
+    AGENTDESK_RESTART_CONTENT_FIXTURE = "1"
   }
   $arguments = @("--user-data-dir=$profile", "--remote-debugging-port=$CdpPort", ".", "--cwd=$repoRoot")
   $process = Start-Process -FilePath $electronExecutable -ArgumentList $arguments -WorkingDirectory $repoRoot -Environment $environment -WindowStyle Hidden -RedirectStandardOutput $electronLog -RedirectStandardError $electronErrorLog -PassThru

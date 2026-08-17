@@ -3,7 +3,7 @@ import { describe, it } from "node:test";
 import type { AgentOperation, AgentProvider } from "../shared/agentProtocol";
 import type { JsonObject } from "../shared/protocol";
 import { historyThread, type HistoryThread } from "./domain";
-import { applyLocalSessionMetadata, favoriteHistoryEntries, HistoryController, mergeHistory } from "./historyController";
+import { applyLocalSessionMetadata, favoriteHistoryEntries, HistoryController, mergeHistory, sortHistoryByRecency } from "./historyController";
 
 function deferred<T>() {
   let resolve!: (value: T) => void;
@@ -35,6 +35,8 @@ function createHarness(request: (provider: AgentProvider, operation: AgentOperat
   let entries: HistoryThread[] = [];
   let loading = false;
   let cursor: string | null = null;
+  let recentLoading = false;
+  let recentCursor: string | null = null;
   let searchResults: HistoryThread[] | null = null;
   let searchLoading = false;
   let searchCursor: string | null = null;
@@ -42,6 +44,8 @@ function createHarness(request: (provider: AgentProvider, operation: AgentOperat
     mergeEntries: (incoming) => { entries = mergeHistory(entries, incoming); },
     setLoading: (value) => { loading = value; },
     setCursor: (value) => { cursor = value; },
+    setRecentLoading: (value) => { recentLoading = value; },
+    setRecentCursor: (value) => { recentCursor = value; },
     setSearchResults: (incoming, merge) => { searchResults = merge ? mergeHistory(searchResults || [], incoming || []) : incoming; },
     setSearchLoading: (value) => { searchLoading = value; },
     setSearchCursor: (value) => { searchCursor = value; },
@@ -55,6 +59,8 @@ function createHarness(request: (provider: AgentProvider, operation: AgentOperat
     get entries() { return entries; },
     get loading() { return loading; },
     get cursor() { return cursor; },
+    get recentLoading() { return recentLoading; },
+    get recentCursor() { return recentCursor; },
     get searchResults() { return searchResults; },
     get searchLoading() { return searchLoading; },
     get searchCursor() { return searchCursor; },
@@ -116,6 +122,15 @@ describe("HistoryController", () => {
 
     assert.deepEqual(harness.entries.map((entry) => entry.id).sort(), ["claude-thread", "codex-thread"]);
     assert.deepEqual(JSON.parse(harness.cursor || "{}"), { codex: "codex-next", claude: "claude-next" });
+  });
+
+  it("sorts the global recent view strictly by live recency", () => {
+    const entries = [
+      { ...thread("favorite", "codex", 3), isFavorite: true },
+      thread("live", "claude", 1),
+      thread("newest", "codex", 4),
+    ];
+    assert.deepEqual(sortHistoryByRecency(entries, { "claude:live": 5 }).map((entry) => entry.id), ["live", "newest", "favorite"]);
   });
 
   it("loads only Claude history for a Claude-only workspace state", async () => {
@@ -185,12 +200,17 @@ describe("HistoryController", () => {
   it("coalesces concurrent history refreshes", async () => {
     const pending = deferred<unknown>();
     let calls = 0;
+    let holdRefresh = false;
     const harness = createHarness(async (provider) => {
       calls += 1;
-      if (provider === "codex") return pending.promise;
+      if (holdRefresh && provider === "codex") return pending.promise;
       return listValue("claude", provider);
     });
 
+    harness.controller.loadInitial("D:\\work");
+    await waitFor(() => !harness.loading);
+    calls = 0;
+    holdRefresh = true;
     const first = harness.controller.refresh();
     const second = harness.controller.refresh();
     assert.equal(first, second);
@@ -198,6 +218,43 @@ describe("HistoryController", () => {
     pending.resolve(listValue("codex", "codex"));
     await first;
     assert.equal(calls, 2);
+  });
+
+  it("loads and paginates recent sessions across all workspaces", async () => {
+    const calls: Array<{ provider: AgentProvider; params: JsonObject }> = [];
+    const harness = createHarness(async (provider, operation, params) => {
+      assert.equal(operation, "listSessions");
+      calls.push({ provider, params });
+      const page = params.cursor ? "later" : "first";
+      return listValue(`${provider}-${page}`, provider, params.cursor ? null : `${provider}-next`);
+    });
+
+    await harness.controller.loadRecent();
+    assert.equal(harness.recentLoading, false);
+    assert.deepEqual(JSON.parse(harness.recentCursor || "{}"), { codex: "codex-next", claude: "claude-next" });
+    assert.ok(calls.every((call) => call.params.allWorkspaces === true && call.params.cwd === undefined && call.params.limit === 50));
+
+    await harness.controller.loadMoreRecent();
+    assert.equal(harness.recentCursor, null);
+    assert.deepEqual(harness.entries.map((entry) => entry.id).sort(), ["claude-first", "claude-later", "codex-first", "codex-later"]);
+  });
+
+  it("keeps directory and all-workspace content search scopes explicit", async () => {
+    const calls: Array<{ provider: AgentProvider; params: JsonObject }> = [];
+    const harness = createHarness(async (provider, operation, params) => {
+      if (operation !== "searchSessions") return listValue("unused", provider);
+      calls.push({ provider, params });
+      return searchValue(`${provider}-result`, provider);
+    });
+
+    harness.controller.loadInitial("D:\\work");
+    await waitFor(() => !harness.loading);
+    await harness.controller.search("local", "directory");
+    assert.ok(calls.every((call) => call.params.cwd === "D:\\work" && call.params.allWorkspaces === undefined));
+
+    calls.length = 0;
+    await harness.controller.search("global", "allWorkspaces");
+    assert.ok(calls.every((call) => call.params.cwd === undefined && call.params.allWorkspaces === true));
   });
 
   it("lets the latest search win when responses arrive out of order", async () => {

@@ -32,5 +32,11 @@ async page => {
   assert(state.collapsed, "重启后侧栏收起状态丢失。");
   assert(state.workingTabs === 0, "重启后仍有会话伪装成正在运行。");
   assert(state.savedPaneCount === 2 && state.savedSessionCount === 3, "恢复成功后现场快照被清空或不完整。");
-  return { ok: true, results: ["两栏与活动栏已恢复", "三个 Tab 已恢复", "两个草稿已恢复", "侧栏状态已恢复", "现场快照恢复后继续保留"] };
+  const restoredTitle = "AgentDesk restart content fixture";
+  const restoredContent = "AgentDesk restart restored content";
+  const restoredTab = page.locator(".tab", { hasText: restoredTitle }).first();
+  await restoredTab.waitFor({ state: "visible", timeout: 15_000 });
+  await restoredTab.click();
+  await page.waitForFunction((content) => Array.from(document.querySelectorAll(".message-row")).some((row) => row.textContent?.includes(content)), restoredContent, { timeout: 15_000 });
+  return { ok: true, results: ["两栏与活动栏已恢复", "三个 Tab 已恢复", "两个草稿已恢复", "历史消息已自动恢复", "侧栏状态已恢复", "现场快照恢复后继续保留"] };
 }

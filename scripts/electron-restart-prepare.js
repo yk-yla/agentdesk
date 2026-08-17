@@ -6,6 +6,13 @@ async page => {
   await sidebar.waitFor({ state: "visible", timeout: 15_000 });
   await page.waitForFunction(() => document.querySelectorAll(".pane-panel").length === 1 && Boolean(document.querySelector('.pane-panel textarea[aria-label="消息输入"]')), null, { timeout: 15_000 });
 
+  const restoredTitle = "AgentDesk restart content fixture";
+  const restoredContent = "AgentDesk restart restored content";
+  const restoredHistory = sidebar.locator(".thread-item", { hasText: restoredTitle }).first();
+  await restoredHistory.waitFor({ state: "visible", timeout: 15_000 });
+  await restoredHistory.click({ force: true });
+  await page.waitForFunction((content) => Array.from(document.querySelectorAll(".message-row")).some((row) => row.textContent?.includes(content)), restoredContent, { timeout: 15_000 });
+
   const initialTabCount = await page.locator(".tab").count();
   await sidebar.locator(".current-workspace .provider-new-codex").click({ force: true });
   await page.waitForFunction((previousCount) => document.querySelectorAll(".tab").length === previousCount + 1, initialTabCount, { timeout: 15_000 });
@@ -32,5 +39,5 @@ async page => {
   assert(state.activePaneIndex === 1, `退出前活动栏不正确：${state.activePaneIndex}`);
   assert(JSON.stringify(state.drafts) === JSON.stringify([leftDraft, rightDraft]), `退出前草稿不正确：${JSON.stringify(state.drafts)}`);
   assert(state.collapsed, "退出前侧栏没有收起。");
-  return { ok: true, state };
+  return { ok: true, state: { ...state, restoredContentLoaded: true } };
 }

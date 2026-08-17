@@ -5,7 +5,7 @@ export interface ClaudeSearchSession {
   firstPrompt?: string;
 }
 
-type MessageLoader = (sessionId: string, options: { dir: string; limit: number; offset: number }) => Promise<unknown>;
+type MessageLoader = (sessionId: string, options: { dir?: string; limit: number; offset: number }) => Promise<unknown>;
 
 export function visibleSessionText(value: unknown, budget = 64 * 1024) {
   const parts: string[] = [];
@@ -41,10 +41,10 @@ export function searchSnippet(text: string, needle: string) {
   return text.slice(start, start + 800);
 }
 
-export async function sessionSearchText(session: ClaudeSearchSession, cwd: string, loadMessages: MessageLoader) {
+export async function sessionSearchText(session: ClaudeSearchSession, cwd: string | undefined, loadMessages: MessageLoader) {
   let text = [session.customTitle, session.summary, session.firstPrompt].filter(Boolean).join("\n");
   for (let offset = 0; offset < 1_000; offset += 200) {
-    const messages = await loadMessages(session.sessionId, { dir: cwd, limit: 200, offset });
+    const messages = await loadMessages(session.sessionId, { ...(cwd ? { dir: cwd } : {}), limit: 200, offset });
     text = `${text}\n${visibleSessionText(messages)}`.slice(0, 512 * 1024);
     if (!Array.isArray(messages) || messages.length < 200) break;
   }

@@ -414,21 +414,20 @@ body.resizing-sidebar, body.resizing-sidebar * { cursor: col-resize !important; 
 .provider-mark img.provider-mark-source { display: none; }
 .provider-mark-monochrome { display: block; width: 100%; height: 100%; background: currentColor; -webkit-mask-position: center; -webkit-mask-repeat: no-repeat; -webkit-mask-size: contain; mask-position: center; mask-repeat: no-repeat; mask-size: contain; }
 .provider-mark-fallback { display: grid; place-items: center; width: 100%; height: 100%; color: var(--muted-strong); font-size: 8px; font-weight: 700; line-height: 1; }
-.history-filter-row { min-width: 0; min-height: 30px; display: flex; align-items: center; gap: 4px; }
-.history-view-switch { min-width: 0; flex: 1; display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 2px; padding: 2px; background: var(--surface); border: 1px solid var(--border); border-radius: 5px; }
-.history-view-switch button { min-width: 0; height: 24px; display: inline-flex; align-items: center; justify-content: center; gap: 4px; padding: 0 5px; overflow: hidden; color: var(--muted); background: transparent; border-radius: 3px; font: inherit; font-size: var(--font-size-xs); white-space: nowrap; }
-.history-view-switch button.active { color: var(--text); background: color-mix(in srgb, var(--accent) 13%, var(--surface-raised)); box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--accent) 28%, var(--border)); }
-.history-view-switch button.active svg { color: var(--accent-strong); }
-.history-view-label-narrow { display: none; }
+.sidebar-history-view-switch { min-width: 0; display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 2px; padding: 2px; background: var(--surface); border: 1px solid var(--border); border-radius: 5px; }
+.sidebar-history-view-switch button { min-width: 0; height: 27px; display: inline-flex; align-items: center; justify-content: center; gap: 4px; padding: 0 4px; overflow: hidden; color: var(--muted); background: transparent; border-radius: 3px; font: inherit; font-size: var(--font-size-xs); white-space: nowrap; }
+.sidebar-history-view-switch button:hover { color: var(--text); background: var(--surface-hover); }
+.sidebar-history-view-switch button.active { color: var(--text); background: color-mix(in srgb, var(--accent) 13%, var(--surface-raised)); box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--accent) 28%, var(--border)); }
+.sidebar-history-view-switch button.active svg { color: var(--accent-strong); }
+.history-filter-row { min-width: 0; min-height: 30px; display: flex; align-items: center; justify-content: space-between; gap: 4px; }
+.history-scope-label { min-width: 0; overflow: hidden; color: var(--muted); font-size: var(--font-size-xs); text-overflow: ellipsis; white-space: nowrap; }
 .provider-filter { flex: none; display: flex; align-items: center; gap: 2px; min-height: 28px; padding: 0; border-bottom: 0; }
 .provider-filter button { min-width: 26px; height: 28px; display: inline-flex; align-items: center; justify-content: center; gap: 4px; padding: 0 6px; color: var(--muted); background: transparent; border: 1px solid var(--border); border-radius: 4px; font: inherit; font-size: var(--font-size-xs); cursor: pointer; }
 .provider-filter button.active { color: var(--text); background: var(--surface-raised); }
 .thread-item > .provider-mark { margin-right: 5px; }
 .tab > .provider-mark { margin-right: 5px; }
 @container (max-width: 220px) {
-  .history-view-label-wide { display: none; }
-  .history-view-label-narrow { display: inline; }
-  .history-view-switch button { gap: 2px; padding-inline: 2px; }
+  .sidebar-history-view-switch button { gap: 2px; padding-inline: 2px; font-size: var(--font-size-2xs); }
   .provider-filter button { min-width: 24px; padding-inline: 4px; }
 }
 @container (max-width: 195px) {

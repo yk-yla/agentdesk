@@ -114,11 +114,19 @@ async page => {
     await settingsPopover.waitFor({ state: "hidden", timeout: 10_000 });
     results.push("设置弹层仅保留三套主题且切换可用");
 
-    await sidebar.getByRole("tab", { name: "已收藏" }).click({ force: true });
+    await sidebar.getByRole("tab", { name: "收藏", exact: true }).click({ force: true });
     await sidebar.locator('nav[aria-label="已收藏会话列表"]').waitFor({ state: "visible", timeout: 10_000 });
+    assert(await currentWorkspace.count() === 0, "收藏视图仍显示当前目录卡片。" );
+    assert(await sidebar.locator(".history-content-search").count() === 0, "收藏视图仍显示正文搜索入口。" );
+    await sidebar.getByRole("tab", { name: "全部最近", exact: true }).click({ force: true });
+    await sidebar.locator('nav[aria-label="全部最近会话列表"]').waitFor({ state: "visible", timeout: 10_000 });
+    assert(await currentWorkspace.count() === 0, "全部最近视图仍显示当前目录卡片。" );
+    assert(await sidebar.getByRole("button", { name: "搜索所有目录会话正文" }).count() === 1, "全部最近视图缺少跨目录正文搜索入口。" );
     await sidebar.getByRole("tab", { name: "当前目录" }).click({ force: true });
     await sidebar.locator('nav[aria-label="当前目录会话列表"]').waitFor({ state: "visible", timeout: 10_000 });
-    results.push("历史目录和收藏视图可切换");
+    await currentWorkspace.waitFor({ state: "visible", timeout: 10_000 });
+    assert(await sidebar.getByRole("button", { name: "搜索当前目录会话正文" }).count() === 1, "当前目录视图缺少目录内正文搜索入口。" );
+    results.push("当前目录、收藏和全部最近视图可切换，搜索范围正确");
 
     await openClaude();
     const model = activeModel();

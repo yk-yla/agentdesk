@@ -735,11 +735,11 @@ async function workerRequest(command: Exclude<ClaudeWorkerCommand, { type: "star
       return await compactSession(command);
     }
     case "listSessions": {
-      const sessions = await listSessions({ dir: command.cwd, limit: command.limit, offset: command.offset, includeWorktrees: command.includeWorktrees });
+      const sessions = await listSessions({ ...(command.cwd ? { dir: command.cwd } : {}), limit: command.limit, offset: command.offset, includeWorktrees: command.includeWorktrees });
       return { data: sessions.map(sessionSummary), hasMore: sessions.length === command.limit };
     }
     case "searchSessions": {
-      const sessions = await listSessions({ dir: command.cwd, limit: Math.max(command.limit * 4, 100), offset: command.offset, includeWorktrees: command.includeWorktrees });
+      const sessions = await listSessions({ ...(command.cwd ? { dir: command.cwd } : {}), limit: Math.max(command.limit * 4, 100), offset: command.offset, includeWorktrees: command.includeWorktrees });
       const needle = command.searchTerm.toLocaleLowerCase();
       const results: Array<Record<string, unknown>> = [];
       let scannedCount = 0;
@@ -747,7 +747,7 @@ async function workerRequest(command: Exclude<ClaudeWorkerCommand, { type: "star
         scannedCount += 1;
         let text = [session.customTitle, session.summary, session.firstPrompt].filter(Boolean).join("\n");
         try {
-          text = await sessionSearchText(session, command.cwd, getSessionMessages);
+          text = await sessionSearchText(session, session.cwd || command.cwd, getSessionMessages);
         } catch {
           // 单条历史读取失败不应阻断后续扫描；摘要仍可用于命中。
         }

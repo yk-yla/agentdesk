@@ -266,33 +266,43 @@ export class ClaudeBackend implements AgentBackend {
   }
 
   private async listSessions(params: JsonObject, context: AgentRequestContext) {
-    const cwd = canonicalWorkspace(typeof params.cwd === "string" ? params.cwd : context.canonicalCwd || "");
-    if (!cwd) throw new Error("Claude 历史缺少工作区。");
+    const allWorkspaces = params.allWorkspaces === true;
+    const cwd = allWorkspaces ? "" : canonicalWorkspace(typeof params.cwd === "string" ? params.cwd : context.canonicalCwd || "");
+    if (!allWorkspaces && !cwd) throw new Error("Claude 历史缺少工作区。");
     const limit = Math.min(Math.max(Number(params.limit) || 100, 1), 100);
     const cursor = typeof params.cursor === "string" && params.cursor ? Number(params.cursor) : 0;
-    const result = await this.runtime.request({ type: "listSessions", cwd, limit, offset: Number.isSafeInteger(cursor) && cursor >= 0 ? cursor : 0, includeWorktrees: false });
+    const result = await this.runtime.request({ type: "listSessions", ...(cwd ? { cwd } : {}), limit, offset: Number.isSafeInteger(cursor) && cursor >= 0 ? cursor : 0, includeWorktrees: false });
     const value = result && typeof result === "object" ? result as Record<string, unknown> : {};
     const data = Array.isArray(value.data) ? value.data : [];
-    for (const item of data) {
-      const record = item && typeof item === "object" ? item as Record<string, unknown> : {};
-      if (typeof record.id === "string") this.rememberNativeSession(cwd, record.id);
-    }
+    this.rememberHistoryEntries(data, cwd);
     return { data, nextCursor: value.hasMore === true ? String((Number.isSafeInteger(cursor) && cursor >= 0 ? cursor : 0) + data.length) : null };
   }
 
   private async searchSessions(params: JsonObject, context: AgentRequestContext) {
-    const cwd = canonicalWorkspace(typeof params.cwd === "string" ? params.cwd : context.canonicalCwd || "");
+    const allWorkspaces = params.allWorkspaces === true;
+    const cwd = allWorkspaces ? "" : canonicalWorkspace(typeof params.cwd === "string" ? params.cwd : context.canonicalCwd || "");
     const searchTerm = typeof params.searchTerm === "string" ? params.searchTerm.trim() : "";
-    if (!cwd || !searchTerm) return { data: [], nextCursor: null };
+    if ((!allWorkspaces && !cwd) || !searchTerm) return { data: [], nextCursor: null };
     const limit = Math.min(Math.max(Number(params.limit) || 100, 1), 100);
     const cursor = typeof params.cursor === "string" && params.cursor ? Number(params.cursor) : 0;
-    const result = await this.runtime.request({ type: "searchSessions", cwd, searchTerm, limit, offset: Number.isSafeInteger(cursor) && cursor >= 0 ? cursor : 0, includeWorktrees: false });
+    const result = await this.runtime.request({ type: "searchSessions", ...(cwd ? { cwd } : {}), searchTerm, limit, offset: Number.isSafeInteger(cursor) && cursor >= 0 ? cursor : 0, includeWorktrees: false });
     const value = result && typeof result === "object" ? result as Record<string, unknown> : {};
     const data = Array.isArray(value.data) ? value.data : [];
+    this.rememberHistoryEntries(data, cwd);
     const scannedCount = typeof value.scannedCount === "number" && Number.isSafeInteger(value.scannedCount) && value.scannedCount >= 0
       ? value.scannedCount
       : data.length;
     return { data, nextCursor: value.hasMore === true ? String((Number.isSafeInteger(cursor) && cursor >= 0 ? cursor : 0) + scannedCount) : null };
+  }
+
+  private rememberHistoryEntries(data: unknown[], fallbackCwd: string) {
+    for (const item of data) {
+      const record = item && typeof item === "object" && !Array.isArray(item) ? item as Record<string, unknown> : {};
+      const thread = record.thread && typeof record.thread === "object" && !Array.isArray(record.thread) ? record.thread as Record<string, unknown> : record;
+      const nativeSessionId = typeof thread.id === "string" ? thread.id : "";
+      const entryCwd = typeof thread.cwd === "string" && thread.cwd.trim() ? canonicalWorkspace(thread.cwd) : fallbackCwd;
+      if (nativeSessionId && entryCwd) this.rememberNativeSession(entryCwd, nativeSessionId);
+    }
   }
 
   private async readSession(params: JsonObject, context: AgentRequestContext) {
