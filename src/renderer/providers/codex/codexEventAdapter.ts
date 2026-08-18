@@ -176,6 +176,16 @@ function planFromParams(value: unknown): SessionPlan {
   return { explanation: stringValue(params.explanation), steps: plan, updatedAt: Date.now() };
 }
 
+function settlePlan(plan: SessionPlan | null, turnStatus: string): SessionPlan | null {
+  if (!plan || !plan.steps.some((step) => step.status === "inProgress")) return plan;
+  const status: PlanStepStatus = turnStatus === "completed" ? "completed" : "pending";
+  return {
+    ...plan,
+    steps: plan.steps.map((step) => step.status === "inProgress" ? { ...step, status } : step),
+    updatedAt: Date.now(),
+  };
+}
+
 function retryStateFromParams(source: SessionState, params: ReturnType<typeof asRecord>): RetryState {
   const error = asRecord(params.error);
   const turnId = stringValue(params.turnId, source.activeTurnId || "");
@@ -588,6 +598,7 @@ export function applyServerMessage(source: SessionState, message: JsonRpcMessage
   if (method === "turn/started") {
     const turn = asRecord(params.turn);
     session.activeTurnId = stringValue(turn.id) || null;
+    session.plan = null;
     session.status = "working";
     session.statusLabel = "工作中";
     session.startedAt = Date.now();
@@ -608,6 +619,7 @@ export function applyServerMessage(source: SessionState, message: JsonRpcMessage
     if (session.messages.some((entry) => entry.streaming)) {
       session.messages = session.messages.map((entry) => entry.streaming ? { ...entry, streaming: false } : entry);
     }
+    session.plan = settlePlan(session.plan, status);
     if (status === "failed") session.errorText = stringValue(asRecord(turn.error).message, "任务执行失败");
     else if (session.errorText === BACKGROUND_TIMEOUT_ERROR) session.errorText = "";
   } else if (method === "error") {
@@ -630,12 +642,16 @@ export function applyServerMessage(source: SessionState, message: JsonRpcMessage
       if (session.messages.some((entry) => entry.streaming)) {
         session.messages = session.messages.map((entry) => entry.streaming ? { ...entry, streaming: false } : entry);
       }
+      session.plan = settlePlan(session.plan, "failed");
     }
   } else if (method === "turn/plan/updated") {
     const currentPlan = planFromParams(params);
-    session.plan = currentPlan;
-    const activeStep = asRecord(currentPlan.steps.find((entry) => entry.status === "inProgress"));
-    session.statusLabel = stringValue(activeStep.step, "工作中");
+    const eventTurnId = stringValue(params.turnId);
+    if ((!eventTurnId || !session.activeTurnId || eventTurnId === session.activeTurnId) && (session.status === "working" || session.activeTurnId)) {
+      session.plan = currentPlan;
+      const activeStep = asRecord(currentPlan.steps.find((entry) => entry.status === "inProgress"));
+      session.statusLabel = stringValue(activeStep.step, "工作中");
+    }
   } else if (method === "thread/goal/updated") {
     const goal = goalFromValue(params.goal);
     if (goal) session.goal = goal;

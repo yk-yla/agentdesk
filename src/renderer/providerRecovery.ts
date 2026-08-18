@@ -16,5 +16,10 @@ export function recoverProviderSessions(sessions: Record<string, SessionState>, 
       ? session.messages.map((message) => message.streaming ? { ...message, streaming: false } : message)
       : session.messages,
     errorText: `${providerName} 服务异常退出，未完成的追加任务已保留，请重新发送或关闭此提示后重试。`,
+    plan: session.plan ? {
+      ...session.plan,
+      steps: session.plan.steps.map((step) => step.status === "inProgress" ? { ...step, status: "pending" as const } : step),
+      updatedAt: Date.now(),
+    } : null,
   }] : [id, session])) as Record<string, SessionState>;
 }

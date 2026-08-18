@@ -8,6 +8,33 @@ function event(type: string, payload: unknown, queryGeneration = 1) {
 }
 
 describe("Claude activity settlement", () => {
+  it("limits long Claude sessions so the current view stays responsive", () => {
+    const source = emptySession("session", "C:\\workspace", "", "", "claude");
+    source.messages = Array.from({ length: 2_001 }, (_, index) => ({
+      id: `message-${index}`,
+      role: "assistant" as const,
+      text: `message ${index}`,
+      images: [],
+    }));
+    source.activities = Array.from({ length: 2_001 }, (_, index) => ({
+      id: `activity-${index}`,
+      kind: "other" as const,
+      title: `activity ${index}`,
+      detail: "done",
+      status: "completed" as const,
+      visibleInMain: false,
+    }));
+
+    const limited = applyClaudeEvent(source, event("claude/contextUsage", {})).session;
+
+    assert.equal(limited.messages.length, 2_000);
+    assert.equal(limited.messages[0].id, "claude-message-history-trimmed");
+    assert.equal(limited.messages.at(-1)?.id, "message-2000");
+    assert.equal(limited.activities.length, 2_000);
+    assert.equal(limited.activities[0].id, "claude-activity-history-trimmed");
+    assert.equal(limited.activities.at(-1)?.id, "activity-2000");
+  });
+
   it("hydrates string and block content from Claude session history", () => {
     const source = emptySession("session", "C:\\workspace", "", "", "claude");
     const hydrated = hydrateClaudeSession(source, {

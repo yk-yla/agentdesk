@@ -5,6 +5,7 @@ import type { JsonObject } from "../shared/protocol";
 import { CODEX_CAPABILITIES, emptySession, type ImageAttachment, type PendingSteerMessage, type QueuedMessage, type SessionState } from "./domain";
 import { CodexRequestError } from "./inputQueue";
 import { SessionMessageController } from "./sessionMessageController";
+import { MAX_SESSION_QUEUED_MESSAGES } from "./queueLimits";
 
 type RequestHandler = (operation: AgentOperation, params: JsonObject) => Promise<unknown>;
 
@@ -80,6 +81,19 @@ function message(id: string, text: string, queueKind: QueuedMessage["queueKind"]
 }
 
 describe("SessionMessageController", () => {
+  it("returns new input to the draft when the queue is full", () => {
+    const harness = createHarness();
+    harness.sessions.session = { ...harness.sessions.session, status: "working", threadId: "thread", activeTurnId: "turn" };
+    harness.sessions.session.capabilities.steer = "unsupported";
+    harness.queued.session = Array.from({ length: MAX_SESSION_QUEUED_MESSAGES }, (_, index) => message(String(index + 1), `queued ${index + 1}`));
+
+    harness.controller.sendMessage("session", "keep this input");
+
+    assert.equal(harness.queued.session.length, MAX_SESSION_QUEUED_MESSAGES);
+    assert.equal(harness.restored[0]?.[0]?.text, "keep this input");
+    assert.match(harness.sessions.session.errorText, /最多保留 100 条/);
+  });
+
   it("does not submit or queue messages for a read-only session", async () => {
     const harness = createHarness();
     harness.sessions.session.readOnly = true;

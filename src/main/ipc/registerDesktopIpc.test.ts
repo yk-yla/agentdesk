@@ -58,6 +58,7 @@ describe("desktop IPC validation", () => {
     assert.deepEqual(validateClientLog({ level: "error", event: "ui.click", details: { tag: "button" } }), { level: "error", event: "ui.click", details: { tag: "button" } });
     assert.throws(() => validateClientLog({ level: "trace", event: "bad" }), /客户端日志无效/);
     assert.throws(() => validateClientLog({ event: "" }), /客户端日志无效/);
+    assert.throws(() => validateClientLog({ event: "too-large", details: { payload: "x".repeat(64 * 1024) } }), /客户端日志无效/);
   });
 
   it("accepts only bounded workspace snapshot responses", () => {

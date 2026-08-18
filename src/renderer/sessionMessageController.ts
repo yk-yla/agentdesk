@@ -3,6 +3,7 @@ import type { JsonObject } from "../shared/protocol";
 import { commandUsageKey, resolveComposerInput } from "./commandSuggestions";
 import { asRecord, sessionTitle, stringValue, type ImageAttachment, type PendingSteerMessage, type QueuedMessage, type SessionState, type SkillOption } from "./domain";
 import type { TurnTelemetry } from "./turnTelemetry";
+import { MAX_SESSION_QUEUED_MESSAGES } from "./queueLimits";
 import {
   actualTurnIdFromInterruptMismatch,
   actualTurnIdFromMismatch,
@@ -328,6 +329,11 @@ export class SessionMessageController {
       sequence: this.inputSequence,
     };
     if (!commandName) state.replaceAttachments(sessionId, []);
+    if (session.status === "working" && commandName !== "status" && commandName !== "mcp" && state.getQueued(sessionId).length + state.getPendingSteers(sessionId).length >= MAX_SESSION_QUEUED_MESSAGES) {
+      this.setError(sessionId, new Error(`排队消息最多保留 ${MAX_SESSION_QUEUED_MESSAGES} 条，请等待前面的任务完成。`), "排队消息过多。");
+      services.restoreMessagesToDraft(sessionId, [message]);
+      return;
+    }
     if (commandName === "status" || commandName === "mcp") {
       void this.runMessage(sessionId, message).then((accepted) => {
         if (!accepted) services.restoreMessagesToDraft(sessionId, [message]);

@@ -47,6 +47,13 @@ jobs:
           if ($env:GITHUB_REF_NAME -ne "v$version") {
             throw "Tag $env:GITHUB_REF_NAME does not match package version $version"
           }
+          $releaseNotes = ".github/release-notes/$env:GITHUB_REF_NAME.md"
+          if (-not (Test-Path -LiteralPath $releaseNotes -PathType Leaf)) {
+            throw "Missing release notes: $releaseNotes"
+          }
+          if ([string]::IsNullOrWhiteSpace((Get-Content -LiteralPath $releaseNotes -Raw))) {
+            throw "Release notes are empty: $releaseNotes"
+          }
 
       - name: Verify packaged providers
         shell: pwsh
@@ -59,4 +66,5 @@ jobs:
         run: |
           $version = (Get-Content package.json -Raw | ConvertFrom-Json).version
           $installer = "build/release/AgentDesk-Setup-$version.exe"
-          gh release create $env:GITHUB_REF_NAME $installer "$installer.blockmap" "build/release/latest.yml" --verify-tag --generate-notes --title "AgentDesk $version"
+          $releaseNotes = ".github/release-notes/$env:GITHUB_REF_NAME.md"
+          gh release create $env:GITHUB_REF_NAME $installer "$installer.blockmap" "build/release/latest.yml" --verify-tag --notes-file $releaseNotes --title "AgentDesk $version"

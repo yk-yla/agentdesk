@@ -60,6 +60,19 @@ export class ClaudeProcessTreeController {
 
   constructor(private readonly terminate: TreeTerminator = terminateClaudeProcessTree) {}
 
+  private async terminateWithRetry(child: TrackedClaudeProcess) {
+    try {
+      await this.terminate(child);
+    } catch (firstError) {
+      try {
+        await this.terminate(child);
+      } catch (secondError) {
+        const reason = secondError instanceof Error ? secondError.message : String(secondError);
+        throw new AggregateError([firstError, secondError], `Claude 进程树 ${child.pid || "未知"} 终止失败：${reason}`);
+      }
+    }
+  }
+
   track(sessionId: string, generation: number, child: ChildProcess | TrackedClaudeProcess) {
     const key = queryKey(sessionId, generation);
     if (this.roots.has(key)) throw new Error("Claude Query 已记录根进程。" );
@@ -77,7 +90,7 @@ export class ClaudeProcessTreeController {
     if (existing) return existing;
     const child = this.roots.get(key);
     if (!child) return Promise.resolve();
-    const promise = this.terminate(child).then(() => {
+    const promise = this.terminateWithRetry(child).then(() => {
       if (this.roots.get(key) === child) this.roots.delete(key);
     }).finally(() => {
       this.closing.delete(key);

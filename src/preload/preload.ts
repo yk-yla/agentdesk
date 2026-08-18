@@ -27,6 +27,9 @@ const bridge: Omit<CodexBridge, "request" | "respond" | "onMessage"> = {
   writeLog(entry: ClientLogEntry) {
     return ipcRenderer.invoke("agentdesk:write-log", entry);
   },
+  exportDiagnostics() {
+    return ipcRenderer.invoke("agentdesk:export-diagnostics");
+  },
   getBossKeyStatus() {
     return ipcRenderer.invoke("agentdesk:boss-key-status");
   },
@@ -74,12 +77,6 @@ const bridge: Omit<CodexBridge, "request" | "respond" | "onMessage"> = {
   },
   getUpdateStatus() {
     return ipcRenderer.invoke("agentdesk:update-status");
-  },
-  saveUpdateToken(token: string) {
-    return ipcRenderer.invoke("agentdesk:update-save-token", token);
-  },
-  clearUpdateToken() {
-    return ipcRenderer.invoke("agentdesk:update-clear-token");
   },
   checkForUpdates() {
     return ipcRenderer.invoke("agentdesk:update-check");
@@ -158,6 +155,7 @@ const agentBridge: AgentBridge = {
   getCodexDefaults: bridge.getCodexDefaults,
   savePreferences: bridge.savePreferences,
   writeLog: bridge.writeLog,
+  exportDiagnostics: bridge.exportDiagnostics,
   getBossKeyStatus: bridge.getBossKeyStatus,
   setBossKey: bridge.setBossKey,
   saveClipboardImage: bridge.saveClipboardImage,
@@ -174,8 +172,6 @@ const agentBridge: AgentBridge = {
   minimizeWindow: bridge.minimizeWindow,
   toggleMaximizeWindow: bridge.toggleMaximizeWindow,
   getUpdateStatus: bridge.getUpdateStatus,
-  saveUpdateToken: bridge.saveUpdateToken,
-  clearUpdateToken: bridge.clearUpdateToken,
   checkForUpdates: bridge.checkForUpdates,
   downloadUpdate: bridge.downloadUpdate,
   installUpdate: bridge.installUpdate,

@@ -31,4 +31,19 @@ describe("Claude process tree controller", () => {
     await assert.rejects(controller.close("a", 3), /terminate failed/);
     assert.equal(controller.rootPid("a", 3), 303);
   });
+
+  it("retries a transient process termination failure", async () => {
+    let attempts = 0;
+    const controller = new ClaudeProcessTreeController(async (child) => {
+      attempts += 1;
+      if (attempts === 1) throw new Error("temporary failure");
+      child.kill("SIGKILL");
+    });
+    controller.track("a", 1, new FakeProcess(404));
+
+    await controller.close("a", 1);
+
+    assert.equal(attempts, 2);
+    assert.equal(controller.rootPid("a", 1), null);
+  });
 });

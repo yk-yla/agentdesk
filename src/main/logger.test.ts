@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { describe, it } from "node:test";
@@ -48,6 +48,26 @@ describe("FileLogger", () => {
     } finally {
       if (previous === undefined) delete process.env.AGENTDESK_DEBUG_LOGS;
       else process.env.AGENTDESK_DEBUG_LOGS = previous;
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+
+  it("adds a stable app run id and rotates a full daily file", async () => {
+    const directory = await mkdtemp(path.join(tmpdir(), "agentdesk-logger-rotate-"));
+    try {
+      const today = "2026-08-10";
+      await writeFile(path.join(directory, `agentdesk-${today}.ndjson`), Buffer.alloc(8 * 1024 * 1024, 65));
+      const logger = new FileLogger(() => directory, () => new Date("2026-08-10T12:00:00.000Z"));
+      logger.log("info", "first", { provider: "codex" });
+      logger.log("info", "second", { provider: "claude" });
+      await logger.flush();
+
+      const first = JSON.parse((await readFile(path.join(directory, `agentdesk-${today}.1.ndjson`), "utf8")).trim().split("\n")[0]) as Record<string, unknown>;
+      const second = JSON.parse((await readFile(path.join(directory, `agentdesk-${today}.1.ndjson`), "utf8")).trim().split("\n")[1]) as Record<string, unknown>;
+      assert.equal(typeof first.appRunId, "string");
+      assert.equal(first.appRunId, second.appRunId);
+      assert.equal((await stat(path.join(directory, `agentdesk-${today}.ndjson`))).size, 8 * 1024 * 1024);
+    } finally {
       await rm(directory, { recursive: true, force: true });
     }
   });

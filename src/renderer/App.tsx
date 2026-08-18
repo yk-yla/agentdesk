@@ -1,4 +1,4 @@
-import { ArrowLeftToLine, ArrowRight, ArrowRightToLine, Download, GitFork, Pencil, Pin, PinOff, Plus, Star, Trash2, X } from "lucide-react";
+import { ArrowLeftToLine, ArrowRight, ArrowRightToLine, Download, FolderOpen, GitFork, Pencil, Pin, PinOff, Plus, Star, Trash2, X } from "lucide-react";
 import { lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState, type CSSProperties, type DragEvent, type MouseEvent, type PointerEvent as ReactPointerEvent } from "react";
 import type { AgentCapabilities, AgentOperation, AgentProvider } from "../shared/agentProtocol";
 import { DEFAULT_BOSS_KEY } from "../shared/bossKey";
@@ -59,7 +59,7 @@ const NO_SKILLS: SkillOption[] = [];
 const READ_ONLY_SESSION_OPERATIONS = new Set<AgentOperation>([
   "readSession", "resumeSession", "getGoal", "readRateLimits", "listMcpServers", "listSkills", "closeSession",
 ]);
-const INITIAL_UPDATE_STATUS: DesktopUpdateStatus = { phase: "idle", currentVersion: "", message: "仅在手动检查时连接 GitHub。", tokenConfigured: false, repositoryUrl: "https://github.com/yxb715/agentdesk" };
+const INITIAL_UPDATE_STATUS: DesktopUpdateStatus = { phase: "idle", currentVersion: "", message: "仅在手动检查时连接公开 GitHub。", repositoryUrl: "https://github.com/yk-yla/agentdesk" };
 const INITIAL_CLI_UPDATE_STATUS: CodexCliUpdateStatus = { phase: "idle", currentVersion: "", message: "正在读取 Codex CLI 版本。" };
 const INITIAL_CLAUDE_RUNTIME_STATUS: ClaudeRuntimeStatus = { phase: "idle", binarySource: "sdk", binaryVersion: "", sdkVersion: "", credentialsAvailable: false, credentialSource: "unavailable", credentialMessage: "正在读取 Claude 配置。", message: "仅在手动检查时连接 Claude Code 发布源。" };
 const INITIAL_BOSS_KEY_STATUS: BossKeyStatus = { accelerator: DEFAULT_BOSS_KEY, registered: false, message: "正在检查老板键。" };
@@ -624,6 +624,8 @@ export default function App() {
     try {
       next = await bridge.savePreferences(patch);
     } catch (error) {
+      const fields = Object.keys(patch).filter((field) => ["theme", "displayMode", "baseFontSize", "sidebarWidth", "bossKey"].includes(field));
+      if (fields.length) trackUiEvent("preference.save_failed", { fields, errorName: error instanceof Error ? error.name : "unknown" });
       // If the write failed and no newer write replaced this field, restore the
       // last known persisted value before propagating the error to the caller.
       const rollback = preferenceSaveCoordinatorRef.current.accept(ticket, previous);
@@ -856,36 +858,45 @@ export default function App() {
     if (event.button !== 0) return;
     event.preventDefault();
     const pointerId = event.pointerId;
+    const handle = event.currentTarget;
     let nextWidth = sidebarWidthFromPointer(event.clientX);
     setSidebarWidth(nextWidth);
     document.body.classList.add("resizing-sidebar");
+    trackUiEvent("sidebar.resize_started", { pointerType: event.pointerType, width: nextWidth });
+    try { handle.setPointerCapture(pointerId); } catch { /* Window listeners still finish the gesture. */ }
 
     const resize = (pointerEvent: PointerEvent) => {
       if (pointerEvent.pointerId !== pointerId) return;
       nextWidth = sidebarWidthFromPointer(pointerEvent.clientX);
       setSidebarWidth(nextWidth);
     };
-    const finish = (pointerEvent: PointerEvent) => {
-      if (pointerEvent.pointerId !== pointerId) return;
+    let finished = false;
+    let timeoutId = 0;
+    const cleanup = (reason: string) => {
+      if (finished) return;
+      finished = true;
       window.removeEventListener("pointermove", resize);
       window.removeEventListener("pointerup", finish);
       window.removeEventListener("pointercancel", finish);
+      window.removeEventListener("blur", finishOnBlur);
+      window.clearTimeout(timeoutId);
       document.body.classList.remove("resizing-sidebar");
+      try { if (handle.hasPointerCapture(pointerId)) handle.releasePointerCapture(pointerId); } catch { /* Capture may already be gone. */ }
+      trackUiEvent("sidebar.resize_finished", { reason, width: nextWidth });
       void savePreference({ sidebarWidth: nextWidth }).catch(() => undefined);
     };
+    const finish = (pointerEvent: PointerEvent) => {
+      if (pointerEvent.pointerId !== pointerId) return;
+      cleanup(pointerEvent.type);
+    };
+    const finishOnBlur = () => cleanup("window_blur");
 
     window.addEventListener("pointermove", resize);
     window.addEventListener("pointerup", finish);
     window.addEventListener("pointercancel", finish);
+    window.addEventListener("blur", finishOnBlur);
+    timeoutId = window.setTimeout(() => cleanup("timeout"), 30_000);
   }, [savePreference]);
-
-  const saveUpdateToken = useCallback(async (token: string) => {
-    setUpdateStatus(await bridge.saveUpdateToken(token));
-  }, [bridge]);
-
-  const clearUpdateToken = useCallback(async () => {
-    setUpdateStatus(await bridge.clearUpdateToken());
-  }, [bridge]);
 
   const checkForUpdates = useCallback(async () => {
     setUpdateStatus(await bridge.checkForUpdates());
@@ -921,7 +932,7 @@ export default function App() {
     if (!await persistWorkspaceState(true)) throw new Error("当前会话现场尚未准备完成，请稍后再重启安装。");
     await bridge.installUpdate();
   }, [bridge, persistWorkspaceState]);
-  const openUpdateTokenPage = useCallback(() => bridge.openExternal("https://github.com/settings/personal-access-tokens/new"), [bridge]);
+  const openUpdateRepository = useCallback(() => bridge.openExternal(updateStatus.repositoryUrl), [bridge, updateStatus.repositoryUrl]);
 
   const selectWorkspace = useCallback(async (directory: string) => {
     const registered = await bridge.registerWorkspace(directory);
@@ -986,6 +997,15 @@ export default function App() {
       const pane = layoutRef.current.panes.find((entry) => entry.id === layoutRef.current.activePaneId);
       const sessionId = pane?.activeTabId;
       if (sessionId) setError(sessionId, error, "打开 Windows Terminal 失败");
+    });
+  }, [bridge, setError]);
+
+  const openDirectoryInExplorer = useCallback((directory: string, sessionId?: string) => {
+    void bridge.openLocalPath({ path: directory }).then((result) => {
+      if (typeof result === "string" && result.trim()) throw new Error(result.trim());
+    }).catch((error) => {
+      const targetSessionId = sessionId || layoutRef.current.panes.find((entry) => entry.id === layoutRef.current.activePaneId)?.activeTabId;
+      if (targetSessionId) setError(targetSessionId, error, "打开资源管理器失败");
     });
   }, [bridge, setError]);
 
@@ -2334,8 +2354,9 @@ export default function App() {
       onToggleFavorite: toggleFavorite,
       onSavePreference: savePreference,
       onOpenTerminal: openWindowsTerminal,
+      onOpenDirectory: openDirectoryInExplorer,
     },
-  }), [createSessionInDirectory, openWindowsTerminal, preferences.favoriteWorkspaces, savePreference, selectWorkspace, sidebarCurrentCwd, sidebarDirectoryHistory.length, toggleFavorite]);
+  }), [createSessionInDirectory, openDirectoryInExplorer, openWindowsTerminal, preferences.favoriteWorkspaces, savePreference, selectWorkspace, sidebarCurrentCwd, sidebarDirectoryHistory.length, toggleFavorite]);
   const sidebarHistory = useMemo<SidebarProps["history"]>(() => ({
     viewModel: {
       activeCwd: sidebarCurrentCwd,
@@ -2378,8 +2399,6 @@ export default function App() {
     actions: {
       onSavePreference: savePreference,
       onSetBossKey: setBossKey,
-      onSaveUpdateToken: saveUpdateToken,
-      onClearUpdateToken: clearUpdateToken,
       onCheckForUpdates: checkForUpdates,
       onCheckCodexCliUpdates: checkCodexCliUpdates,
       onUpdateCodexCli: updateCodexCli,
@@ -2387,9 +2406,10 @@ export default function App() {
       onUpdateClaude: updateClaudeCode,
       onDownloadUpdate: downloadUpdate,
       onInstallUpdate: installUpdate,
-      onOpenUpdateTokenPage: openUpdateTokenPage,
+      onOpenUpdateRepository: openUpdateRepository,
+      onExportDiagnostics: bridge.exportDiagnostics,
     },
-  }), [baseFontSize, bossKeyStatus, checkClaudeCodeUpdates, checkCodexCliUpdates, checkForUpdates, claudeRuntimeStatus, clearUpdateToken, cliUpdateStatus, displayMode, downloadUpdate, installUpdate, openUpdateTokenPage, preferences.theme, savePreference, saveUpdateToken, setBossKey, updateClaudeCode, updateCodexCli, updateStatus]);
+  }), [baseFontSize, bossKeyStatus, bridge.exportDiagnostics, checkClaudeCodeUpdates, checkCodexCliUpdates, checkForUpdates, claudeRuntimeStatus, cliUpdateStatus, displayMode, downloadUpdate, installUpdate, openUpdateRepository, preferences.theme, savePreference, setBossKey, updateClaudeCode, updateCodexCli, updateStatus]);
 
   const renderPane = (pane: PaneState) => {
     const session = sessions[pane.activeTabId];
@@ -2470,7 +2490,10 @@ export default function App() {
               setTabDropPaneId(null);
               setTabDropTarget(null);
               setDraggingTabId(null);
-              if (sessionId) moveTab(sessionId, pane.id);
+              if (sessionId) {
+                trackUiEvent("tab.drag_dropped", { provider: sessions[sessionId]?.provider || "unknown", position: "pane" });
+                moveTab(sessionId, pane.id);
+              }
             }}
           >
             <div className="tab-list">
@@ -2484,6 +2507,7 @@ export default function App() {
                     event.dataTransfer.effectAllowed = "move";
                     event.dataTransfer.setData("text/tab", session.id);
                     setDraggingTabId(session.id);
+                    trackUiEvent("tab.drag_started", { provider: session.provider });
                   }}
                   onDragOver={(event: DragEvent<HTMLButtonElement>) => {
                     if (!event.dataTransfer.types.includes("text/tab")) return;
@@ -2511,9 +2535,12 @@ export default function App() {
                     setDraggingTabId(null);
                     setTabDropPaneId(null);
                     setTabDropTarget(null);
-                    if (draggedId && draggedId !== session.id) moveTab(draggedId, pane.id, { paneId: pane.id, sessionId: session.id, position });
+                    if (draggedId && draggedId !== session.id) {
+                      trackUiEvent("tab.drag_dropped", { provider: sessions[draggedId]?.provider || "unknown", position });
+                      moveTab(draggedId, pane.id, { paneId: pane.id, sessionId: session.id, position });
+                    }
                   }}
-                  onDragEnd={() => { setDraggingTabId(null); setTabDropPaneId(null); setTabDropTarget(null); }}
+                  onDragEnd={() => { trackUiEvent("tab.drag_finished", { provider: session.provider }); setDraggingTabId(null); setTabDropPaneId(null); setTabDropTarget(null); }}
                   onClick={() => activateTab(pane.id, session.id)}
                   onContextMenu={(event) => openTabContextMenu(event, pane.id, session.id)}
                   key={session.id}
@@ -2539,11 +2566,12 @@ export default function App() {
       className="tab-context-menu"
       role="menu"
       aria-label={`${contextSession?.title || "当前 Tab"} 会话操作`}
-      style={{ left: Math.min(tabContextMenu.x, Math.max(8, window.innerWidth - 190)), top: Math.min(tabContextMenu.y, Math.max(8, window.innerHeight - 428)) }}
+      style={{ left: Math.min(tabContextMenu.x, Math.max(8, window.innerWidth - 190)), top: Math.min(tabContextMenu.y, Math.max(8, window.innerHeight - 478)) }}
       onMouseDown={(event) => event.stopPropagation()}
       onContextMenu={(event) => event.preventDefault()}
     >
       <button type="button" role="menuitem" disabled={!contextSession} onClick={() => { if (!contextSession) return; setTabContextMenu(null); void createSessionInDirectory(contextSession.cwd, contextSession.provider, { paneId: contextPane.id, afterSessionId: contextSession.id }); }}><Plus size={14} /><span>新建同目录会话</span></button>
+      <button type="button" role="menuitem" disabled={!contextSession} onClick={() => { if (!contextSession) return; setTabContextMenu(null); openDirectoryInExplorer(contextSession.cwd, contextSession.id); }}><FolderOpen size={14} /><span>在资源管理器中打开目录</span></button>
       <div className="context-menu-separator" />
       <button type="button" role="menuitem" disabled={!contextOthers.length} onClick={() => closeTabIds(contextPane.id, contextOthers)}><X size={14} /><span>关闭其它</span></button>
       <button type="button" role="menuitem" disabled={!contextRight.length} onClick={() => closeTabIds(contextPane.id, contextRight)}><ArrowRightToLine size={14} /><span>关闭右侧</span></button>

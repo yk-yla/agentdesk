@@ -1,0 +1,1 @@
+export const MAX_SESSION_QUEUED_MESSAGES = 100;

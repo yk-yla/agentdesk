@@ -787,7 +787,11 @@ async function workerRequest(command: Exclude<ClaudeWorkerCommand, { type: "star
 
 async function closeSession(sessionId: string, generation?: number) {
   const state = states.get(sessionId);
-  if (!state || (generation !== undefined && state.generation !== generation)) return;
+  if (!state) {
+    if (generation !== undefined) await processTrees.close(sessionId, generation);
+    return;
+  }
+  if (generation !== undefined && state.generation !== generation) return;
   states.delete(sessionId);
   state.cleanupTimers?.forEach((timer) => clearInterval(timer));
   state.cleanupTimers?.forEach((timer) => clearTimeout(timer));

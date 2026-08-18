@@ -10,12 +10,17 @@ export interface LogEntry {
   event: string;
   details: JsonObject;
   processId?: number;
+  appRunId?: string;
 }
 
 export interface ClientLogEntry {
   level?: LogLevel;
   event: string;
   details?: JsonObject;
+}
+
+export interface DiagnosticExport {
+  path: string;
 }
 
 export interface CodexRpcErrorPayload {
@@ -160,7 +165,6 @@ export interface DesktopWindowState {
 
 export type DesktopUpdatePhase =
   | "idle"
-  | "authorizationRequired"
   | "checking"
   | "upToDate"
   | "available"
@@ -175,8 +179,13 @@ export interface DesktopUpdateStatus {
   availableVersion?: string;
   progress?: number;
   message: string;
-  tokenConfigured: boolean;
   repositoryUrl: string;
+  releaseNotes?: DesktopReleaseNote[];
+}
+
+export interface DesktopReleaseNote {
+  version: string;
+  note: string;
 }
 
 export type CodexCliUpdatePhase =
@@ -242,6 +251,7 @@ export interface CodexBridge {
   getCodexDefaults(): Promise<CodexDefaults>;
   savePreferences(preferences: Partial<DesktopPreferences>): Promise<DesktopPreferences>;
   writeLog(entry: ClientLogEntry): Promise<void>;
+  exportDiagnostics(): Promise<DiagnosticExport | null>;
   getBossKeyStatus(): Promise<BossKeyStatus>;
   setBossKey(accelerator: string): Promise<BossKeyStatus>;
   saveClipboardImage(dataUrl: string, suggestedName?: string): Promise<SavedImage>;
@@ -258,8 +268,6 @@ export interface CodexBridge {
   minimizeWindow(): Promise<void>;
   toggleMaximizeWindow(): Promise<DesktopWindowState>;
   getUpdateStatus(): Promise<DesktopUpdateStatus>;
-  saveUpdateToken(token: string): Promise<DesktopUpdateStatus>;
-  clearUpdateToken(): Promise<DesktopUpdateStatus>;
   checkForUpdates(): Promise<DesktopUpdateStatus>;
   downloadUpdate(): Promise<DesktopUpdateStatus>;
   installUpdate(): Promise<void>;

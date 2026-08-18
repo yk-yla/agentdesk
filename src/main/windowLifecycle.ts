@@ -40,7 +40,7 @@ export interface DesktopWindow {
   loadFile(filePath: string): Promise<void>;
   once(event: "ready-to-show", listener: () => void): void;
   on(event: "close", listener: (event: EventWithPreventDefault) => void): void;
-  on(event: "maximize" | "unmaximize" | "closed", listener: () => void): void;
+  on(event: "maximize" | "unmaximize" | "minimize" | "restore" | "show" | "hide" | "focus" | "blur" | "unresponsive" | "responsive" | "closed", listener: () => void): void;
 }
 
 interface DesktopTray {
@@ -71,6 +71,7 @@ export interface WindowLifecycleDependencies {
   requestSingleInstanceLock(): boolean;
   onSecondInstance(listener: (argv: string[]) => void): void;
   now?: () => number;
+  log?(level: "info" | "warn", event: string, details?: Record<string, unknown>): void;
 }
 
 export function isSafeExternalUrl(value: string) {
@@ -179,10 +180,19 @@ export class WindowLifecycle {
     window.on("close", (event) => {
       if (this.quitting) return;
       event.preventDefault();
+      this.dependencies.log?.("info", "window.close_hidden");
       window.hide();
     });
     window.on("maximize", () => this.emitWindowState());
     window.on("unmaximize", () => this.emitWindowState());
+    window.on("minimize", () => this.dependencies.log?.("info", "window.minimized"));
+    window.on("restore", () => this.dependencies.log?.("info", "window.restored"));
+    window.on("show", () => this.dependencies.log?.("info", "window.shown"));
+    window.on("hide", () => this.dependencies.log?.("info", "window.hidden"));
+    window.on("focus", () => this.dependencies.log?.("info", "window.focused"));
+    window.on("blur", () => this.dependencies.log?.("info", "window.blurred"));
+    window.on("unresponsive", () => this.dependencies.log?.("warn", "window.unresponsive"));
+    window.on("responsive", () => this.dependencies.log?.("info", "window.responsive"));
     window.on("closed", () => {
       if (this.window === window) this.window = null;
     });
@@ -206,6 +216,7 @@ export class WindowLifecycle {
   show() {
     const window = this.window;
     if (!window || window.isDestroyed()) return;
+    this.dependencies.log?.("info", "window.show_requested", { minimized: window.isMinimized(), visible: window.isVisible(), focused: window.isFocused() });
     if (window.isMinimized()) window.restore();
     window.show();
     window.focus();
@@ -233,6 +244,7 @@ export class WindowLifecycle {
   }
 
   minimize() {
+    this.dependencies.log?.("info", "window.minimize_requested");
     this.window?.minimize();
   }
 
@@ -241,6 +253,7 @@ export class WindowLifecycle {
     if (!window || window.isDestroyed()) return this.currentState();
     if (window.isMaximized()) window.unmaximize();
     else window.maximize();
+    this.dependencies.log?.("info", "window.maximize_toggled", { maximized: window.isMaximized() });
     return this.currentState();
   }
 

@@ -19,6 +19,7 @@ export interface WorkspaceNavigationActions {
   onToggleFavorite: (directory: string) => void;
   onSavePreference: (patch: Partial<DesktopPreferences>) => void;
   onOpenTerminal: (directory: string) => void | Promise<void>;
+  onOpenDirectory: (directory: string) => void | Promise<void>;
 }
 
 export interface WorkspaceNavigationProps {
@@ -28,7 +29,7 @@ export interface WorkspaceNavigationProps {
 
 function WorkspaceNavigationBase({ viewModel, actions }: WorkspaceNavigationProps) {
   const { currentCwd, activeCwd, currentDirectoryHistoryCount, favoriteWorkspaces } = viewModel;
-  const { onNewSession, onSelectWorkspace, onToggleFavorite, onSavePreference, onOpenTerminal } = actions;
+  const { onNewSession, onSelectWorkspace, onToggleFavorite, onSavePreference, onOpenTerminal, onOpenDirectory } = actions;
   const [draggingWorkspace, setDraggingWorkspace] = useState<string | null>(null);
   const [dragOverWorkspace, setDragOverWorkspace] = useState<string | null>(null);
   const [openingTerminal, setOpeningTerminal] = useState<string | null>(null);
@@ -62,6 +63,7 @@ function WorkspaceNavigationBase({ viewModel, actions }: WorkspaceNavigationProp
       <div className="current-workspace-actions">
         <button className="current-workspace-new provider-new-codex" onClick={() => onNewSession(currentCwd, "codex")} title="在当前目录新建 Codex 会话" aria-label="在当前目录新建 Codex 会话"><ProviderIcon provider="codex" size={14} /></button>
         <button className="current-workspace-new provider-new-claude" onClick={() => onNewSession(currentCwd, "claude")} title="在当前目录新建 Claude Code 会话" aria-label="在当前目录新建 Claude Code 会话"><ProviderIcon provider="claude" size={14} /></button>
+        <button className="current-workspace-open" onClick={() => onOpenDirectory(currentCwd)} title="在资源管理器中打开当前目录" aria-label="在资源管理器中打开当前目录"><FolderOpen size={13} /></button>
         <button className="current-workspace-terminal" onClick={() => openTerminal(currentCwd)} disabled={Boolean(openingTerminal && sameDirectory(openingTerminal, currentCwd))} title="在 WT 打开当前目录" aria-label="在 WT 打开当前目录"><Terminal size={13} /></button>
         <button className={`current-workspace-pin ${currentWorkspaceFavorite ? "active" : ""}`} onClick={() => onToggleFavorite(currentCwd)} title={currentWorkspaceFavorite ? "取消固定当前目录" : "固定当前目录"} aria-label={currentWorkspaceFavorite ? "取消固定当前目录" : "固定当前目录"} aria-pressed={currentWorkspaceFavorite}>
           <Pin size={13} fill={currentWorkspaceFavorite ? "currentColor" : "none"} />
@@ -74,6 +76,7 @@ function WorkspaceNavigationBase({ viewModel, actions }: WorkspaceNavigationProp
         <button className={`workspace-shortcut ${sameDirectory(directory, activeCwd) ? "active" : ""}`} onClick={() => onSelectWorkspace(directory)} title={directory}><Pin size={12} /><span>{basename(directory)}</span></button>
         <button className="shortcut-new provider-codex" onClick={() => onNewSession(directory, "codex")} title="新建 Codex 会话" aria-label="新建 Codex 会话"><ProviderIcon provider="codex" size={14} /></button>
         <button className="shortcut-new provider-claude" onClick={() => onNewSession(directory, "claude")} title="新建 Claude Code 会话" aria-label="新建 Claude Code 会话"><ProviderIcon provider="claude" size={14} /></button>
+        <button className="shortcut-open" onClick={() => onOpenDirectory(directory)} title="在资源管理器中打开目录" aria-label={`在资源管理器中打开 ${basename(directory)}`}><FolderOpen size={13} /></button>
         <button className="shortcut-terminal" onClick={() => openTerminal(directory)} disabled={Boolean(openingTerminal && sameDirectory(openingTerminal, directory))} title="在 WT 打开目录" aria-label={`在 WT 打开 ${basename(directory)}`}><Terminal size={13} /></button>
         <button className="shortcut-pin active" onClick={() => onToggleFavorite(directory)} title="取消固定" aria-label="取消固定"><X size={11} /></button>
       </div>)}</div>

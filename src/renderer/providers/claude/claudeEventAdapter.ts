@@ -3,6 +3,9 @@ import type { Activity, Message, ModelOption, PendingApproval, SessionState, Use
 import { asRecord, numberValue, stringValue } from "../../domain";
 import { timestampFromUnknown } from "../../messageTimestamp";
 
+const SESSION_MESSAGE_LIMIT = 2_000;
+const SESSION_ACTIVITY_LIMIT = 2_000;
+
 export interface RoutedClaudeEvent {
   provider: AgentProvider;
   kind: "ready" | "sessionDeleted" | "backendExited" | "closeActiveTab" | "skillsChanged" | "activateSession" | "lateResponse" | "openWorkspace" | "sessionStarted" | "sessionSettingsUpdated" | "turnCompleted" | "state";
@@ -168,6 +171,22 @@ function settleRunningActivities(session: SessionState, status: "completed" | "f
   session.activities = session.activities.map((activity) => activity.status === "inProgress"
     ? { ...activity, status, detail: activity.detail ? `${activity.detail}\n${detail}` : detail }
     : activity);
+}
+
+function enforceSessionBudgets(session: SessionState) {
+  if (session.messages.length > SESSION_MESSAGE_LIMIT) {
+    session.messages = [
+      { id: "claude-message-history-trimmed", role: "system", text: "较早的消息已隐藏，以保持界面流畅。", images: [] },
+      ...session.messages.slice(-(SESSION_MESSAGE_LIMIT - 1)),
+    ];
+  }
+  if (session.activities.length > SESSION_ACTIVITY_LIMIT) {
+    session.activities = [
+      { id: "claude-activity-history-trimmed", kind: "other", title: "较早记录已隐藏", detail: "较早记录已从当前界面清理", status: "completed", visibleInMain: true },
+      ...session.activities.slice(-(SESSION_ACTIVITY_LIMIT - 1)),
+    ];
+  }
+  return session;
 }
 
 function usageFromResult(payload: ReturnType<typeof asRecord>, previous: SessionState["tokenUsage"]) {
@@ -403,7 +422,7 @@ export function applyClaudeEvent(source: SessionState, routed: RoutedClaudeEvent
       session.resumed = true;
     }
   }
-  return { session, approval, ignored: false };
+  return { session: enforceSessionBudgets(session), approval, ignored: false };
 }
 
 export function hydrateClaudeSession(
@@ -438,7 +457,7 @@ export function hydrateClaudeSession(
   const preserveRealtime = options.preserveRealtime === true;
   const preserveLifecycle = options.preserveLifecycle ?? preserveRealtime;
   const nativeTitle = stringValue(thread.name, stringValue(thread.title));
-  return {
+  return enforceSessionBudgets({
     ...session,
     threadId: stringValue(thread.id, session.threadId || "") || session.threadId,
     cwd: stringValue(thread.cwd, session.cwd),
@@ -459,7 +478,7 @@ export function hydrateClaudeSession(
       activeTurnId: null,
       startedAt: null,
     }),
-  };
+  });
 }
 
 export function normalizeClaudeModel(value: unknown): ModelOption {

@@ -12,12 +12,21 @@ class FakeUpdater extends EventEmitter {
   autoInstallOnAppQuit = true;
   autoRunAppAfterInstall = false;
   allowPrerelease = true;
+  fullChangelog = false;
   logger: unknown = {};
   feedToken = "";
   installs = 0;
 
-  setFeedURL(options: { token: string }) { this.feedToken = options.token; }
-  async checkForUpdates() { this.emit("update-available", { version: "2.0.0" }); }
+  setFeedURL(options: { owner: string; repo: string }) { this.feedToken = `${options.owner}/${options.repo}`; }
+  async checkForUpdates() {
+    this.emit("update-available", {
+      version: "2.0.0",
+      releaseNotes: [
+        { version: "2.0.0", note: "<p>修复首个问题。</p><ul><li>更新说明显示更清楚</li></ul>" },
+        { version: "1.5.0", note: "<p>增加稳定性。</p>" },
+      ],
+    });
+  }
   async downloadUpdate() { this.emit("update-downloaded", { version: "2.0.0" }); }
   quitAndInstall() { this.installs += 1; }
 }
@@ -28,33 +37,29 @@ function withManager(run: (manager: DesktopUpdateManager, updater: FakeUpdater, 
   const statuses: DesktopUpdateStatus[] = [];
   const dependencies: DesktopUpdateManagerDependencies = {
     updater,
-    storage: {
-      isEncryptionAvailable: () => true,
-      encryptString: (value) => Buffer.from(value, "utf8"),
-      decryptString: (value) => value.toString("utf8"),
-    },
     currentVersion: () => "1.0.0",
     isPackaged: () => true,
-    userDataPath: () => directory,
     emitStatus: (status) => statuses.push(status),
     prepareInstall: async () => undefined,
     scheduleInstall: (install) => install(),
-    environment: {},
   };
   return Promise.resolve(run(new DesktopUpdateManager(dependencies), updater, statuses))
     .finally(() => rmSync(directory, { recursive: true, force: true }));
 }
 
 describe("DesktopUpdateManager", () => {
-  it("classifies authorization, network and release errors", () => {
-    assert.match(desktopUpdateErrorMessage(new Error("HTTP 403")), /授权失败/);
+  it("classifies server, network and release errors", () => {
+    assert.match(desktopUpdateErrorMessage(new Error("HTTP 403")), /暂时拒绝/);
     assert.match(desktopUpdateErrorMessage(new Error("network timeout")), /无法连接/);
     assert.match(desktopUpdateErrorMessage(new Error("404 not found")), /没有可用/);
   });
 
   it("keeps check, download and install as separate user actions", async () => withManager(async (manager, updater) => {
-    await manager.saveToken("github-token-with-enough-length");
-    assert.equal((await manager.check()).phase, "available");
+    const checked = await manager.check();
+    assert.equal(checked.phase, "available");
+    assert.equal(checked.releaseNotes?.length, 2);
+    assert.match(checked.releaseNotes?.[0]?.note || "", /更新说明显示更清楚/);
+    assert.equal(updater.fullChangelog, true);
     assert.equal(updater.autoDownload, false);
     assert.equal((await manager.download()).phase, "downloaded");
     assert.equal(updater.installs, 0);
@@ -62,7 +67,8 @@ describe("DesktopUpdateManager", () => {
     assert.equal(updater.installs, 1);
   }));
 
-  it("does not contact the updater without a token", async () => withManager(async (manager) => {
-    assert.equal((await manager.check()).phase, "authorizationRequired");
+  it("checks a public repository without an authorization code", async () => withManager(async (manager, updater) => {
+    assert.equal((await manager.check()).phase, "available");
+    assert.equal(updater.feedToken, "yk-yla/agentdesk");
   }));
 });

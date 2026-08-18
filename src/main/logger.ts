@@ -1,11 +1,13 @@
 import { createHash } from "node:crypto";
+import { randomUUID } from "node:crypto";
 import { promises as fsPromises } from "node:fs";
 import path from "node:path";
 import type { JsonObject, LogEntry, LogLevel } from "../shared/protocol";
 
-const LOG_FILE_PATTERN = /^agentdesk-(\d{4}-\d{2}-\d{2})\.ndjson$/;
+const LOG_FILE_PATTERN = /^agentdesk-(\d{4}-\d{2}-\d{2})(?:\.(\d+))?\.ndjson$/;
 const RETENTION_DAYS = 7;
 const MAX_LOG_DIRECTORY_BYTES = 64 * 1024 * 1024;
+const MAX_LOG_FILE_BYTES = 8 * 1024 * 1024;
 const MAX_LOG_LINE_BYTES = 64 * 1024;
 const MAX_STRING_LENGTH = 240;
 const PRUNE_INTERVAL = 1_000;
@@ -92,6 +94,11 @@ export class FileLogger implements AppLogger {
   private queue = Promise.resolve();
   private preparedDate = "";
   private writesSincePrune = 0;
+  private activeFileIndex = 0;
+  private activeFileBytes = 0;
+  private activeFileReady = false;
+  private activeFileDate = "";
+  private readonly appRunId = randomUUID();
 
   constructor(private readonly resolveDirectory: () => string, private readonly now: () => Date = () => new Date()) {}
 
@@ -111,6 +118,7 @@ export class FileLogger implements AppLogger {
         event: truncate(event || "unknown", 160),
         details: summarize(details) as JsonObject,
         processId: process.pid,
+        appRunId: this.appRunId,
       };
       const serialized = JSON.stringify(entry);
       line = Buffer.byteLength(serialized, "utf8") <= MAX_LOG_LINE_BYTES
@@ -130,7 +138,9 @@ export class FileLogger implements AppLogger {
           this.writesSincePrune = 0;
           await this.prune(directory, today);
         }
-        await fsPromises.appendFile(path.join(directory, `agentdesk-${today}.ndjson`), line, "utf8");
+        const filePath = await this.prepareLogFile(directory, today, Buffer.byteLength(line, "utf8"));
+        await fsPromises.appendFile(filePath, line, "utf8");
+        this.activeFileBytes += Buffer.byteLength(line, "utf8");
       } catch {
         // Logging must never break the desktop application.
       }
@@ -162,5 +172,34 @@ export class FileLogger implements AppLogger {
       await fsPromises.unlink(path.join(directory, entry.name)).catch(() => undefined);
       totalBytes -= entry.size;
     }
+  }
+
+  private async prepareLogFile(directory: string, today: string, lineBytes: number) {
+    if (this.activeFileDate !== today) {
+      this.activeFileDate = today;
+      this.activeFileReady = false;
+      this.activeFileIndex = 0;
+      this.activeFileBytes = 0;
+    }
+    if (!this.activeFileReady) {
+      const names = (await fsPromises.readdir(directory).catch(() => []))
+        .map((name) => ({ name, match: LOG_FILE_PATTERN.exec(name) }))
+        .filter((entry): entry is { name: string; match: RegExpExecArray } => Boolean(entry.match && entry.match[1] === today))
+        .sort((left, right) => Number(left.match[2] || 0) - Number(right.match[2] || 0));
+      const last = names[names.length - 1];
+      this.activeFileIndex = last ? Number(last.match[2] || 0) : 0;
+      const activeName = this.logFileName(today, this.activeFileIndex);
+      this.activeFileBytes = await fsPromises.stat(path.join(directory, activeName)).then((entry) => entry.size).catch(() => 0);
+      this.activeFileReady = true;
+    }
+    if (this.activeFileBytes > 0 && this.activeFileBytes + lineBytes > MAX_LOG_FILE_BYTES) {
+      this.activeFileIndex += 1;
+      this.activeFileBytes = 0;
+    }
+    return path.join(directory, this.logFileName(today, this.activeFileIndex));
+  }
+
+  private logFileName(today: string, index: number) {
+    return index ? `agentdesk-${today}.${index}.ndjson` : `agentdesk-${today}.ndjson`;
   }
 }

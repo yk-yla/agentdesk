@@ -18,7 +18,7 @@ export function createMockBridge(): CodexBridge {
   const mockWorkspace = "mock-workspace";
   let mockPreferences: DesktopPreferences = { lastWorkspace: mockWorkspace, favoriteWorkspaces: [], sidebarWidth: 250, theme: "github-light", displayMode: "simple", bossKey: "F2" };
   let mockBossKeyStatus: BossKeyStatus = { accelerator: "F2", registered: true, message: "老板键 F2 已启用。" };
-  let mockUpdateStatus: DesktopUpdateStatus = { phase: "unsupported", currentVersion: "1.0.7", message: "浏览器预览不检查软件更新。", tokenConfigured: false, repositoryUrl: "https://github.com/yxb715/agentdesk" };
+  let mockUpdateStatus: DesktopUpdateStatus = { phase: "unsupported", currentVersion: "1.0.7", message: "浏览器预览不检查软件更新。", repositoryUrl: "https://github.com/yk-yla/agentdesk" };
   let mockCodexCliUpdateStatus: CodexCliUpdateStatus = { phase: "available", currentVersion: "0.146.1", latestVersion: "0.147.0", checkedAt: Date.now(), nextCheckAt: Date.now() + 6 * 60 * 60 * 1000, message: "发现新版本 0.147.0，可立即更新。" };
   let mockClaudeRuntimeStatus: ClaudeRuntimeStatus = { phase: "available", binarySource: "sdk", binaryVersion: "1.0.0", sdkVersion: "0.1.0", latestVersion: "1.1.0", checkedAt: Date.now(), credentialsAvailable: true, credentialSource: "settings", credentialMessage: "已从 Claude 配置读取凭据。", integrityVerified: true, message: "发现 Claude Code 新版本 1.1.0。" };
   let mockWindowMaximized = false;
@@ -229,6 +229,7 @@ export function createMockBridge(): CodexBridge {
     getCodexDefaults: () => Promise.resolve(mockDefaults),
     savePreferences: (preferences) => { mockPreferences = { ...mockPreferences, ...preferences }; return Promise.resolve(mockPreferences); },
     writeLog: () => Promise.resolve(),
+    exportDiagnostics: () => Promise.resolve(null),
     getBossKeyStatus: () => Promise.resolve(mockBossKeyStatus),
     setBossKey: (accelerator) => {
       mockBossKeyStatus = { accelerator, registered: true, message: `老板键 ${accelerator} 已启用。` };
@@ -251,8 +252,6 @@ export function createMockBridge(): CodexBridge {
       return Promise.resolve({ maximized: mockWindowMaximized });
     },
     getUpdateStatus: () => Promise.resolve(mockUpdateStatus),
-    saveUpdateToken: () => { mockUpdateStatus = { ...mockUpdateStatus, tokenConfigured: true, message: "GitHub 授权已保存。" }; return Promise.resolve(mockUpdateStatus); },
-    clearUpdateToken: () => { mockUpdateStatus = { ...mockUpdateStatus, tokenConfigured: false, message: "私有仓库需要 GitHub 授权码。" }; return Promise.resolve(mockUpdateStatus); },
     checkForUpdates: () => Promise.resolve(mockUpdateStatus),
     downloadUpdate: () => Promise.resolve(mockUpdateStatus),
     installUpdate: () => Promise.resolve(),

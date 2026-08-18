@@ -3,6 +3,7 @@ import {
   asRecord, emptySession, numberValue, stringValue,
   type ImageAttachment, type LayoutState, type PaneState, type PendingSteerMessage, type QueuedMessage, type SessionState, type SkillOption,
 } from "./domain";
+import { MAX_SESSION_QUEUED_MESSAGES } from "./queueLimits";
 
 const WORKSPACE_STATE_VERSION = 1;
 const MAX_PANES = 2;
@@ -141,7 +142,7 @@ export function createWorkspaceState(input: {
   const queuedMessages = Object.fromEntries(sessionIds.map((sessionId) => {
     const pending = (input.pendingSteers[sessionId] || []).map((message) => ({ ...message, queueKind: "rejectedSteer" as const }));
     const sourceQueue = [...(input.queuedMessages[sessionId] || []), ...pending];
-    const allowed = Math.max(0, Math.min(sourceQueue.length, remainingQueuedMessages, 100));
+    const allowed = Math.max(0, Math.min(sourceQueue.length, remainingQueuedMessages, MAX_SESSION_QUEUED_MESSAGES));
     if (allowed < sourceQueue.length) markTruncated("queuedMessages");
     remainingQueuedMessages -= allowed;
     const queue = sourceQueue.slice(0, allowed).map((message) => {

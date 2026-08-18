@@ -54,6 +54,22 @@ class FakeRuntime implements ClaudeWorkerRuntime {
   async close() {}
 }
 
+class RetryingCloseRuntime extends FakeRuntime {
+  closeGenerations: Array<number | undefined> = [];
+
+  constructor(private failuresRemaining = 1) {
+    super();
+  }
+
+  async closeSession(_sessionId: string, queryGeneration?: number) {
+    this.closeGenerations.push(queryGeneration);
+    if (this.failuresRemaining > 0) {
+      this.failuresRemaining -= 1;
+      throw new Error("temporary close failure");
+    }
+  }
+}
+
 const fixtureCredentials = () => ({ source: "settings" as const, baseUrl: "https://example.invalid", authToken: "fixture-token" });
 
 function testBackend(runtime: FakeRuntime, timeoutMs = 300_000, toolArgumentStallTimeoutMs = 90_000, isMarketplacePathAuthorized: (directory: string) => boolean = () => false) {
@@ -72,6 +88,39 @@ async function activeBackend(timeoutMs = 300_000, toolArgumentStallTimeoutMs = 9
 }
 
 describe("ClaudeBackend", () => {
+  it("retries cleanup once when closing an active Claude session fails", async () => {
+    const runtime = new RetryingCloseRuntime();
+    const backend = testBackend(runtime);
+    const sessionId = "close-retry";
+    const cwd = process.cwd();
+    await backend.request("startSession", { cwd }, { sessionId, canonicalCwd: cwd });
+    await backend.request("startTurn", { input: [{ type: "text", text: "test" }] }, { sessionId, canonicalCwd: cwd });
+    const generation = (runtime.commands.find((command) => command.type === "start") as Extract<ClaudeWorkerCommand, { type: "start" }>).queryGeneration;
+
+    await backend.request("closeSession", {}, { sessionId, canonicalCwd: cwd });
+
+    assert.deepEqual(runtime.closeGenerations, [generation, generation]);
+    await backend.request("startSession", { cwd }, { sessionId, canonicalCwd: cwd });
+    await backend.close();
+  });
+
+  it("keeps retrying the same Claude task after two close failures", async () => {
+    const runtime = new RetryingCloseRuntime(2);
+    const backend = testBackend(runtime);
+    const sessionId = "close-retry-again";
+    const cwd = process.cwd();
+    await backend.request("startSession", { cwd }, { sessionId, canonicalCwd: cwd });
+    await backend.request("startTurn", { input: [{ type: "text", text: "test" }] }, { sessionId, canonicalCwd: cwd });
+    const generation = (runtime.commands.find((command) => command.type === "start") as Extract<ClaudeWorkerCommand, { type: "start" }>).queryGeneration;
+
+    await assert.rejects(backend.request("closeSession", {}, { sessionId, canonicalCwd: cwd }), /后台任务可能仍在运行/);
+    await assert.rejects(backend.request("startTurn", { input: [{ type: "text", text: "must wait" }] }, { sessionId, canonicalCwd: cwd }), /仍在关闭/);
+    await backend.request("closeSession", {}, { sessionId, canonicalCwd: cwd });
+
+    assert.deepEqual(runtime.closeGenerations, [generation, generation, generation]);
+    await backend.close();
+  });
+
   it("starts without a separate AgentDesk workspace trust grant", async () => {
     const backend = testBackend(new FakeRuntime());
     const result = await backend.request("startSession", { cwd: process.cwd() }, { sessionId: "client-1", canonicalCwd: process.cwd() });

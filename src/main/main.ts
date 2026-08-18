@@ -1,4 +1,4 @@
-import { app, BrowserWindow, clipboard, dialog, globalShortcut, ipcMain, Menu, nativeImage, net, Notification, safeStorage, shell, Tray, type NotificationConstructorOptions } from "electron";
+import { app, BrowserWindow, clipboard, dialog, globalShortcut, ipcMain, Menu, nativeImage, net, Notification, shell, Tray, type NotificationConstructorOptions } from "electron";
 import { autoUpdater } from "electron-updater";
 import { spawnSync } from "node:child_process";
 import { existsSync, mkdirSync, promises as fsPromises, readFileSync, statSync, writeFileSync } from "node:fs";
@@ -7,7 +7,7 @@ import { homedir } from "node:os";
 import { createServer, type Server } from "node:http";
 import path from "node:path";
 import { parse as parseToml } from "smol-toml";
-import type { CodexDefaults, HandoffPackage, JsonRpcMessage, SavedImage, SavedTextFile } from "../shared/protocol";
+import type { CodexDefaults, DiagnosticExport, HandoffPackage, JsonRpcMessage, SavedImage, SavedTextFile } from "../shared/protocol";
 import { createBackendRegistry } from "./agent/backendRegistry";
 import { prepareAgentRequest } from "./agent/requestAdapterRegistry";
 import { writeTextFileAtomicAsync } from "./atomicFile";
@@ -33,6 +33,7 @@ import { ClaudeUpdateManager } from "./claudeUpdateManager";
 import { isSafeExternalUrl, WindowLifecycle, type DesktopWindow } from "./windowLifecycle";
 import { registerDesktopIpc } from "./ipc/registerDesktopIpc";
 import { FileLogger, logErrorDetails } from "./logger";
+import { buildDiagnosticBundle } from "./diagnostics";
 import { launchWindowsTerminal } from "./windowsTerminal";
 import { requestedProviderFromArgs, requestedWorkspaceFromArgs, startupWorkspace } from "./workspaceArgs";
 import { WorkspaceAuthorizationRegistry, type WorkspaceAuthorizationSource } from "./workspaceAuthorizationRegistry";
@@ -95,6 +96,7 @@ const windowLifecycle = new WindowLifecycle({
   quitApp: () => app.quit(),
   requestSingleInstanceLock: () => app.requestSingleInstanceLock(),
   onSecondInstance: (listener) => { app.on("second-instance", (_event, argv) => listener(argv)); },
+  log: (level, event, details) => appLogger.log(level, event, details),
 });
 const workspaceSnapshotCoordinator = new WorkspaceSnapshotCoordinator({
   createRequestId: randomUUID,
@@ -261,10 +263,8 @@ async function closeAllBackendsForExit() {
 
 const desktopUpdateManager = new DesktopUpdateManager({
   updater: autoUpdater,
-  storage: safeStorage,
   currentVersion: () => app.getVersion(),
   isPackaged: () => app.isPackaged,
-  userDataPath: () => app.getPath("userData"),
   emitStatus: (status) => windowLifecycle.send("agentdesk:update-status-changed", status),
   prepareInstall: () => windowLifecycle.prepareInstall(closeAllBackendsForExit),
   scheduleInstall: (install) => setTimeout(install, 100),
@@ -492,6 +492,31 @@ async function saveTextFile(content: string, suggestedName?: string): Promise<Sa
   return { path: target };
 }
 
+async function exportDiagnostics(): Promise<DiagnosticExport | null> {
+  const content = await buildDiagnosticBundle(appLogger.directory(), {
+    version: app.getVersion(),
+    packaged: app.isPackaged,
+    platform: process.platform,
+    arch: process.arch,
+    osRelease: process.getSystemVersion(),
+    electron: process.versions.electron,
+    chrome: process.versions.chrome,
+    node: process.versions.node,
+    gpu: app.getGPUFeatureStatus(),
+  });
+  const result = await dialog.showSaveDialog({
+    title: "导出诊断日志",
+    defaultPath: path.join(app.getPath("downloads"), `AgentDesk-diagnostics-${new Date().toISOString().replace(/[:.]/g, "-")}.json`),
+    filters: [{ name: "AgentDesk 诊断文件", extensions: ["json"] }],
+  });
+  if (result.canceled || !result.filePath) return null;
+  const target = path.resolve(result.filePath);
+  await writeTextFileAtomicAsync(target, content);
+  registerAuthorizedLocalPath(target);
+  appLogger.log("info", "diagnostics.exported", { bytes: Buffer.byteLength(content, "utf8") });
+  return { path: target };
+}
+
 async function createHandoffPackage(input: { cwd: string; title: string; threadId: string; content: string }): Promise<HandoffPackage> {
   if (!input || typeof input.cwd !== "string" || typeof input.content !== "string") throw new Error("交接参数无效。");
   const cwd = requireAuthorizedWorkspacePath(input.cwd);
@@ -669,6 +694,7 @@ if (hasLock) {
           const value = input as { content: string; suggestedName?: unknown };
           return saveTextFile(value.content, typeof value.suggestedName === "string" ? value.suggestedName : undefined);
         },
+        exportDiagnostics,
         createHandoff: (input) => {
           if (!input || typeof input !== "object" || Array.isArray(input)) throw new Error("交接参数无效。");
           const value = input as Record<string, unknown>;
@@ -728,8 +754,6 @@ if (hasLock) {
       },
       desktopUpdate: {
         status: () => desktopUpdateManager.currentStatus(),
-        saveToken: (token) => desktopUpdateManager.saveToken(token),
-        clearToken: () => desktopUpdateManager.clearToken(),
         check: () => desktopUpdateManager.check(),
         download: () => desktopUpdateManager.download(),
         install: () => desktopUpdateManager.install(),

@@ -145,6 +145,51 @@ describe("protocolAdapter hydration", () => {
     assert.equal(assistant.messages[1].timestamp, 234_567);
   });
 
+  it("settles an active plan step when a turn completes", () => {
+    const source = emptySession("session-1", "C:\\work");
+    source.status = "working";
+    source.activeTurnId = "turn-1";
+    source.plan = {
+      explanation: "执行任务",
+      steps: [{ step: "当前步骤", status: "inProgress" }, { step: "后续步骤", status: "pending" }],
+      updatedAt: 1,
+    };
+    const completed = applyServerMessage(source, {
+      method: "turn/completed",
+      params: { turn: { id: "turn-1", status: "completed" } },
+    }).session;
+    assert.deepEqual(completed.plan?.steps.map((step) => step.status), ["completed", "pending"]);
+    assert.equal(completed.status, "idle");
+  });
+
+  it("returns an active plan step to pending when a turn fails or is interrupted", () => {
+    const makeSource = () => {
+      const source = emptySession("session-1", "C:\\work");
+      source.status = "working";
+      source.activeTurnId = "turn-1";
+      source.plan = { explanation: "执行任务", steps: [{ step: "当前步骤", status: "inProgress" }], updatedAt: 1 };
+      return source;
+    };
+    for (const status of ["failed", "interrupted"]) {
+      const result = applyServerMessage(makeSource(), { method: "turn/completed", params: { turn: { id: "turn-1", status } } }).session;
+      assert.deepEqual(result.plan?.steps.map((step) => step.status), ["pending"]);
+    }
+  });
+
+  it("clears the previous plan at the start of a new turn and ignores late plan updates", () => {
+    const source = emptySession("session-1", "C:\\work");
+    source.status = "working";
+    source.activeTurnId = "turn-1";
+    source.plan = { explanation: "旧计划", steps: [{ step: "旧步骤", status: "inProgress" }], updatedAt: 1 };
+    const started = applyServerMessage(source, { method: "turn/started", params: { turn: { id: "turn-2" } } }).session;
+    assert.equal(started.plan, null);
+    const completed = applyServerMessage({ ...started, status: "idle", activeTurnId: null }, {
+      method: "turn/plan/updated",
+      params: { turnId: "turn-1", plan: [{ step: "迟到步骤", status: "inProgress" }] },
+    }).session;
+    assert.equal(completed.plan, null);
+  });
+
   it("preserves realtime content received while thread/read was pending", () => {
     const session = emptySession("session-1", "C:\\work");
     session.messages = [{ id: "agent-1", role: "assistant", text: "snapshot plus realtime", images: [], streaming: true }];

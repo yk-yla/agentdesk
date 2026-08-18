@@ -24,6 +24,7 @@ interface ClaudeSession {
   nativeSessionId: string;
   cwd: string;
   queryGeneration: number;
+  closingQueryGeneration?: number;
   queryActive: boolean;
   turnId: string | null;
   model: string;
@@ -220,13 +221,23 @@ export class ClaudeBackend implements AgentBackend {
     if (!session) return;
     this.clearToolTracking(session);
     this.cancelSessionInteractions(session, "cancelled");
-    const queryGeneration = session.queryGeneration;
-    session.queryGeneration += 1;
+    const queryGeneration = session.closingQueryGeneration ?? session.queryGeneration;
+    session.closingQueryGeneration = queryGeneration;
+    if (session.queryGeneration === queryGeneration) session.queryGeneration += 1;
     session.queryActive = false;
     session.turnId = null;
     if (releaseBeforeWorkerClose) this.sessions.delete(session.clientSessionId);
-    if (this.runtime.closeSession) await this.runtime.closeSession(session.clientSessionId, queryGeneration);
-    else this.runtime.send({ type: "closeSession", sessionId: session.clientSessionId, queryGeneration });
+    if (this.runtime.closeSession) {
+      try {
+        await this.runtime.closeSession(session.clientSessionId, queryGeneration);
+      } catch (firstError) {
+        try {
+          await this.runtime.closeSession(session.clientSessionId, queryGeneration);
+        } catch (secondError) {
+          throw new AggregateError([firstError, secondError], "Claude 会话关闭失败，后台任务可能仍在运行。");
+        }
+      }
+    } else this.runtime.send({ type: "closeSession", sessionId: session.clientSessionId, queryGeneration });
     if (!releaseBeforeWorkerClose) this.sessions.delete(session.clientSessionId);
   }
 
@@ -395,6 +406,7 @@ export class ClaudeBackend implements AgentBackend {
 
   private startTurn(params: JsonObject, context: AgentRequestContext) {
     const session = this.requireSession(context);
+    if (session.closingQueryGeneration !== undefined) throw new Error("Claude 会话仍在关闭，请先重新关闭该标签页。");
     const text = textFromInput(params.input);
     const inputBlocks = blocksFromInput(params.input);
     if (!text && !inputBlocks.some((item) => item.type === "localImage")) throw new Error("Claude Code 输入不能为空。");

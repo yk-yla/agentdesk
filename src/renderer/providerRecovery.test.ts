@@ -11,12 +11,14 @@ describe("provider recovery", () => {
     claude.status = "working";
     claude.queryGeneration = 7;
     claude.messages = [{ id: "stream", role: "assistant", text: "partial", images: [], streaming: true }];
+    claude.plan = { explanation: "恢复测试", steps: [{ step: "当前步骤", status: "inProgress" }, { step: "后续步骤", status: "pending" }], updatedAt: 1 };
     const recovered = recoverProviderSessions({ codex, claude }, "claude");
     assert.strictEqual(recovered.codex, codex);
     assert.equal(recovered.codex.status, "working");
     assert.equal(recovered.claude.status, "error");
     assert.equal(recovered.claude.queryGeneration, 0);
     assert.equal(recovered.claude.messages[0].streaming, false);
+    assert.deepEqual(recovered.claude.plan?.steps.map((step) => step.status), ["pending", "pending"]);
     assert.match(recovered.claude.errorText, /Claude Code/);
   });
 });

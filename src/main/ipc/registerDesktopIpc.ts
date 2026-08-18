@@ -15,6 +15,7 @@ const AGENT_OPERATIONS = new Set<AgentOperation>([
   "readPlugin", "installPlugin", "uninstallPlugin", "updatePlugin", "getCapabilities", "closeSession",
   "addMarketplace", "updateMarketplace", "removeMarketplace",
 ]);
+const MAX_CLIENT_LOG_DETAILS_BYTES = 64 * 1024;
 
 interface IpcRegistrar {
   handle(channel: string, listener: (event: unknown, ...args: any[]) => unknown): void;
@@ -46,6 +47,7 @@ interface DesktopIpcServices {
     saveClipboardImage(input: unknown): unknown;
     copyImage(dataUrl: unknown): unknown;
     saveTextFile(input: unknown): unknown;
+    exportDiagnostics(): unknown;
     createHandoff(input: unknown): unknown;
     chooseClaudeMarketplaceDirectory(defaultPath: unknown): unknown;
     openTerminal(cwd: unknown): unknown;
@@ -61,8 +63,6 @@ interface DesktopIpcServices {
   };
   desktopUpdate: {
     status(): unknown;
-    saveToken(token: string): unknown;
-    clearToken(): unknown;
     check(): unknown;
     download(): unknown;
     install(): unknown;
@@ -165,7 +165,15 @@ export function validateClientLog(value: unknown) {
   const level = entry?.level;
   const event = entry?.event;
   const details = entry?.details;
-  if (!entry || typeof event !== "string" || !event.trim() || event.length > 160 || (level !== undefined && level !== "debug" && level !== "info" && level !== "warn" && level !== "error")) {
+  let detailsBytes = 0;
+  try {
+    detailsBytes = details && typeof details === "object" && !Array.isArray(details)
+      ? Buffer.byteLength(JSON.stringify(details), "utf8")
+      : 0;
+  } catch {
+    throw new Error("客户端日志详情无效。");
+  }
+  if (!entry || typeof event !== "string" || !event.trim() || event.length > 160 || detailsBytes > MAX_CLIENT_LOG_DETAILS_BYTES || (level !== undefined && level !== "debug" && level !== "info" && level !== "warn" && level !== "error")) {
     throw new Error("客户端日志无效。");
   }
   return {
@@ -224,6 +232,7 @@ export function registerDesktopIpc(ipc: IpcRegistrar, services: DesktopIpcServic
   ipc.handle("agentdesk:save-clipboard-image", (_event, input: unknown) => services.files.saveClipboardImage(input));
   ipc.handle("agentdesk:copy-image", (_event, dataUrl: unknown) => services.files.copyImage(dataUrl));
   ipc.handle("agentdesk:save-text-file", (_event, input: unknown) => services.files.saveTextFile(input));
+  ipc.handle("agentdesk:export-diagnostics", () => services.files.exportDiagnostics());
   ipc.handle("agentdesk:create-handoff", (_event, input: unknown) => services.files.createHandoff(input));
   ipc.handle("agentdesk:choose-claude-marketplace-directory", (_event, defaultPath: unknown) => services.files.chooseClaudeMarketplaceDirectory(defaultPath));
   ipc.handle("agentdesk:open-windows-terminal", (_event, cwd: unknown) => services.files.openTerminal(cwd));
@@ -235,11 +244,6 @@ export function registerDesktopIpc(ipc: IpcRegistrar, services: DesktopIpcServic
   ipc.handle("agentdesk:window-minimize", () => services.window.minimize());
   ipc.handle("agentdesk:window-toggle-maximize", () => services.window.toggleMaximize());
   ipc.handle("agentdesk:update-status", () => services.desktopUpdate.status());
-  ipc.handle("agentdesk:update-save-token", (_event, token: unknown) => {
-    if (typeof token !== "string") throw new Error("GitHub 授权码无效。");
-    return services.desktopUpdate.saveToken(token);
-  });
-  ipc.handle("agentdesk:update-clear-token", () => services.desktopUpdate.clearToken());
   ipc.handle("agentdesk:update-check", () => services.desktopUpdate.check());
   ipc.handle("agentdesk:update-download", () => services.desktopUpdate.download());
   ipc.handle("agentdesk:update-install", () => services.desktopUpdate.install());

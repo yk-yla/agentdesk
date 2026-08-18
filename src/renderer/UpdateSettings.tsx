@@ -1,34 +1,34 @@
-import { Download, ExternalLink, KeyRound, RefreshCw, Trash2 } from "lucide-react";
+import { Download, ExternalLink, FileDown, RefreshCw } from "lucide-react";
 import { memo, useState } from "react";
-import type { ClaudeRuntimeStatus, CodexCliUpdateStatus, DesktopUpdateStatus } from "../shared/protocol";
+import type { ClaudeRuntimeStatus, CodexCliUpdateStatus, DesktopUpdateStatus, DiagnosticExport } from "../shared/protocol";
 
 interface Props {
   status: DesktopUpdateStatus;
   cliStatus: CodexCliUpdateStatus;
-  onSaveToken: (token: string) => Promise<void>;
-  onClearToken: () => Promise<void>;
   onCheck: () => Promise<void>;
   onDownload: () => Promise<void>;
   onInstall: () => Promise<void>;
-  onOpenTokenPage: () => Promise<void>;
+  onOpenRepository: () => Promise<void>;
   onCheckCli: () => Promise<void>;
   onUpdateCli: () => Promise<void>;
   claudeStatus: ClaudeRuntimeStatus;
   onCheckClaude: () => Promise<void>;
   onUpdateClaude: () => Promise<void>;
+  onExportDiagnostics: () => Promise<DiagnosticExport | null>;
 }
 
 function formatCheckTime(value?: number) {
   return value ? new Intl.DateTimeFormat("zh-CN", { month: "numeric", day: "numeric", hour: "2-digit", minute: "2-digit" }).format(value) : "-";
 }
 
-function UpdateSettingsBase({ status, cliStatus, claudeStatus, onSaveToken, onClearToken, onCheck, onDownload, onInstall, onOpenTokenPage, onCheckCli, onUpdateCli, onCheckClaude, onUpdateClaude }: Props) {
-  const [token, setToken] = useState("");
+function UpdateSettingsBase({ status, cliStatus, claudeStatus, onCheck, onDownload, onInstall, onOpenRepository, onCheckCli, onUpdateCli, onCheckClaude, onUpdateClaude, onExportDiagnostics }: Props) {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
   const [cliBusy, setCliBusy] = useState(false);
   const [cliError, setCliError] = useState("");
   const [claudeBusy, setClaudeBusy] = useState(false);
+  const [diagnosticsBusy, setDiagnosticsBusy] = useState(false);
+  const [diagnosticsMessage, setDiagnosticsMessage] = useState("");
 
   const run = async (action: () => Promise<void>) => {
     if (busy) return;
@@ -42,11 +42,6 @@ function UpdateSettingsBase({ status, cliStatus, claudeStatus, onSaveToken, onCl
       setBusy(false);
     }
   };
-
-  const saveToken = () => run(async () => {
-    await onSaveToken(token);
-    setToken("");
-  });
 
   const install = () => {
     if (!window.confirm("软件将自动安装并重启。正在运行的任务会停止，其他可恢复状态会在重启后恢复。确定现在安装吗？")) return;
@@ -83,6 +78,20 @@ function UpdateSettingsBase({ status, cliStatus, claudeStatus, onSaveToken, onCl
     try { await action(); } finally { setClaudeBusy(false); }
   };
 
+  const exportDiagnostics = async () => {
+    if (diagnosticsBusy) return;
+    setDiagnosticsBusy(true);
+    setDiagnosticsMessage("");
+    try {
+      const result = await onExportDiagnostics();
+      if (result) setDiagnosticsMessage(`已导出：${result.path}`);
+    } catch (reason) {
+      setDiagnosticsMessage(reason instanceof Error ? reason.message : "导出失败，请重试。");
+    } finally {
+      setDiagnosticsBusy(false);
+    }
+  };
+
   return <div className="update-settings">
     <section className="cli-update-section">
       <div className="update-heading"><strong>Codex CLI</strong><span>{cliStatus.currentVersion ? `v${cliStatus.currentVersion}` : "未安装"}</span></div>
@@ -107,18 +116,19 @@ function UpdateSettingsBase({ status, cliStatus, claudeStatus, onSaveToken, onCl
     <section className="desktop-update-section">
       <div className="update-heading"><strong>软件更新</strong><span>v{status.currentVersion || "-"}</span></div>
       <div className="update-auth-row">
-        <span className={status.tokenConfigured ? "ready" : ""}><KeyRound size={12} />{status.tokenConfigured ? "GitHub 已授权" : "GitHub 未授权"}</span>
-        <button className="bare-button" onClick={() => void run(onOpenTokenPage)} title="打开 GitHub 创建授权码" aria-label="打开 GitHub 创建授权码"><ExternalLink size={12} /></button>
-        {status.tokenConfigured ? <button className="bare-button danger-button" onClick={() => void run(onClearToken)} disabled={busy} title="移除 GitHub 授权" aria-label="移除 GitHub 授权"><Trash2 size={12} /></button> : null}
+        <span>更新来源：公开 GitHub 仓库</span>
+        <button className="bare-button" onClick={() => void run(onOpenRepository)} title="打开更新仓库" aria-label="打开更新仓库"><ExternalLink size={12} /></button>
       </div>
-      {!status.tokenConfigured ? <div className="update-token-row">
-        <input type="password" value={token} onChange={(event) => setToken(event.target.value)} placeholder="粘贴 GitHub 授权码" autoComplete="off" />
-        <button onClick={() => void saveToken()} disabled={busy || token.trim().length < 20}>保存</button>
-      </div> : null}
       <div className={`update-status ${status.phase}`}>{error || status.message}</div>
+      {status.releaseNotes?.length ? <div className="release-notes" aria-label="更新内容">{status.releaseNotes.map((release) => <article className="release-note" key={`${release.version}-${release.note.slice(0, 20)}`}><strong>v{release.version}</strong><div>{release.note || "暂无更新说明。"}</div></article>)}</div> : null}
       {status.phase === "available" ? <button className="update-action" onClick={() => void run(onDownload)} disabled={busy}><Download size={13} />下载 v{status.availableVersion}</button>
         : status.phase === "downloaded" ? <button className="update-action primary" onClick={install} disabled={busy}><RefreshCw size={13} />重启安装</button>
           : <button className="update-action" onClick={() => void run(onCheck)} disabled={busy || checking || downloading || unsupported}><RefreshCw className={checking ? "spin" : ""} size={13} />{downloading ? `下载中 ${status.progress || 0}%` : checking ? "检查中" : unsupported ? "仅安装版可用" : "检查更新"}</button>}
+    </section>
+    <section className="diagnostics-section">
+      <div className="update-heading"><strong>故障排查</strong><span>仅本地导出</span></div>
+      <button className="update-action" onClick={() => void exportDiagnostics()} disabled={diagnosticsBusy}><FileDown size={13} />{diagnosticsBusy ? "导出中" : "导出诊断日志"}</button>
+      {diagnosticsMessage ? <div className="update-status ready" title={diagnosticsMessage}>{diagnosticsMessage}</div> : null}
     </section>
   </div>;
 }
