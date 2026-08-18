@@ -11,6 +11,7 @@ export interface ImageAttachment {
   path: string;
   dataUrl: string;
   name: string;
+  error?: string;
 }
 
 export interface SkillOption {

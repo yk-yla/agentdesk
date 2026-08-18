@@ -1,4 +1,4 @@
-import { Check, Copy } from "lucide-react";
+import { Check, Copy, TriangleAlert } from "lucide-react";
 import { memo, useEffect, useMemo, useState, type ReactNode } from "react";
 import ReactMarkdown, { type Components } from "react-markdown";
 import remarkGfm from "remark-gfm";
@@ -50,17 +50,37 @@ function isHttpSource(value: string) {
 
 function AttachmentImage({ image, readLocalImage, openExternal, onOpen }: { image: ImageAttachment; readLocalImage: Props["readLocalImage"]; openExternal: Props["openExternal"]; onOpen?: (source: string) => void }) {
   const [source, setSource] = useState(image.dataUrl);
+  const [loading, setLoading] = useState(!image.dataUrl && Boolean(image.path) && !image.error);
   useEffect(() => {
     let active = true;
-    if (!source && image.path) void readCachedLocalImage(image.path, readLocalImage).then((value) => { if (active && value) setSource(value); });
+    if (image.dataUrl) {
+      setSource(image.dataUrl);
+      setLoading(false);
+      return () => { active = false; };
+    }
+    if (!image.path || image.error) {
+      setSource("");
+      setLoading(false);
+      return () => { active = false; };
+    }
+    setLoading(true);
+    void readCachedLocalImage(image.path, readLocalImage).then((value) => {
+      if (!active) return;
+      if (value) setSource(value);
+      setLoading(false);
+    });
     return () => { active = false; };
-  }, [image.dataUrl, image.path, readLocalImage, source]);
+  }, [image.dataUrl, image.path, image.error, readLocalImage]);
   if (source && isHttpSource(source)) {
     return <a className="image-placeholder" href={source} onClick={(event) => { event.preventDefault(); void openExternal(source); }}>远程图片：{image.name}</a>;
   }
+  if (loading) return <span className="image-placeholder">正在加载图片...</span>;
   return source
     ? <img className="message-image" src={source} alt={image.name} onClick={() => onOpen?.(source)} title="点击放大" />
-    : <span className="image-placeholder">图片不可用或已清理：{image.name}</span>;
+    : <span className={"image-placeholder" + (image.error ? " image-placeholder-error" : "")} role={image.error ? "alert" : undefined}>
+      {image.error ? <TriangleAlert size={14} aria-hidden="true" /> : null}
+      <span>{image.error ? "图片无法显示：" + image.error : "图片无法显示：原文件不存在或已被清理。" + image.name}</span>
+    </span>;
 }
 
 function nodeText(value: ReactNode): string {

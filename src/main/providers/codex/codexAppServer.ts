@@ -52,7 +52,7 @@ export interface CodexAppServerOptions {
   isQuitting(): boolean;
   isExitNotificationSuppressed(): boolean;
   terminateTree(child: ChildProcessWithoutNullStreams): Promise<void>;
-  inspectMessage(message: JsonRpcMessage, requestMethod?: string): void;
+  inspectMessage(message: JsonRpcMessage, requestMethod?: string): JsonRpcMessage | void;
   logger?: AppLogger;
 }
 
@@ -180,17 +180,17 @@ export class CodexAppServer implements CodexBackendRuntime {
 
   private handleMessage(child: ChildProcessWithoutNullStreams, message: JsonRpcMessage) {
     if (message.method && this.child === child) {
-      this.options.inspectMessage(message);
-      this.publish(message);
+      const inspected = this.options.inspectMessage(message) || message;
+      this.publish(inspected);
     }
     if (message.method || typeof message.id !== "number") return;
     const tracked = this.requests.takeResponse(message.id, child);
     if (!tracked) return;
-    this.options.inspectMessage(message, tracked.request.method);
+    const inspected = this.options.inspectMessage(message, tracked.request.method) || message;
     if (tracked.kind === "late") {
-      this.options.logger?.log("warn", "codex.rpc.late_response", { requestId: tracked.request.requestId, rpcId: message.id, method: tracked.request.method, response: message });
+      this.options.logger?.log("warn", "codex.rpc.late_response", { requestId: tracked.request.requestId, rpcId: message.id, method: tracked.request.method, response: inspected });
       if (tracked.request.sessionId) {
-        this.publish({ method: "client/late-response", params: { sessionId: tracked.request.sessionId, requestMethod: tracked.request.method, response: message } });
+        this.publish({ method: "client/late-response", params: { sessionId: tracked.request.sessionId, requestMethod: tracked.request.method, response: inspected } });
       }
       return;
     }
@@ -200,8 +200,8 @@ export class CodexAppServer implements CodexBackendRuntime {
         method: tracked.request.method, code: message.error.code, message: message.error.message, data: message.error.data,
       })));
     } else {
-      this.options.logger?.log("debug", "codex.rpc.completed", { requestId: tracked.request.requestId, rpcId: message.id, method: tracked.request.method, result: message.result });
-      tracked.request.resolve(message.result);
+      this.options.logger?.log("debug", "codex.rpc.completed", { requestId: tracked.request.requestId, rpcId: message.id, method: tracked.request.method, result: inspected.result });
+      tracked.request.resolve(inspected.result);
     }
   }
 

@@ -333,11 +333,11 @@ function messagesFromItem(itemValue: unknown, timestamp?: number): Message[] {
     const review = stringValue(item.review);
     return review ? [{ id: `review-result-${id}`, role: "assistant", text: review, images: [], streaming: false, timestamp }] : [];
   }
-  if (type === "imageView" && typeof item.path === "string") return [{ id, role: "assistant", text: "", images: [{ path: item.path, dataUrl: "", name: item.path.split(/[\\/]/).pop() || "图片" }], streaming: false, timestamp }];
+  if (type === "imageView" && typeof item.path === "string") return [{ id, role: "assistant", text: "", images: [{ path: item.path, dataUrl: "", name: stringValue(item.name, item.path.split(/[\\/]/).pop() || "图片"), ...(stringValue(item.imageError) ? { error: stringValue(item.imageError) } : {}) }], streaming: false, timestamp }];
   if (type === "imageGeneration") {
     const savedPath = stringValue(item.savedPath);
     const result = stringValue(item.result);
-    const image = { path: savedPath, dataUrl: result.startsWith("data:image/") || result.startsWith("http://") || result.startsWith("https://") ? result : "", name: savedPath.split(/[\\/]/).pop() || "生成图片" };
+    const image = { path: savedPath, dataUrl: result.startsWith("data:image/") || result.startsWith("http://") || result.startsWith("https://") ? result : "", name: stringValue(item.name, savedPath.split(/[\\/]/).pop() || "生成图片"), ...(stringValue(item.imageError) ? { error: stringValue(item.imageError) } : {}) };
     return [{ id, role: "assistant", text: stringValue(item.revisedPrompt), images: [image], streaming: false, timestamp }];
   }
   if (type !== "userMessage") return [];

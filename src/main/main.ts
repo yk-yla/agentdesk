@@ -1,7 +1,7 @@
 import { app, BrowserWindow, clipboard, dialog, globalShortcut, ipcMain, Menu, nativeImage, net, Notification, shell, Tray, type NotificationConstructorOptions } from "electron";
 import { autoUpdater } from "electron-updater";
 import { spawnSync } from "node:child_process";
-import { existsSync, mkdirSync, promises as fsPromises, readFileSync, statSync, writeFileSync } from "node:fs";
+import { existsSync, lstatSync, mkdirSync, promises as fsPromises, readFileSync, statSync, writeFileSync } from "node:fs";
 import { randomUUID } from "node:crypto";
 import { homedir } from "node:os";
 import { createServer, type Server } from "node:http";
@@ -17,6 +17,7 @@ import { canonicalPath, isWithinDirectory, resolveLocalPathOpenRequest } from ".
 import { CodexBackend } from "./providers/codex/CodexBackend";
 import { CodexTitleGenerator } from "./providers/codex/codexTitleGenerator";
 import { CodexAppServer } from "./providers/codex/codexAppServer";
+import { CodexImagePersistence } from "./providers/codex/codexImagePersistence";
 import { ClaudeBackend } from "./providers/claude/ClaudeBackend";
 import type { ClaudeGatewayFixtureKind, ClaudeLifecycleFixtureKind } from "./providers/claude/claudeWorkerProtocol";
 import { prepareClaudeTurnParams } from "./providers/claude/claudeImageInput";
@@ -41,6 +42,7 @@ import { WorkspaceGrantStore } from "./workspaceGrantStore";
 import { parseClipboardImageDataUrl } from "./clipboardImageData";
 import { isClipboardImageSizeAllowed } from "../shared/imagePolicy";
 import { WorkspaceSnapshotCoordinator } from "./workspaceSnapshotCoordinator";
+import { detectImageMediaType, MAX_LOCAL_IMAGE_BYTES } from "./imageContent";
 
 const MAX_AUTHORIZED_LOCAL_PATHS = 4_096;
 const MAX_AUTHORIZED_WORKSPACE_PATHS = 64;
@@ -364,18 +366,18 @@ function readClaudeCredentialsForQuery() {
   return { source: "process" as const, baseUrl: fixture.baseUrl, authToken: "agentdesk-c22-fixture-token" };
 }
 
-function imageMimeForPath(filePath: string) {
-  const extension = path.extname(filePath).toLowerCase();
-  const mimeByExtension: Record<string, string> = { ".png": "image/png", ".jpg": "image/jpeg", ".jpeg": "image/jpeg", ".gif": "image/gif", ".webp": "image/webp" };
-  return mimeByExtension[extension] ?? null;
-}
-
 function dataUrlForImage(filePath: string): string | null {
-  const mime = imageMimeForPath(filePath);
-  if (!mime || !existsSync(filePath)) return null;
-  const stats = statSync(filePath);
-  if (!stats.isFile() || stats.size > 10 * 1024 * 1024) return null;
-  return `data:${mime};base64,${readFileSync(filePath).toString("base64")}`;
+  if (!existsSync(filePath)) return null;
+  try {
+    if (lstatSync(filePath).isSymbolicLink()) return null;
+    const stats = statSync(filePath);
+    if (!stats.isFile() || stats.size <= 0 || stats.size > MAX_LOCAL_IMAGE_BYTES) return null;
+    const bytes = readFileSync(filePath);
+    const mime = detectImageMediaType(bytes);
+    return mime ? `data:${mime};base64,${bytes.toString("base64")}` : null;
+  } catch {
+    return null;
+  }
 }
 
 function saveClipboardImage(dataUrl: string, suggestedName?: string): SavedImage {
@@ -584,6 +586,15 @@ const codexTitleGenerator = new CodexTitleGenerator({
   logger: appLogger,
 });
 
+const codexImagePersistence = new CodexImagePersistence({
+  attachmentRoot: attachmentsPath,
+  onSaved: ({ name, size }) => {
+    appLogger.log("debug", "codex.image.saved", { name, size });
+    scheduleAttachmentCleanup();
+  },
+  onFailure: ({ name, reason }) => appLogger.log("warn", "codex.image.save_failed", { name, reason }),
+});
+
 const codexAppServer = new CodexAppServer({
   command: codexCommand,
   cwd: () => workspacePath,
@@ -594,7 +605,9 @@ const codexAppServer = new CodexAppServer({
   terminateTree: (child) => processSupervisor.terminate(child),
   logger: appLogger,
   inspectMessage(message, requestMethod) {
-    registerAuthorizedImageReferences(message);
+    const inspected = codexImagePersistence.transformMessage(message);
+    registerAuthorizedImageReferences(inspected);
+    return inspected;
   },
 });
 

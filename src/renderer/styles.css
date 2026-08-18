@@ -267,7 +267,8 @@ body.resizing-sidebar, body.resizing-sidebar * { cursor: col-resize !important; 
 .message-row.user .markdown-message p { white-space: pre-wrap; }
 .message-images { display: flex; flex-wrap: wrap; gap: 7px; margin-bottom: 8px; }
 .message-image { display: block; max-width: min(360px, 100%); max-height: 300px; object-fit: contain; border: 1px solid var(--border); border-radius: 7px; cursor: zoom-in; }
-.image-placeholder { display: inline-block; padding: 10px; color: var(--muted); background: var(--surface-raised); border-radius: 6px; font-size: 11px; }
+.image-placeholder { display: inline-flex; align-items: center; gap: 6px; padding: 10px; color: var(--muted); background: var(--surface-raised); border-radius: 6px; font-size: 11px; }
+.image-placeholder-error { color: var(--danger, #c94a4a); background: color-mix(in srgb, var(--danger, #c94a4a) 10%, var(--surface-raised)); border: 1px solid color-mix(in srgb, var(--danger, #c94a4a) 28%, var(--border)); }
 .image-lightbox { position: fixed; inset: 0; z-index: 200; display: flex; align-items: center; justify-content: center; padding: 48px 32px; background: #000b; cursor: zoom-out; }
 .image-lightbox img { max-width: min(94vw, 1400px); max-height: calc(100vh - 96px); object-fit: contain; border: 1px solid #fff4; border-radius: 6px; box-shadow: 0 20px 60px #0008; cursor: default; }
 .image-lightbox-actions { position: absolute; top: 44px; right: 20px; display: flex; gap: 7px; cursor: default; }
