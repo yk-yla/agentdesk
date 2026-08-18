@@ -98,6 +98,7 @@ export type AgentOperation =
   | "updateSessionSettings"
   | "startTurn"
   | "startReview"
+  | "generateSessionTitle"
   | "steerTurn"
   | "interruptTurn"
   | "compactSession"

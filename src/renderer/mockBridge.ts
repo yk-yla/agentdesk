@@ -68,6 +68,7 @@ export function createMockBridge(): CodexBridge {
         if (thread) thread.name = stringValue(params.name, thread.name);
         return Promise.resolve({});
       }
+      if (method === "session/title/generate") return Promise.resolve({ title: "Mock 会话标题", source: "generated" });
       if (method === "thread/metadata/update") {
         const thread = threadMap.get(stringValue(params.threadId));
         if (thread && typeof params.isPinned === "boolean") thread.isPinned = params.isPinned;
@@ -298,7 +299,7 @@ export function createMockBridge(): CodexBridge {
 }
 
 const MOCK_METHODS: Record<Exclude<AgentOperation, "getCapabilities" | "closeSession">, string> = {
-  listModels: "model/list", listSkills: "skills/list", listSessions: "thread/list", searchSessions: "thread/search",
+  listModels: "model/list", listSkills: "skills/list", listSessions: "thread/list", searchSessions: "thread/search", generateSessionTitle: "session/title/generate",
   readSession: "thread/read", startSession: "thread/start", resumeSession: "thread/resume", forkSession: "thread/fork",
   renameSession: "thread/name/set", deleteSession: "thread/delete", updateSessionMetadata: "thread/metadata/update",
   updateSessionSettings: "thread/settings/update", startTurn: "turn/start", startReview: "review/start", steerTurn: "turn/steer",

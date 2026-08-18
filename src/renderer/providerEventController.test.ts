@@ -20,6 +20,7 @@ function createHarness(initialSessions?: Record<string, SessionState>) {
   const rejectedStarts: string[] = [];
   const resolvedStarts: string[] = [];
   const rememberedCompactions: string[] = [];
+  const titleRefreshes: Array<{ sessionId: string; status: string }> = [];
   const skillReloadProviders: AgentProvider[] = [];
   const activatedSessions: string[] = [];
   let frame: (() => void) | null = null;
@@ -62,6 +63,7 @@ function createHarness(initialSessions?: Record<string, SessionState>) {
       updateProviderModels: (provider, models) => { providerModels.push({ provider, ids: models.map((model) => model.id) }); },
       rememberModelContextWindow: () => undefined,
       rememberCompaction: (_sessionId, routed) => { rememberedCompactions.push(routed.nativeSessionId || ""); },
+      refreshSessionTitle: (sessionId, status) => { titleRefreshes.push({ sessionId, status }); },
       appendRawEvent: (sessionId, type) => { raw.push({ sessionId, type }); },
       showNotification: (session) => { notifications.push(session.id); },
       isDocumentFocused: () => true,
@@ -85,6 +87,7 @@ function createHarness(initialSessions?: Record<string, SessionState>) {
     rejectedStarts,
     resolvedStarts,
     rememberedCompactions,
+    titleRefreshes,
     skillReloadProviders,
     activatedSessions,
     get frame() { return frame; },
@@ -219,6 +222,12 @@ describe("ProviderEventController", () => {
 
     assert.deepEqual(harness.resolvedStarts, ["session"]);
     assert.deepEqual(harness.recovered, ["codex"]);
+  });
+
+  it("refreshes a fallback title only after a completed turn event", () => {
+    const harness = createHarness();
+    harness.controller.handleEnvelope(event("turn/completed", { threadId: "thread", turn: { id: "turn-1", status: "completed" } }));
+    assert.deepEqual(harness.titleRefreshes, [{ sessionId: "session", status: "completed" }]);
   });
 
   it("does not disconnect the Provider for a non-terminal Codex client error", () => {

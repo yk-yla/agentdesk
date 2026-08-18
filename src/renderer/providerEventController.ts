@@ -61,6 +61,7 @@ export interface ProviderEventServices {
   updateProviderModels(provider: AgentProvider, models: ModelOption[]): void;
   rememberModelContextWindow(sessionId: string, event: RoutedAgentEvent): void;
   rememberCompaction(sessionId: string, event: RoutedAgentEvent): void;
+  refreshSessionTitle(sessionId: string, turnStatus: string): void;
   appendRawEvent(sessionId: string, type: string, value: unknown): void;
   showNotification(session: Pick<SessionState, "id" | "provider" | "title">): void;
   isDocumentFocused(): boolean;
@@ -326,6 +327,7 @@ export class ProviderEventController {
     }
     services.appendRawEvent(sessionId, envelope.type, envelope);
     this.enqueue(sessionId, event);
+    if (event.kind === "turnCompleted") services.refreshSessionTitle(sessionId, event.turnStatus || "completed");
   };
 
   private isFirstOutput(event: RoutedAgentEvent) {

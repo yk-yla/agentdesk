@@ -38,6 +38,13 @@ describe("desktop IPC validation", () => {
       context: { requestId: "req-123", sessionId: "session", queryGeneration: 2, nativeSessionId: "x".repeat(300) },
     });
     assert.deepEqual(request.context, { requestId: "req-123", sessionId: "session", queryGeneration: 2 });
+    const titleRequest = validateAgentRequest({
+      provider: "codex",
+      operation: "generateSessionTitle",
+      params: { threadId: "thread", conversation: "hello" },
+      context: { sessionId: "session", canonicalCwd: "D:\\work", nativeSessionId: "thread" },
+    });
+    assert.equal(titleRequest.operation, "generateSessionTitle");
     assert.throws(() => validateAgentRequest({ provider: "claude", operation: "unknown", params: {} }), /未获授权/);
     assert.throws(() => validateAgentRequest({ provider: "codex", operation: "startTurn", params: [] }), /参数无效/);
   });

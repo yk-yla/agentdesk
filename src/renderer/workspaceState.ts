@@ -175,6 +175,7 @@ export function createWorkspaceState(input: {
       provider: session.provider,
       cwd: session.cwd.slice(0, 2_000),
       title: session.title.slice(0, 500),
+      titleOrigin: session.titleOrigin,
       updatedAt: session.updatedAt,
       model: session.model,
       effort: session.effort,
@@ -287,6 +288,9 @@ export function parseWorkspaceState(value: unknown, currentWorkspace: string): R
     const session = emptySession(id, cwd, stringValue(saved.model).slice(0, 240), stringValue(saved.effort, "medium").slice(0, 80), provider);
     session.threadId = stringValue(saved.threadId).slice(0, 240) || null;
     session.title = stringValue(saved.title, "新会话").slice(0, 500);
+    session.titleOrigin = saved.titleOrigin === "manual" || saved.titleOrigin === "provider" || saved.titleOrigin === "fallback"
+      ? saved.titleOrigin
+      : session.title === "新会话" ? "placeholder" : "manual";
     const savedUpdatedAt = numberValue(saved.updatedAt);
     if (savedUpdatedAt > 0 && savedUpdatedAt <= Date.now() + 60_000) session.updatedAt = savedUpdatedAt;
     session.collaborationMode = saved.collaborationMode === "plan" ? "plan" : "default";

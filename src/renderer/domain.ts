@@ -170,6 +170,7 @@ export interface SessionState {
   threadId: string | null;
   cwd: string;
   title: string;
+  titleOrigin: "placeholder" | "fallback" | "provider" | "manual";
   createdAt: number;
   updatedAt: number;
   messages: Message[];
@@ -319,7 +320,7 @@ export function formatElapsed(startedAt: number | null, now: number) {
 export function emptySession(id: string, cwd: string, model = "", effort = "", provider: AgentProvider = "codex") : SessionState {
   const now = Date.now();
   return {
-    id, provider, queryGeneration: 0, capabilities: { ...EMPTY_AGENT_CAPABILITIES }, threadId: null, cwd, title: "新会话", createdAt: now, updatedAt: now, messages: [], activities: [],
+    id, provider, queryGeneration: 0, capabilities: { ...EMPTY_AGENT_CAPABILITIES }, threadId: null, cwd, title: "新会话", titleOrigin: "placeholder", createdAt: now, updatedAt: now, messages: [], activities: [],
     model, effort, collaborationMode: "default", status: "idle", statusLabel: "就绪", activeTurnId: null, startedAt: null, errorText: "", retryState: null, pendingApprovals: [], goal: null, plan: null, subagents: [],
     tokenUsage: { used: 0, total: null }, compactionCount: 0, compactionEventIds: [], detailsOpen: false, detailView: "activity",
   };

@@ -37,7 +37,7 @@ interface ClosedSessionGrant {
 
 const SESSION_OPERATIONS = new Set<AgentOperation>([
   "listModels", "listSkills", "readSession", "forkSession", "renameSession", "deleteSession",
-  "updateSessionMetadata", "updateSessionSettings", "startTurn", "startReview", "steerTurn", "interruptTurn",
+  "updateSessionMetadata", "updateSessionSettings", "startTurn", "startReview", "generateSessionTitle", "steerTurn", "interruptTurn",
   "compactSession", "readRateLimits", "listMcpServers", "getGoal", "setGoal", "clearGoal", "closeSession",
 ]);
 const QUERY_OPERATIONS = new Set<AgentOperation>(["steerTurn", "interruptTurn"]);
@@ -57,6 +57,7 @@ const CODEX_INTERACTION_METHODS = new Set([
 ]);
 const INTERACTION_TIMEOUT_MS = 5 * 60_000;
 const CLOSED_SESSION_GRANT_MS = 30_000;
+const MAX_TITLE_CONVERSATION_BYTES = 48 * 1024;
 
 function record(value: unknown): Record<string, unknown> {
   return value && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : {};
@@ -163,6 +164,11 @@ export class AgentSessionRegistry {
     const session = this.requireSession(provider, context);
     this.assertContextMatches(session, context);
     this.assertParamsMatch(session, operation, params);
+    if (operation === "generateSessionTitle") {
+      if (typeof params.conversation !== "string" || !params.conversation.trim() || Buffer.byteLength(params.conversation, "utf8") > MAX_TITLE_CONVERSATION_BYTES) {
+        throw new Error("会话标题生成内容无效或过大。");
+      }
+    }
     if (QUERY_OPERATIONS.has(operation) && !session.queryActive) throw new Error("当前会话没有活动 Query。");
   }
 

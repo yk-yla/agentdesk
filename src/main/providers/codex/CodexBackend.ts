@@ -1,8 +1,9 @@
 import type { AgentBackend } from "../../agent/AgentBackend";
 import type { AgentCapabilities, AgentEventEnvelope, AgentOperation, AgentRequestContext, InteractionRef } from "../../../shared/agentProtocol";
 import { decodeCodexRpcError, encodeCodexRpcError, type JsonObject, type JsonRpcMessage } from "../../../shared/protocol";
+import type { CodexTitleGenerator } from "./codexTitleGenerator";
 
-const METHODS: Record<Exclude<AgentOperation, "getCapabilities" | "closeSession">, string> = {
+const METHODS: Record<Exclude<AgentOperation, "getCapabilities" | "closeSession" | "generateSessionTitle">, string> = {
   listModels: "model/list",
   listSkills: "skills/list",
   listSessions: "thread/list",
@@ -71,11 +72,15 @@ export interface CodexBackendRuntime {
 export class CodexBackend implements AgentBackend {
   readonly provider = "codex" as const;
 
-  constructor(private readonly runtime: CodexBackendRuntime) {}
+  constructor(
+    private readonly runtime: CodexBackendRuntime,
+    private readonly titleGenerator?: CodexTitleGenerator,
+  ) {}
 
   async request(operation: AgentOperation, params: JsonObject, context: AgentRequestContext) {
     if (operation === "getCapabilities") return this.getCapabilities();
     if (operation === "closeSession") return this.closeSession(context);
+    if (operation === "generateSessionTitle") return this.generateSessionTitle(params, context);
     const method = METHODS[operation];
     if (!method) throw new Error(`Codex 不支持该操作：${operation}`);
     const providerParams = providerRequestParams(operation, params);
@@ -109,9 +114,39 @@ export class CodexBackend implements AgentBackend {
 
   async closeSession(_context: AgentRequestContext) {
     // Codex app-server 是多会话共享进程；关闭空闲 Tab 只释放渲染层状态。
+    if (_context.sessionId) this.titleGenerator?.cancel(_context.sessionId);
   }
 
-  close() {
-    return this.runtime.close();
+  async close() {
+    await Promise.all([this.titleGenerator?.close() || Promise.resolve(), this.runtime.close()]);
+  }
+
+  private async generateSessionTitle(params: JsonObject, context: AgentRequestContext) {
+    const threadId = typeof params.threadId === "string" ? params.threadId : context.nativeSessionId;
+    const cwd = typeof params.cwd === "string" ? params.cwd : context.canonicalCwd;
+    const conversation = typeof params.conversation === "string" ? params.conversation : "";
+    if (!threadId || !cwd) throw new Error("Codex 标题请求缺少会话归属。");
+
+    const read = await this.runtime.request("thread/read", { threadId, includeTurns: false }, context, "generateSessionTitle");
+    const thread = read && typeof read === "object" && !Array.isArray(read) && "thread" in read
+      ? (read as { thread?: unknown }).thread
+      : undefined;
+    const nativeName = thread && typeof thread === "object" && !Array.isArray(thread) && typeof (thread as { name?: unknown }).name === "string"
+      ? (thread as { name: string }).name.trim().slice(0, 200)
+      : "";
+    if (nativeName && nativeName !== "新会话") return { title: nativeName, source: "native" };
+    if (!this.titleGenerator || !conversation.trim()) return { title: "", source: "fallback" };
+
+    const generated = await this.titleGenerator.generate({ sessionId: context.sessionId || threadId, cwd, conversation });
+    const reread = await this.runtime.request("thread/read", { threadId, includeTurns: false }, context, "generateSessionTitle");
+    const latestThread = reread && typeof reread === "object" && !Array.isArray(reread) && "thread" in reread
+      ? (reread as { thread?: unknown }).thread
+      : undefined;
+    const latestName = latestThread && typeof latestThread === "object" && !Array.isArray(latestThread) && typeof (latestThread as { name?: unknown }).name === "string"
+      ? (latestThread as { name: string }).name.trim().slice(0, 200)
+      : "";
+    if (latestName && latestName !== "新会话") return { title: latestName, source: "native" };
+    await this.runtime.request("thread/name/set", { threadId, name: generated }, context, "generateSessionTitle");
+    return { title: generated, source: "generated" };
   }
 }

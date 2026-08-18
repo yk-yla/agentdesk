@@ -30,6 +30,7 @@ import { SessionSettingsCoordinator } from "./sessionSettingsCoordinator";
 import { recoverProviderSessions } from "./providerRecovery";
 import { SessionLifecycleController } from "./sessionLifecycleController";
 import { SessionMessageController } from "./sessionMessageController";
+import { SessionTitleController } from "./sessionTitleController";
 import { nativeSessionKey, ProviderEventController } from "./providerEventController";
 import { applyLocalSessionMetadata, favoriteHistoryEntries, favoriteSessionSummary, HistoryController, isFavoriteSession, mergeHistory, sortHistory, sortHistoryByRecency } from "./historyController";
 import { registerHistoricalWorkspace, restoreHistoricalSession } from "./historicalSessionRestore";
@@ -251,6 +252,7 @@ export default function App() {
   const workspaceRestoreRetryTimersRef = useRef(new Map<string, number>());
   const sessionLifecycleRef = useRef(new SessionLifecycleController());
   const sessionMessageRef = useRef<SessionMessageController | null>(null);
+  const sessionTitleRef = useRef<SessionTitleController | null>(null);
   const providerEventRef = useRef<ProviderEventController | null>(null);
   const turnTelemetryRef = useRef<TurnTelemetry | null>(null);
   const historyControllerRef = useRef<HistoryController | null>(null);
@@ -462,6 +464,7 @@ export default function App() {
     session.tokenUsage.total = cachedModelContextWindow(preferencesRef.current, session.model);
     session.threadId = options?.threadId ?? null;
     session.title = options?.title || "新会话";
+    session.titleOrigin = options?.title ? "provider" : "placeholder";
     session.resumed = false;
     const initialized = withPersistedCompaction(session, preferencesRef.current);
     sessionsRef.current = { ...sessionsRef.current, [id]: initialized };
@@ -526,6 +529,7 @@ export default function App() {
     setDraftRevisions((current) => { const next = { ...current }; delete next[sessionId]; return next; });
     draftsRef.current.delete(sessionId);
     sessionMessageRef.current?.release(sessionId);
+    sessionTitleRef.current?.release(sessionId);
     providerEventRef.current?.release(sessionId);
     sessionLifecycleRef.current.release(sessionId, reason);
     settingsCoordinatorRef.current.delete(sessionId);
@@ -1172,6 +1176,35 @@ export default function App() {
     appendSystemMessage(sessionId, ["**MCP 服务器**", "", ...lines].join("\n"));
   }, [appendSystemMessage, requestForSession]);
 
+  const applyResolvedSessionTitle = useCallback((sessionId: string, title: string) => {
+    const session = sessionsRef.current[sessionId];
+    if (!session?.threadId || !title) return;
+    const updatedAt = Date.now();
+    updateSession(sessionId, (current) => ({ ...current, title, titleOrigin: "provider", updatedAt }));
+    setHistory((current) => sortHistory(current.map((entry) => entry.provider === session.provider && entry.id === session.threadId
+      ? { ...entry, title, titleLower: title.toLowerCase(), updatedAt }
+      : entry)));
+    if (isFavoriteSession(preferencesRef.current, session.provider, session.threadId)) {
+      const key = nativeSessionKey(session.provider, session.threadId);
+      void savePreference({
+        favoriteSessionSummaries: {
+          ...(preferencesRef.current.favoriteSessionSummaries || {}),
+          [key]: favoriteSessionSummary({ ...session, id: session.threadId, title, updatedAt }),
+        },
+      });
+    }
+  }, [savePreference, updateSession]);
+
+  if (!sessionTitleRef.current) {
+    sessionTitleRef.current = new SessionTitleController({
+      getSession: (sessionId) => sessionsRef.current[sessionId],
+    }, {
+      request: requestForSession,
+      applyTitle: applyResolvedSessionTitle,
+      log: (level, event, details) => { void bridge.writeLog({ level, event, details }).catch(() => undefined); },
+    });
+  }
+
   if (!sessionMessageRef.current) {
     sessionMessageRef.current = new SessionMessageController({
       state: {
@@ -1306,6 +1339,7 @@ export default function App() {
     setTabContextMenu(null);
     const name = requestedName.trim();
     if (!name || name === session.title) return;
+    sessionTitleRef.current?.invalidate(sessionId);
     try {
       if (session.threadId) await requestForSession(sessionId, "renameSession", { threadId: session.threadId, name });
       if (session.threadId) {
@@ -1319,9 +1353,10 @@ export default function App() {
         }
         await savePreference(patch);
       }
-      updateSession(sessionId, (current) => ({ ...current, title: name, updatedAt: Date.now() }));
+      updateSession(sessionId, (current) => ({ ...current, title: name, titleOrigin: "manual", updatedAt: Date.now() }));
       if (session.threadId) setHistory((current) => sortHistory(current.map((entry) => entry.provider === session.provider && entry.id === session.threadId ? { ...entry, title: name, titleLower: name.toLowerCase() } : entry)));
     } catch (error) {
+      sessionTitleRef.current?.reset(sessionId);
       setError(sessionId, error, "重命名失败");
     }
   }, [requestForSession, savePreference, setError, updateSession]);
@@ -1497,7 +1532,7 @@ export default function App() {
       });
       const nextSessionId = await createSessionInDirectory(session.cwd, targetProvider);
       if (!nextSessionId) return;
-      updateSession(nextSessionId, (current) => ({ ...current, title: `${session.title || "新会话"} 接力` }));
+      updateSession(nextSessionId, (current) => ({ ...current, title: `${session.title || "新会话"} 接力`, titleOrigin: "manual" }));
       const handoffMessage = sessionMessages.createQueuedMessage(packageInfo.prompt, "handoff");
       window.setTimeout(() => {
         void runMessage(nextSessionId, handoffMessage).then((accepted) => {
@@ -1739,7 +1774,7 @@ export default function App() {
         const packageInfo = await bridge.createHandoffPackage({ cwd, title: source.title, threadId: entry.id, content: handoffMarkdown(source) });
         const nextSessionId = await createSessionInDirectory(cwd, targetProvider);
         if (!nextSessionId) return;
-        updateSession(nextSessionId, (current) => ({ ...current, title: `${source.title || "新会话"} 接力` }));
+        updateSession(nextSessionId, (current) => ({ ...current, title: `${source.title || "新会话"} 接力`, titleOrigin: "manual" }));
         const handoffMessage = sessionMessages.createQueuedMessage(packageInfo.prompt, "handoff");
         window.setTimeout(() => {
           void runMessage(nextSessionId, handoffMessage).then((accepted) => {
@@ -1927,6 +1962,7 @@ export default function App() {
         },
         rememberModelContextWindow,
         rememberCompaction,
+        refreshSessionTitle: (sessionId, turnStatus) => sessionTitleRef.current?.refreshAfterTurn(sessionId, turnStatus),
         appendRawEvent,
         showNotification: (session) => { void bridge.showNotification({ sessionId: session.id, provider: session.provider, sessionTitle: session.title }); },
         isDocumentFocused: () => document.hasFocus(),

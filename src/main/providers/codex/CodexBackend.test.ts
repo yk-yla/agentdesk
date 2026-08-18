@@ -77,4 +77,35 @@ describe("CodexBackend", () => {
     assert.equal(responseId, 7);
     assert.throws(() => backend.respondToInteraction({ provider: "claude", sessionId: "s", queryGeneration: 0, interactionId: "i", requestId: 8 }, {}), /引用无效/);
   });
+
+  it("uses a native Codex name before invoking the title generator", async () => {
+    let generated = 0;
+    const backend = new CodexBackend(runtime({
+      request: async (method) => method === "thread/read" ? { thread: { id: "thread", name: "原生标题" } } : {},
+    }), {
+      generate: async () => { generated += 1; return "AI 标题"; },
+      cancel: () => undefined,
+      close: async () => undefined,
+    } as never);
+    const result = await backend.request("generateSessionTitle", { threadId: "thread", cwd: "D:\\work", conversation: "会话内容" }, { sessionId: "session", nativeSessionId: "thread", canonicalCwd: "D:\\work" });
+    assert.deepEqual(result, { title: "原生标题", source: "native" });
+    assert.equal(generated, 0);
+  });
+
+  it("generates and persists a Codex title when no native name exists", async () => {
+    const methods: string[] = [];
+    const backend = new CodexBackend(runtime({
+      request: async (method) => {
+        methods.push(method);
+        return method === "thread/read" ? { thread: { id: "thread" } } : {};
+      },
+    }), {
+      generate: async () => "AI 标题",
+      cancel: () => undefined,
+      close: async () => undefined,
+    } as never);
+    const result = await backend.request("generateSessionTitle", { threadId: "thread", cwd: "D:\\work", conversation: "会话内容" }, { sessionId: "session", nativeSessionId: "thread", canonicalCwd: "D:\\work" });
+    assert.deepEqual(result, { title: "AI 标题", source: "generated" });
+    assert.deepEqual(methods, ["thread/read", "thread/read", "thread/name/set"]);
+  });
 });

@@ -10,6 +10,7 @@ const AGENT_PROVIDERS = new Set<AgentProvider>(["codex", "claude"]);
 const AGENT_OPERATIONS = new Set<AgentOperation>([
   "listModels", "listSkills", "listSessions", "searchSessions", "readSession", "startSession", "resumeSession", "forkSession",
   "renameSession", "deleteSession", "updateSessionMetadata", "updateSessionSettings", "startTurn", "startReview", "steerTurn",
+  "generateSessionTitle",
   "interruptTurn", "compactSession", "readRateLimits", "listMcpServers", "getGoal", "setGoal", "clearGoal", "listPlugins",
   "readPlugin", "installPlugin", "uninstallPlugin", "updatePlugin", "getCapabilities", "closeSession",
   "addMarketplace", "updateMarketplace", "removeMarketplace",

@@ -122,6 +122,17 @@ describe("SessionMessageController", () => {
     assert.deepEqual(harness.history, [{ id: "thread-1", title: "inspect this" }]);
   });
 
+  it("does not replace a manual title that happens to be the placeholder text", async () => {
+    const harness = createHarness();
+    harness.sessions.session = { ...harness.sessions.session, title: "新会话", titleOrigin: "manual" };
+
+    harness.controller.sendMessage("session", "keep the chosen title");
+    await waitFor(() => harness.requests.length === 1);
+
+    assert.equal(harness.sessions.session.title, "新会话");
+    assert.equal(harness.sessions.session.titleOrigin, "manual");
+  });
+
   it("runs local status and clear commands without starting a turn", async () => {
     const harness = createHarness();
 

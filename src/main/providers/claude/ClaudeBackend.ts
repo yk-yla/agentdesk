@@ -112,6 +112,16 @@ function managedClaudePath() {
   try { return require.resolve(`@anthropic-ai/claude-agent-sdk-${process.platform}-${process.arch}/claude.exe`); } catch { return undefined; }
 }
 
+function sessionTitleFromInfo(value: unknown) {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return "";
+  const info = value as Record<string, unknown>;
+  return (typeof info.customTitle === "string" && info.customTitle.trim()
+    ? info.customTitle
+    : typeof info.summary === "string" && info.summary.trim()
+      ? info.summary
+      : typeof info.firstPrompt === "string" ? info.firstPrompt : "").trim().slice(0, 200);
+}
+
 export class ClaudeBackend implements AgentBackend {
   readonly provider = "claude" as const;
   private readonly listeners = new Set<(event: AgentEventEnvelope) => void>();
@@ -138,6 +148,7 @@ export class ClaudeBackend implements AgentBackend {
     if (operation === "listSessions") return this.listSessions(params, context);
     if (operation === "searchSessions") return this.searchSessions(params, context);
     if (operation === "readSession") return this.readSession(params, context);
+    if (operation === "generateSessionTitle") return this.generateSessionTitle(params, context);
     if (operation === "forkSession") return this.forkSession(params, context);
     if (operation === "renameSession") return this.renameSession(params, context);
     if (operation === "deleteSession") return this.deleteSession(params, context);
@@ -313,6 +324,15 @@ export class ClaudeBackend implements AgentBackend {
     const info = value.info && typeof value.info === "object" ? value.info as Record<string, unknown> : {};
     const model = typeof value.model === "string" && value.model.trim() ? value.model.trim() : "";
     return { thread: { ...info, id: nativeSessionId, cwd, ...(model ? { model } : {}), messages: Array.isArray(value.messages) ? value.messages : [] } };
+  }
+
+  private async generateSessionTitle(params: JsonObject, context: AgentRequestContext) {
+    const { cwd, nativeSessionId } = this.sessionIdentity(params, context);
+    await this.assertKnownNativeSession(cwd, nativeSessionId);
+    const info = await this.runtime.request({ type: "getSessionInfo", cwd, nativeSessionId });
+    if (!info || typeof info !== "object" || Array.isArray(info)) return { title: "", source: "fallback" };
+    const title = sessionTitleFromInfo(info);
+    return title ? { title, source: "native" } : { title: "", source: "fallback" };
   }
 
   private async resumeSession(params: JsonObject, context: AgentRequestContext) {

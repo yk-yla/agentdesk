@@ -110,7 +110,8 @@ export class SessionMessageController {
     }
     const isControlCommand = ["/compact", "/status", "/review", "/mcp"].includes(localCommand);
     const titleSource = message.skills?.length ? message.inputText || message.text : message.text;
-    const nextTitle = session.title === "新会话" && !isControlCommand
+    const shouldSetFallbackTitle = session.title === "新会话" && session.titleOrigin !== "manual" && !isControlCommand;
+    const nextTitle = shouldSetFallbackTitle
       ? sessionTitle(titleSource, message.images[0]?.name || "图片会话")
       : session.title;
     const sentAt = this.now();
@@ -118,6 +119,7 @@ export class SessionMessageController {
       ...current,
       errorText: "",
       title: nextTitle,
+      titleOrigin: shouldSetFallbackTitle ? "fallback" : current.titleOrigin,
       updatedAt: sentAt,
       ...(localCommand === "/status" || localCommand === "/mcp"
         ? {}

@@ -52,6 +52,14 @@ describe("AgentSessionRegistry", () => {
     sessions.prepareRequest("codex", "startTurn", { threadId: "thread-1" }, context({ nativeSessionId: "thread-1" }));
   });
 
+  it("bounds generated title conversation input by UTF-8 bytes", () => {
+    const sessions = registry();
+    startSession(sessions);
+    const titleContext = context({ nativeSessionId: "thread-1" });
+    sessions.prepareRequest("codex", "generateSessionTitle", { threadId: "thread-1", conversation: "a".repeat(48 * 1024) }, titleContext);
+    assert.throws(() => sessions.prepareRequest("codex", "generateSessionTitle", { threadId: "thread-1", conversation: "你".repeat(48 * 1024) }, titleContext), /内容无效或过大/);
+  });
+
   it("clears Codex session registrations only after the app-server exits", () => {
     const sessions = registry();
     startSession(sessions);

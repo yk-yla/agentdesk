@@ -15,6 +15,7 @@ import { DesktopNotificationRetention, normalizeDesktopNotification } from "./de
 import { CoalescingAsyncTask } from "./asyncOperation";
 import { canonicalPath, isWithinDirectory, resolveLocalPathOpenRequest } from "./localPathPolicy";
 import { CodexBackend } from "./providers/codex/CodexBackend";
+import { CodexTitleGenerator } from "./providers/codex/codexTitleGenerator";
 import { CodexAppServer } from "./providers/codex/codexAppServer";
 import { ClaudeBackend } from "./providers/claude/ClaudeBackend";
 import type { ClaudeGatewayFixtureKind, ClaudeLifecycleFixtureKind } from "./providers/claude/claudeWorkerProtocol";
@@ -548,8 +549,18 @@ function preserveLegacyUserDataDirectory() {
 
 preserveLegacyUserDataDirectory();
 
+const codexCommand = () => process.env.CODEX_DESKTOP_CLI?.trim() || (process.platform === "win32" ? "codex.cmd" : "codex");
+const codexTitleGenerator = new CodexTitleGenerator({
+  command: codexCommand,
+  terminateTree: (child) => processSupervisor.terminate(child),
+  track: (child) => { processSupervisor.track(child); },
+  isRequestBlocked: () => codexCliUpdateManager?.active || false,
+  isQuitting: () => windowLifecycle.isQuitting,
+  logger: appLogger,
+});
+
 const codexAppServer = new CodexAppServer({
-  command: () => process.env.CODEX_DESKTOP_CLI?.trim() || (process.platform === "win32" ? "codex.cmd" : "codex"),
+  command: codexCommand,
   cwd: () => workspacePath,
   appVersion: () => app.getVersion(),
   isRequestBlocked: () => codexCliUpdateManager?.active || false,
@@ -572,7 +583,7 @@ const claudeWorkerHost = new ClaudeWorkerHost(claudeWorkerPath, {
   reportCleanupFailure: (message) => appLogger.log("error", "claude.worker.cleanup_failed", { message }),
 });
 let claudeBackend: ClaudeBackend;
-const backendManager = createBackendRegistry([new CodexBackend(codexAppServer), (claudeBackend = new ClaudeBackend(claudeWorkerHost, undefined, readClaudeCredentialsForQuery, () => claudeGatewayFixture || claudeLifecycleFixture ? { kind: claudeGatewayFixture?.kind || "offline", ...(claudeGatewayFixture?.timeoutMs ? { timeoutMs: claudeGatewayFixture.timeoutMs } : {}), ...(claudeLifecycleFixture ? { lifecycle: claudeLifecycleFixture } : {}) } : undefined, undefined, (directory) => authorizedClaudeMarketplacePaths.has(canonicalPath(directory))))], appLogger, (cwd) => isAuthorizedWorkspacePath(cwd));
+const backendManager = createBackendRegistry([new CodexBackend(codexAppServer, codexTitleGenerator), (claudeBackend = new ClaudeBackend(claudeWorkerHost, undefined, readClaudeCredentialsForQuery, () => claudeGatewayFixture || claudeLifecycleFixture ? { kind: claudeGatewayFixture?.kind || "offline", ...(claudeGatewayFixture?.timeoutMs ? { timeoutMs: claudeGatewayFixture.timeoutMs } : {}), ...(claudeLifecycleFixture ? { lifecycle: claudeLifecycleFixture } : {}) } : undefined, undefined, (directory) => authorizedClaudeMarketplacePaths.has(canonicalPath(directory))))], appLogger, (cwd) => isAuthorizedWorkspacePath(cwd));
 
 claudeUpdateManager = new ClaudeUpdateManager({
   appPath: () => app.getAppPath(),

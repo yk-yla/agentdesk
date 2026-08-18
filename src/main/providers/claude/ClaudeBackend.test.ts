@@ -15,6 +15,7 @@ class FakeRuntime implements ClaudeWorkerRuntime {
   listResult: unknown = { data: [], hasMore: false };
   searchResult: unknown = { data: [], scannedCount: 0, hasMore: false };
   readSessionResult: unknown = { info: null, messages: [] };
+  sessionInfoResult: unknown = null;
   failControl = new Set<string>();
   unsupportedControl = new Set<string>();
   controlWaiters = new Map<string, Promise<unknown>>();
@@ -23,7 +24,7 @@ class FakeRuntime implements ClaudeWorkerRuntime {
     this.requests.push(command);
     if (command.type === "getSessionInfo") {
       const cwd = this.known.get(command.nativeSessionId);
-      return cwd === command.cwd ? { id: command.nativeSessionId, cwd } : null;
+      return cwd === command.cwd ? this.sessionInfoResult || { id: command.nativeSessionId, cwd } : null;
     }
     if (command.type === "readSession") return this.readSessionResult;
     if (command.type === "listSessions") return this.listResult;
@@ -518,6 +519,18 @@ describe("ClaudeBackend", () => {
     const result = await backend.request("listPlugins", { cwd: process.cwd() }, { canonicalCwd: process.cwd() });
     assert.deepEqual(result, { marketplaces: [{ name: "Claude Code", path: "", plugins: [] }] });
     assert.equal(runtime.requests.some((command) => command.type === "plugin"), true);
+    await backend.close();
+  });
+
+  it("returns Claude's native summary for title generation", async () => {
+    const runtime = new FakeRuntime();
+    const cwd = path.resolve(process.cwd());
+    const nativeSessionId = "99999999-9999-4999-8999-999999999999";
+    runtime.known.set(nativeSessionId, cwd);
+    runtime.sessionInfoResult = { id: nativeSessionId, cwd, customTitle: "Claude 原生标题", summary: "自动摘要", firstPrompt: "首条输入" };
+    const backend = testBackend(runtime);
+    const result = await backend.request("generateSessionTitle", { cwd, threadId: nativeSessionId, conversation: "会话内容" }, {});
+    assert.deepEqual(result, { title: "Claude 原生标题", source: "native" });
     await backend.close();
   });
 

@@ -437,11 +437,13 @@ export function hydrateClaudeSession(
   })() : session.messages;
   const preserveRealtime = options.preserveRealtime === true;
   const preserveLifecycle = options.preserveLifecycle ?? preserveRealtime;
+  const nativeTitle = stringValue(thread.name, stringValue(thread.title));
   return {
     ...session,
     threadId: stringValue(thread.id, session.threadId || "") || session.threadId,
     cwd: stringValue(thread.cwd, session.cwd),
-    title: stringValue(thread.title, session.title),
+    title: nativeTitle || session.title,
+    ...(nativeTitle ? { titleOrigin: "provider" as const } : {}),
     ...(historyModel && !session.resumed ? { model: historyModel, resolvedModel: historyModel } : {}),
     messages: mergeMessages(snapshotMessages, session.messages, preserveRealtime),
     compactionCount: Math.max(compactionCount, options.persistedCompactionCount || 0, preserveRealtime ? session.compactionCount : 0),

@@ -106,6 +106,7 @@ export function retargetEmptySession(
   next.capabilities = target.capabilities;
   next.threadId = threadId;
   next.title = title;
+  next.titleOrigin = "provider";
   return next;
 }
 

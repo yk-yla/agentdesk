@@ -538,11 +538,13 @@ export function hydrateSession(session: SessionState, threadValue: unknown, opti
     ...historicalCompactionEventIds,
   ])].slice(-64);
   const updatedAt = Math.max(numberValue(thread.updatedAt, 0) * 1000, latestTurnUpdatedAt) || Date.now();
+  const nativeName = stringValue(thread.name);
   return enforceSessionBudgets({
     ...session,
     threadId: stringValue(thread.id, session.threadId ?? "") || session.threadId,
     cwd: stringValue(thread.cwd, session.cwd),
-    title: stringValue(thread.name, stringValue(thread.preview, session.title)) || session.title,
+    title: nativeName || stringValue(thread.preview, session.title) || session.title,
+    ...(nativeName ? { titleOrigin: "provider" as const } : {}),
     createdAt: numberValue(thread.createdAt, 0) * 1000 || session.createdAt,
     updatedAt: Math.max(updatedAt, session.updatedAt),
     messages: mergedMessages,
