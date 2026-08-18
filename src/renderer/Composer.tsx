@@ -17,6 +17,7 @@ interface Props {
   queuedMessages: QueuedMessage[];
   pendingSteers: PendingSteerMessage[];
   working: boolean;
+  placeholder?: string;
   toolbar: ReactNode;
   copyImage: (dataUrl: string) => Promise<void>;
   getDraft: (sessionId: string) => string;
@@ -34,7 +35,7 @@ interface Props {
  * 打字不再触发顶层 setSessions，因此不会重渲染消息流。
  */
 function ComposerBase({
-  sessionId, cwd, threadId, skills, recentCommandUsage, capabilities, attachments, queuedMessages, pendingSteers, working, toolbar,
+  sessionId, cwd, threadId, skills, recentCommandUsage, capabilities, attachments, queuedMessages, pendingSteers, working, placeholder, toolbar,
   copyImage, getDraft, onDraftChange, onSend, onCycleEffort, onAddImages, onRemoveImage,
   onRemoveQueuedMessage, onChooseDirectory,
 }: Props) {
@@ -173,7 +174,7 @@ function ComposerBase({
             const query = value.match(/^\s*\/([^\s]*)$/);
             if (query) selectIndex(Math.min(selectedIndex, Math.max(0, suggestions.length - 1)));
           }}
-          placeholder="描述你要完成的事情"
+          placeholder={placeholder || "描述你要完成的事情"}
           aria-label="消息输入"
           rows={1}
         />

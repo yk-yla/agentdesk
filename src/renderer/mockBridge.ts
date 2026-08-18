@@ -1,6 +1,6 @@
 import type { AgentEventEnvelope, AgentOperation, AgentProvider } from "../shared/agentProtocol";
 import type { AgentBridge, BossKeyStatus, ClaudeRuntimeStatus, CodexBridge, CodexCliUpdateStatus, CodexDefaults, DesktopPreferences, DesktopUpdateStatus, JsonRpcMessage } from "../shared/protocol";
-import { asRecord, stringValue } from "./domain";
+import { asRecord, CODEX_CAPABILITIES, stringValue } from "./domain";
 
 /** 浏览器预览用的假桥接。真实 Electron 走 preload 暴露的 window.agentDesk。 */
 export function createMockBridge(): CodexBridge {
@@ -314,7 +314,7 @@ export function createMockAgentBridge(): AgentBridge {
     ...legacy,
     agentRequest(provider: AgentProvider, operation: AgentOperation, params = {}, context = {}) {
       if (provider !== "codex") return Promise.reject(new Error("浏览器预览暂不模拟 Claude。"));
-      if (operation === "getCapabilities") return Promise.resolve({});
+      if (operation === "getCapabilities") return Promise.resolve(CODEX_CAPABILITIES);
       if (operation === "closeSession") return Promise.resolve();
       return legacy.request(MOCK_METHODS[operation], params, { sessionId: context.sessionId });
     },

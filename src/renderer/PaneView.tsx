@@ -4,6 +4,7 @@ import type { AgentBridge, DisplayMode, JsonObject } from "../shared/protocol";
 import Composer from "./Composer";
 import { findModelOption, formatCount, type Activity, type CollaborationMode, type ImageAttachment, type ModelOption, type PaneState, type PendingSteerMessage, type QueuedMessage, type SessionState, type SkillOption } from "./domain";
 import ElapsedTimer from "./ElapsedTimer";
+import GoalExecutionStrip from "./GoalExecutionStrip";
 import MessageStack from "./MessageStack";
 import { findQuestionAnchorIndex, QUESTION_ANCHOR_SELECTOR, QUESTION_SCROLL_TOP_PADDING, questionNavigationDirection, type QuestionNavigationDirection } from "./questionNavigation";
 import ServerRequestPanel from "./ServerRequestPanel";
@@ -85,6 +86,12 @@ function PaneView(props: PaneViewProps) {
   const emptySession = session.messages.length === 0 && visibleActivities.length === 0;
   const latestMessageLength = session.messages[session.messages.length - 1]?.text.length ?? 0;
   const latestActivityLength = session.activities[session.activities.length - 1]?.output?.length ?? 0;
+  const activeGoal = session.goal?.status === "active" ? session.goal : null;
+
+  const openGoalDetails = useCallback(() => {
+    if (!session.detailsOpen) props.onToggleDetails(session.id);
+    props.onSetDetailView(session.id, "goal");
+  }, [props.onSetDetailView, props.onToggleDetails, session.detailsOpen, session.id]);
 
   useEffect(() => {
     const closeMoreMenuOnOutsideMouseDown = (event: MouseEvent) => {
@@ -267,7 +274,15 @@ function PaneView(props: PaneViewProps) {
         {session.readOnly ? <div className="read-only-banner" role="status"><CircleDot size={15} /><span>该会话正被其他程序使用，当前为只读模式。</span><button type="button" onClick={() => props.onToggleDetails(session.id)}>{session.detailsOpen ? "关闭详情" : "查看详情"}</button><button type="button" onClick={() => props.onRetryReadOnly(session.id)}>重新尝试编辑</button></div> : null}
         {!session.readOnly && session.errorText ? <div className="error-banner" role="alert"><CircleDot size={15} /><span>{session.errorText}</span><button className="bare-button" onClick={() => props.onClearError(session.id)} title="关闭" aria-label="关闭错误提示"><X size={14} /></button></div> : null}
         {session.pendingApprovals[0] && !session.readOnly ? <div className="server-request-wrap"><ServerRequestPanel key={`${session.pendingApprovals[0].requestId}:${session.pendingApprovals[0].interactionId || ""}:${session.pendingApprovals[0].queryGeneration || 0}`} request={session.pendingApprovals[0]} bridge={bridge} onRespond={(result) => props.onRespondApproval(session.id, result)} />{session.pendingApprovals.length > 1 ? <span className="server-request-count">另有 {session.pendingApprovals.length - 1} 个请求等待处理</span> : null}</div> : null}
-        {session.status === "working" ? <div className={`working-strip${session.retryState ? " retrying" : ""}${session.readOnly ? " read-only-working" : ""}`}>{session.retryState && !session.readOnly ? <RefreshCw className="retry-icon spin" size={14} /> : <span className="working-dot" />}<div className="working-copy"><span>{session.readOnly ? "其他程序正在执行此会话" : session.retryState ? `正在重试… 第 ${session.retryState.attempt} 次` : session.statusLabel}{!session.readOnly ? <> (<ElapsedTimer startedAt={session.startedAt} /> · Esc 停止)</> : null}</span></div>{!session.readOnly ? <button className="stop-button" onClick={() => props.onInterrupt(session.id)} title="停止任务"><Square size={13} fill="currentColor" /><span>停止</span></button> : null}{session.retryState && !session.readOnly ? <span className="retry-detail"><CornerDownRight size={12} />{session.retryState.message}{session.retryState.additionalDetails ? `：${session.retryState.additionalDetails}` : ""}</span> : null}</div> : null}
+        {session.goal ? <GoalExecutionStrip
+          goal={session.goal}
+          working={session.status === "working"}
+          readOnly={Boolean(session.readOnly)}
+          stage={session.retryState ? `正在重试，第 ${session.retryState.attempt} 次：${session.retryState.message}` : session.statusLabel}
+          onOpenDetails={openGoalDetails}
+          onStop={() => props.onStopGoal(session.id)}
+        /> : null}
+        {session.status === "working" && !activeGoal ? <div className={`working-strip${session.retryState ? " retrying" : ""}${session.readOnly ? " read-only-working" : ""}`}>{session.retryState && !session.readOnly ? <RefreshCw className="retry-icon spin" size={14} /> : <span className="working-dot" />}<div className="working-copy"><span>{session.readOnly ? "其他程序正在执行此会话" : session.retryState ? `正在重试… 第 ${session.retryState.attempt} 次` : session.statusLabel}{!session.readOnly ? <> (<ElapsedTimer startedAt={session.startedAt} /> · Esc 停止)</> : null}</span></div>{!session.readOnly ? <button className="stop-button" onClick={() => props.onInterrupt(session.id)} title="停止任务"><Square size={13} fill="currentColor" /><span>停止</span></button> : null}{session.retryState && !session.readOnly ? <span className="retry-detail"><CornerDownRight size={12} />{session.retryState.message}{session.retryState.additionalDetails ? `：${session.retryState.additionalDetails}` : ""}</span> : null}</div> : null}
         {!session.readOnly ? <Composer
           key={`${session.id}-${props.draftRevision}`}
           sessionId={session.id}
@@ -280,6 +295,7 @@ function PaneView(props: PaneViewProps) {
           queuedMessages={props.queuedMessages}
           pendingSteers={props.pendingSteers}
           working={session.status === "working"}
+          placeholder={activeGoal ? "可继续补充指令或询问目标进度" : undefined}
           copyImage={bridge.copyImage}
           getDraft={props.getDraft}
           onDraftChange={props.onDraftChange}
