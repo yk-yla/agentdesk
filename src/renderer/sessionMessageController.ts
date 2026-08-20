@@ -1,7 +1,7 @@
 import type { AgentOperation, AgentProvider } from "../shared/agentProtocol";
 import type { JsonObject } from "../shared/protocol";
 import { commandUsageKey, resolveComposerInput } from "./commandSuggestions";
-import { asRecord, sessionTitle, stringValue, type ImageAttachment, type PendingSteerMessage, type QueuedMessage, type SessionState, type SkillOption } from "./domain";
+import { asRecord, sessionTitle, stringValue, type CollaborationMode, type ImageAttachment, type PendingSteerMessage, type QueuedMessage, type SessionState, type SkillOption } from "./domain";
 import type { TurnTelemetry } from "./turnTelemetry";
 import { MAX_SESSION_QUEUED_MESSAGES } from "./queueLimits";
 import {
@@ -38,6 +38,9 @@ export interface SessionMessageServices {
   restoreMessagesToDraft(sessionId: string, messages: QueuedMessage[]): void;
   showStatus(sessionId: string): Promise<void>;
   showMcpStatus(sessionId: string): Promise<void>;
+  setSessionSetting?: (sessionId: string, field: "model" | "effort", value: string) => Promise<void>;
+  renameSession?: (sessionId: string, name: string) => Promise<void>;
+  setCollaborationMode?: (sessionId: string, mode: CollaborationMode) => void;
   rememberCommandUse?: (key: string) => void;
   trackEvent?: (event: string, details?: JsonObject) => void;
   turnTelemetry?: TurnTelemetry;
@@ -100,8 +103,19 @@ export class SessionMessageController {
       return false;
     }
     const clientUserMessageId = message.clientUserMessageId || `client-${this.nextInputId("message")}`;
-    const localCommand = message.text.trim();
-    const requiredCapability = localCommand === "/compact" ? "compact" : localCommand === "/review" ? "review" : localCommand === "/mcp" ? "mcp" : null;
+    const availableSkills = state.getSkills(session.provider, session.cwd);
+    const resolved = resolveComposerInput(message.text, availableSkills, session.capabilities);
+    const commandName = resolved.kind === "command" ? resolved.name : null;
+    const commandArgs = resolved.kind === "command" ? resolved.args : "";
+    const nativeCommandSkill = resolved.kind === "skill" && resolved.skill.path.startsWith("command:");
+    const localCommand = commandName ? `/${commandName}` : nativeCommandSkill ? "" : message.text.trim();
+    const requiredCapability = localCommand === "/compact" ? "compact"
+      : localCommand === "/review" ? "review"
+        : localCommand === "/mcp" ? "mcp"
+          : localCommand === "/model" ? "models"
+            : localCommand === "/rename" ? "rename"
+              : localCommand === "/plan" ? "plans"
+                : null;
     if (requiredCapability && session.capabilities[requiredCapability] !== "supported") {
       state.updateSession(sessionId, (current) => ({
         ...current,
@@ -109,7 +123,8 @@ export class SessionMessageController {
       }));
       return false;
     }
-    const isControlCommand = ["/compact", "/status", "/review", "/mcp"].includes(localCommand);
+    const isControlCommand = ["/compact", "/status", "/review", "/mcp", "/model", "/rename"].includes(localCommand)
+      || (localCommand === "/plan" && !commandArgs);
     const titleSource = message.skills?.length ? message.inputText || message.text : message.text;
     const shouldSetFallbackTitle = session.title === "新会话" && session.titleOrigin !== "manual" && !isControlCommand;
     const nextTitle = shouldSetFallbackTitle
@@ -133,8 +148,38 @@ export class SessionMessageController {
     let threadId = "";
     const requestMethod: AgentOperation = localCommand === "/review" ? "startReview" : "startTurn";
     const telemetry = services.turnTelemetry;
-    if (telemetry && localCommand !== "/status" && localCommand !== "/mcp" && localCommand !== "/compact") telemetry.begin(sessionId, session.provider, requestMethod, { mode: "submit" });
+    const startsTurn = !["/status", "/mcp", "/compact", "/model", "/rename"].includes(localCommand)
+      && !(localCommand === "/plan" && !commandArgs);
+    if (telemetry && startsTurn) telemetry.begin(sessionId, session.provider, requestMethod, { mode: "submit" });
     try {
+      if (localCommand === "/model") {
+        if (!commandArgs) throw new Error("请在 /model 后输入模型名称，或直接使用顶部的模型选择框。\n示例：/model claude-opus-4-6[1m]");
+        if (!services.setSessionSetting) throw new Error("当前版本暂不支持通过命令切换模型。");
+        await services.setSessionSetting(sessionId, "model", commandArgs);
+        state.updateSession(sessionId, (current) => current.activeTurnId
+          ? current
+          : { ...current, status: "idle", statusLabel: "就绪", startedAt: null });
+        return true;
+      }
+      if (localCommand === "/rename") {
+        if (!commandArgs) throw new Error("请在 /rename 后输入新的会话名称。\n示例：/rename 登录问题排查");
+        if (!services.renameSession) throw new Error("当前版本暂不支持通过命令重命名会话。");
+        await services.renameSession(sessionId, commandArgs);
+        state.updateSession(sessionId, (current) => current.activeTurnId
+          ? current
+          : { ...current, status: "idle", statusLabel: "就绪", startedAt: null });
+        return true;
+      }
+      if (localCommand === "/plan") {
+        if (!services.setCollaborationMode) throw new Error("当前版本暂不支持计划模式。");
+        services.setCollaborationMode(sessionId, "plan");
+        if (!commandArgs) {
+          state.updateSession(sessionId, (current) => current.activeTurnId
+            ? current
+            : { ...current, status: "idle", statusLabel: "就绪", startedAt: null });
+          return true;
+        }
+      }
       if (localCommand === "/status") {
         await services.showStatus(sessionId);
         return true;
@@ -153,11 +198,11 @@ export class SessionMessageController {
         : {
           threadId,
           cwd: session.cwd,
-          input: inputForMessage(message),
+          input: inputForMessage(localCommand === "/plan" ? { ...message, text: commandArgs } : message),
           model: session.model || null,
           effort: session.effort || null,
           collaborationMode: {
-            mode: session.collaborationMode,
+            mode: localCommand === "/plan" ? "plan" : session.collaborationMode,
             settings: { model: session.model, reasoning_effort: session.effort || null, developer_instructions: null },
           },
           clientUserMessageId,
@@ -319,10 +364,13 @@ export class SessionMessageController {
       return;
     }
     const id = this.nextInputId(mode === "queue" ? "queued" : "input");
+    const commandText = resolved.kind === "command"
+      ? `/${resolved.name}${resolved.args ? ` ${resolved.args}` : ""}`
+      : text;
     const message: QueuedMessage & { clientUserMessageId: string } = {
       id,
       clientUserMessageId: `client-${id}`,
-      text: commandName ? `/${commandName}` : text,
+      text: commandText,
       ...(skillInputText ? { inputText: skillInputText } : {}),
       images: commandName ? [] : sessionAttachments,
       queueKind: "explicit",

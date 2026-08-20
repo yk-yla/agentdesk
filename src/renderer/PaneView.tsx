@@ -201,7 +201,8 @@ function PaneView(props: PaneViewProps) {
       title={model ? `${model.displayName}${session.resolvedModel ? ` · 实际 ${session.resolvedModel}` : ""}` : session.model}
       disabled={!supports("models") || session.readOnly}
     >
-      {models.length ? models.map((entry) => <option value={entry.id} key={entry.id}>{entry.displayName}</option>) : <option value="">加载模型</option>}
+      {session.model && !model ? <option value={session.model}>{session.model}</option> : null}
+      {models.length ? models.map((entry) => <option value={entry.id} key={entry.id}>{entry.displayName}</option>) : !session.model ? <option value="">加载模型</option> : null}
     </select> : null}
     {session.capabilities.effort !== "unsupported" ? <select
       value={session.effort}

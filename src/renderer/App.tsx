@@ -260,6 +260,9 @@ export default function App() {
   const initializedProvidersRef = useRef(new Set<AgentProvider>());
   const layoutControllerRef = useRef<LayoutController | null>(null);
   const settingsCoordinatorRef = useRef(new SessionSettingsCoordinator());
+  const commandSetSessionSettingRef = useRef<((sessionId: string, field: "model" | "effort", value: string) => Promise<void>) | null>(null);
+  const commandRenameSessionRef = useRef<((sessionId: string, name: string) => Promise<void>) | null>(null);
+  const commandSetCollaborationModeRef = useRef<((sessionId: string, mode: CollaborationMode) => void) | null>(null);
   const workspaceRestoreInProgressRef = useRef(false);
   const workspaceStateReadyRef = useRef(false);
   const workspaceStateSaveTimerRef = useRef<number | undefined>(undefined);
@@ -1080,6 +1083,9 @@ export default function App() {
     updateSession(sessionId, (current) => ({ ...current, collaborationMode: mode }));
   }, [updateSession]);
 
+  commandSetSessionSettingRef.current = setSessionSetting;
+  commandSetCollaborationModeRef.current = setCollaborationMode;
+
   const cycleEffort = useCallback((sessionId: string, direction: 1 | -1) => {
     const session = sessionsRef.current[sessionId];
     if (!session) return;
@@ -1245,6 +1251,9 @@ export default function App() {
         restoreMessagesToDraft,
         showStatus,
         showMcpStatus,
+        setSessionSetting: (sessionId, field, value) => commandSetSessionSettingRef.current?.(sessionId, field, value) || Promise.reject(new Error("当前版本暂不支持通过命令修改设置。")),
+        renameSession: (sessionId, name) => commandRenameSessionRef.current?.(sessionId, name) || Promise.reject(new Error("当前版本暂不支持通过命令重命名会话。")),
+        setCollaborationMode: (sessionId, mode) => commandSetCollaborationModeRef.current?.(sessionId, mode),
         rememberCommandUse,
         trackEvent: trackUiEvent,
         turnTelemetry: turnTelemetryRef.current,
@@ -1380,6 +1389,8 @@ export default function App() {
       setError(sessionId, error, "重命名失败");
     }
   }, [requestForSession, savePreference, setError, updateSession]);
+
+  commandRenameSessionRef.current = renameSession;
 
   const toggleThreadPin = useCallback(async (sessionId: string) => {
     const session = sessionsRef.current[sessionId];

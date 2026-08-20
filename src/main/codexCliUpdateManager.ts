@@ -4,7 +4,7 @@ import path from "node:path";
 import type { CodexCliUpdateStatus } from "../shared/protocol";
 import { SingleFlight } from "./asyncOperation";
 import { writeTextFileAtomicAsync } from "./atomicFile";
-import { ProcessSupervisor } from "./processSupervisor";
+import { ProcessSupervisor, terminateWindowsProcessTree } from "./processSupervisor";
 import { CLI_VERSION_PATTERN, compareVersions } from "./version";
 
 export { compareVersions } from "./version";
@@ -38,6 +38,7 @@ interface CodexCliUpdateOperations {
   readLatestVersion(): Promise<string>;
   installVersion(version: string): Promise<void>;
   readAppServerProcesses(): Promise<WindowsProcessSnapshot[]>;
+  terminateAppServerProcess(pid: number): Promise<void>;
 }
 
 export interface CodexCliUpdateManagerDependencies {
@@ -54,9 +55,7 @@ export interface CodexCliUpdateManagerDependencies {
 
 export function isCodexAppServerProcess(processEntry: WindowsProcessSnapshot) {
   const commandLine = processEntry.commandLine;
-  if (!/(?:^|\s|["'])app-server(?:\s|$|["'])/i.test(commandLine)) return false;
-  return /@openai[\\/]codex/i.test(commandLine)
-    || /(?:^|[\\/\s"'])codex(?:\.cmd|\.js|\.exe)?(?:[\\/\s"']|$)/i.test(commandLine);
+  return /(?:^|[\s"'])(?:--)?app-server(?:$|[\s"'])/i.test(commandLine);
 }
 
 export function findCodexAppServerRoots(processes: WindowsProcessSnapshot[]) {
@@ -195,7 +194,7 @@ export class CodexCliUpdateManager {
         this.dispose();
         shouldRestartLocalAppServer = this.dependencies.appServer.isRunning;
         this.suppressExitNotification = shouldRestartLocalAppServer;
-        this.setStatus({ phase: "updating", currentVersion, latestVersion, message: "正在停止 AgentDesk 的 Codex 服务。", nextCheckAt: undefined });
+        this.setStatus({ phase: "updating", currentVersion, latestVersion, message: "正在停止所有 Codex app-server。", nextCheckAt: undefined });
         await this.prepareAppServerUpdate();
         if (this.dependencies.isQuitting()) return this.currentStatus();
         this.setStatus({ phase: "updating", currentVersion, latestVersion, message: `正在更新 Codex CLI 到 ${latestVersion}。`, nextCheckAt: undefined });
@@ -464,12 +463,28 @@ export class CodexCliUpdateManager {
     return this.dependencies.operations?.readAppServerProcesses?.() || this.readWindowsProcessSnapshot();
   }
 
+  private terminateAppServerProcess(pid: number) {
+    return this.dependencies.operations?.terminateAppServerProcess?.(pid)
+      || (this.platform() === "win32" ? terminateWindowsProcessTree(pid) : Promise.resolve());
+  }
+
   async prepareAppServerUpdate() {
-    if (this.dependencies.appServer.isRunning) await this.dependencies.appServer.close();
-    const external = findCodexAppServerRoots(await this.readAppServerProcesses());
-    if (external.length) {
-      throw new Error(`检测到 ${external.length} 个非 AgentDesk 启动的 Codex app-server，请先在对应程序中关闭后重试。`);
+    if (this.dependencies.appServer.isRunning) {
+      try {
+        await this.dependencies.appServer.close();
+      } catch {
+        // 优雅关闭失败时继续扫描，随后用进程树强制结束。
+      }
     }
+    let appServers: WindowsProcessSnapshot[];
+    try {
+      appServers = findCodexAppServerRoots(await this.readAppServerProcesses());
+    } catch {
+      // 更新由用户明确触发，无法读取进程列表时也继续执行安装。
+      return;
+    }
+    if (!appServers.length) return;
+    await Promise.allSettled(appServers.map((entry) => this.terminateAppServerProcess(entry.pid)));
   }
 
   private errorMessage(error: unknown) {

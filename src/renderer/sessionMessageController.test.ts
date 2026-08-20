@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 import type { AgentOperation } from "../shared/agentProtocol";
 import type { JsonObject } from "../shared/protocol";
-import { CODEX_CAPABILITIES, emptySession, type ImageAttachment, type PendingSteerMessage, type QueuedMessage, type SessionState } from "./domain";
+import { CODEX_CAPABILITIES, emptySession, type ImageAttachment, type PendingSteerMessage, type QueuedMessage, type SessionState, type SkillOption } from "./domain";
 import { CodexRequestError } from "./inputQueue";
 import { SessionMessageController } from "./sessionMessageController";
 import { MAX_SESSION_QUEUED_MESSAGES } from "./queueLimits";
@@ -24,7 +24,7 @@ async function waitFor(predicate: () => boolean) {
   assert.fail("异步状态未在预期时间内收敛");
 }
 
-function createHarness(requestHandler?: RequestHandler) {
+function createHarness(requestHandler?: RequestHandler, skills: SkillOption[] = [{ name: "deploy", description: "部署", path: "D:\\skills\\deploy\\SKILL.md", scope: "user", enabled: true }]) {
   const session = emptySession("session", "D:\\work", "model", "medium");
   session.capabilities = { ...CODEX_CAPABILITIES };
   const sessions: Record<string, SessionState> = { session };
@@ -37,6 +37,9 @@ function createHarness(requestHandler?: RequestHandler) {
   const statusCalls: string[] = [];
   const mcpCalls: string[] = [];
   const clearCalls: string[] = [];
+  const modelCalls: Array<{ sessionId: string; value: string }> = [];
+  const renameCalls: Array<{ sessionId: string; value: string }> = [];
+  const planCalls: Array<{ sessionId: string; mode: string }> = [];
   const commandUseCalls: string[] = [];
   let now = 1_000;
 
@@ -46,7 +49,7 @@ function createHarness(requestHandler?: RequestHandler) {
       getQueued: (sessionId) => queued[sessionId] || [],
       getPendingSteers: (sessionId) => pending[sessionId] || [],
       getAttachments: (sessionId) => attachments[sessionId] || [],
-      getSkills: () => [{ name: "deploy", description: "部署", path: "D:\\skills\\deploy\\SKILL.md", scope: "user", enabled: true }],
+      getSkills: () => skills,
       updateSession: (sessionId, updater) => { if (sessions[sessionId]) sessions[sessionId] = updater(sessions[sessionId]); },
       replaceQueued: (sessionId, next) => { queued[sessionId] = typeof next === "function" ? next(queued[sessionId] || []) : next; },
       replacePendingSteers: (sessionId, next) => { pending[sessionId] = typeof next === "function" ? next(pending[sessionId] || []) : next; },
@@ -67,13 +70,21 @@ function createHarness(requestHandler?: RequestHandler) {
       restoreMessagesToDraft: (_sessionId, messages) => { restored.push(messages); },
       showStatus: async (sessionId) => { statusCalls.push(sessionId); },
       showMcpStatus: async (sessionId) => { mcpCalls.push(sessionId); },
+      setSessionSetting: async (sessionId, field, value) => {
+        if (field === "model") modelCalls.push({ sessionId, value });
+      },
+      renameSession: async (sessionId, value) => { renameCalls.push({ sessionId, value }); },
+      setCollaborationMode: (sessionId, mode) => {
+        planCalls.push({ sessionId, mode });
+        sessions[sessionId] = { ...sessions[sessionId], collaborationMode: mode };
+      },
       rememberCommandUse: (key) => { commandUseCalls.push(key); },
       upsertHistory: (entry) => { history.push({ id: entry.id, title: entry.title }); },
       now: () => { now += 1; return now; },
     },
   });
 
-  return { controller, sessions, queued, pending, attachments, requests, restored, history, statusCalls, mcpCalls, clearCalls, commandUseCalls };
+  return { controller, sessions, queued, pending, attachments, requests, restored, history, statusCalls, mcpCalls, clearCalls, modelCalls, renameCalls, planCalls, commandUseCalls };
 }
 
 function message(id: string, text: string, queueKind: QueuedMessage["queueKind"] = "explicit"): QueuedMessage {
@@ -158,6 +169,73 @@ describe("SessionMessageController", () => {
     assert.deepEqual(harness.clearCalls, ["session"]);
     assert.deepEqual(harness.commandUseCalls, ["command:status", "command:clear"]);
     assert.equal(harness.requests.length, 0);
+  });
+
+  it("changes the model from a command without starting a turn", async () => {
+    const harness = createHarness();
+
+    harness.controller.sendMessage("session", "/model claude-opus-4-6[1m]");
+    await waitFor(() => harness.modelCalls.length === 1);
+
+    assert.deepEqual(harness.modelCalls, [{ sessionId: "session", value: "claude-opus-4-6[1m]" }]);
+    assert.equal(harness.requests.length, 0);
+    assert.equal(harness.sessions.session.status, "idle");
+  });
+
+  it("renames the session from a command without starting a turn", async () => {
+    const harness = createHarness();
+
+    const accepted = await harness.controller.runMessage("session", message("1", "/rename 登录问题排查"));
+
+    assert.equal(accepted, true);
+    assert.deepEqual(harness.renameCalls, [{ sessionId: "session", value: "登录问题排查" }]);
+    assert.equal(harness.requests.length, 0);
+    assert.equal(harness.sessions.session.status, "idle");
+  });
+
+  it("switches to plan mode without starting a turn when no task is provided", async () => {
+    const harness = createHarness();
+
+    const accepted = await harness.controller.runMessage("session", message("1", "/plan"));
+
+    assert.equal(accepted, true);
+    assert.deepEqual(harness.planCalls, [{ sessionId: "session", mode: "plan" }]);
+    assert.equal(harness.requests.length, 0);
+    assert.equal(harness.sessions.session.collaborationMode, "plan");
+    assert.equal(harness.sessions.session.status, "idle");
+  });
+
+  it("sends a plan command's task using plan mode", async () => {
+    const harness = createHarness();
+
+    const accepted = await harness.controller.runMessage("session", message("1", "/plan 修复登录问题"));
+
+    assert.equal(accepted, true);
+    assert.deepEqual(harness.planCalls, [{ sessionId: "session", mode: "plan" }]);
+    assert.equal(harness.requests[0].operation, "startTurn");
+    assert.equal((harness.requests[0].params.collaborationMode as { mode: string }).mode, "plan");
+    assert.equal((harness.requests[0].params.input as Array<{ text: string }>)[0].text, "修复登录问题");
+  });
+
+  it("forwards a Provider-native command when the local feature is unavailable", async () => {
+    const harness = createHarness(undefined, [{ name: "plan", description: "Claude 原生命令", path: "command:plan", scope: "user", enabled: true }]);
+    harness.sessions.session.capabilities.plans = "unsupported";
+
+    const accepted = await harness.controller.runMessage("session", message("1", "/plan"));
+
+    assert.equal(accepted, true);
+    assert.equal(harness.requests[0].operation, "startTurn");
+    assert.equal((harness.requests[0].params.input as Array<{ text: string }>)[0].text, "/plan");
+  });
+
+  it("keeps compact as a provider request", async () => {
+    const harness = createHarness();
+
+    const accepted = await harness.controller.runMessage("session", message("1", "/compact"));
+
+    assert.equal(accepted, true);
+    assert.equal(harness.requests[0].operation, "compactSession");
+    assert.deepEqual(harness.requests[0].params, { threadId: "thread-1" });
   });
 
   it("records skill use when the skill is submitted", async () => {

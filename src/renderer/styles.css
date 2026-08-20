@@ -444,7 +444,9 @@ body.resizing-sidebar, body.resizing-sidebar * { cursor: col-resize !important; 
 .history-scope-label { min-width: 0; overflow: hidden; color: var(--muted); font-size: var(--font-size-xs); text-overflow: ellipsis; white-space: nowrap; }
 .provider-filter { flex: none; display: flex; align-items: center; gap: 2px; min-height: 28px; padding: 0; border-bottom: 0; }
 .provider-filter button { min-width: 26px; height: 28px; display: inline-flex; align-items: center; justify-content: center; gap: 4px; padding: 0 6px; color: var(--muted); background: transparent; border: 1px solid var(--border); border-radius: 4px; font: inherit; font-size: var(--font-size-xs); cursor: pointer; }
-.provider-filter button.active { color: var(--text); background: var(--surface-raised); }
+.provider-filter button.active { color: #fff; background: #16865f; border-color: #0e6f4d; box-shadow: inset 0 1px 0 #ffffff29, 0 1px 2px #074b3329; font-weight: 600; }
+.provider-filter button.active .provider-mark { color: #fff; }
+.provider-filter button.active .provider-mark img:not(.provider-mark-source) { filter: brightness(0) invert(1); }
 .thread-item > .provider-mark { margin-right: 5px; }
 .tab > .provider-mark { margin-right: 5px; }
 @container (max-width: 220px) {

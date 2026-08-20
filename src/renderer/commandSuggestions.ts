@@ -2,7 +2,7 @@ import { useEffect, useMemo, useState } from "react";
 import type { SkillOption } from "./domain";
 import type { AgentCapabilities } from "../shared/agentProtocol";
 
-export type BuiltInCommandName = "clear" | "compact" | "status" | "review" | "mcp";
+export type BuiltInCommandName = "clear" | "compact" | "status" | "review" | "mcp" | "model" | "rename" | "plan";
 
 export interface BuiltInCommand {
   kind: "command";
@@ -27,13 +27,16 @@ export function commandUsageKey(kind: CommandSuggestion["kind"], name: string) {
 }
 
 export type ResolvedComposerInput =
-  | { kind: "command"; name: BuiltInCommandName }
+  | { kind: "command"; name: BuiltInCommandName; args: string }
   | { kind: "skill"; skill: SkillOption; prompt: string }
   | { kind: "message"; text: string };
 
 export const BUILT_IN_COMMANDS: BuiltInCommand[] = [
   { kind: "command", name: "clear", description: "新建干净会话，保留原会话历史" },
   { kind: "command", name: "compact", description: "压缩当前会话上下文" },
+  { kind: "command", name: "model", description: "切换模型，支持输入完整模型名称" },
+  { kind: "command", name: "rename", description: "重命名当前会话" },
+  { kind: "command", name: "plan", description: "切换到计划模式，可附带任务描述" },
   { kind: "command", name: "status", description: "查看当前会话状态和用量" },
   { kind: "command", name: "review", description: "检查当前目录的未提交更改" },
   { kind: "command", name: "mcp", description: "查看 MCP 服务器状态" },
@@ -50,14 +53,17 @@ export function suggestionsFor(value: string, skills: SkillOption[], capabilitie
   const commands = BUILT_IN_COMMANDS.filter((entry) => {
     if (!entry.name.startsWith(query)) return false;
     if (!capabilities) return true;
+    if (entry.name === "model") return capabilities.models !== "unsupported";
+    if (entry.name === "rename") return capabilities.rename !== "unsupported";
+    if (entry.name === "plan") return capabilities.plans !== "unsupported";
     if (entry.name === "compact") return capabilities.compact !== "unsupported";
     if (entry.name === "review") return capabilities.review !== "unsupported";
     if (entry.name === "mcp") return capabilities.mcp !== "unsupported";
     return true;
   });
-  const builtInNames = new Set(BUILT_IN_COMMANDS.map((entry) => entry.name));
+  const visibleBuiltInNames = new Set(commands.map((entry) => entry.name));
   const skillSuggestions = skills
-    .filter((entry) => entry.enabled && !builtInNames.has(entry.name.toLowerCase() as BuiltInCommandName) && entry.name.toLowerCase().startsWith(query))
+    .filter((entry) => entry.enabled && !visibleBuiltInNames.has(entry.name.toLowerCase() as BuiltInCommandName) && entry.name.toLowerCase().startsWith(query))
     .map((entry): SkillSuggestion => ({
       kind: "skill",
       name: entry.name,
@@ -80,7 +86,7 @@ export function resolveComposerInput(text: string, skills: SkillOption[], capabi
   const name = match[1].toLowerCase();
   const prompt = match[2]?.trim() || "";
   const command = suggestionsFor(`/${name}`, skills, capabilities).find((entry): entry is BuiltInCommand => entry.kind === "command" && entry.name === name);
-  if (command && !prompt) return { kind: "command", name: command.name };
+  if (command) return { kind: "command", name: command.name, args: prompt };
   const skill = skills.find((entry) => entry.enabled && entry.name.toLowerCase() === name);
   return skill ? { kind: "skill", skill, prompt } : { kind: "message", text };
 }
