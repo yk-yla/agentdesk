@@ -38,6 +38,20 @@ const REQUEST_TIMEOUTS_MS: Record<string, number> = {
   "review/start": 60_000,
 };
 
+/** The app-server is intentionally replaced when switching to the terminal. */
+class CodexAppServerHandoffError extends Error {
+  readonly code = "handoff";
+
+  constructor() {
+    super("Codex app-server 正在切换交互模式，请稍候重试。");
+    this.name = "CodexAppServerHandoffError";
+  }
+}
+
+function isHandoffError(error: unknown): error is CodexAppServerHandoffError {
+  return error instanceof CodexAppServerHandoffError;
+}
+
 export interface CodexAppServerOptions {
   command(): string;
   cwd(): string;
@@ -86,9 +100,20 @@ export class CodexAppServer implements CodexBackendRuntime {
   }
 
   async request(method: string, params: JsonObject, context: AgentRequestContext) {
-    await this.ensureStarted();
-    if (this.options.isRequestBlocked()) throw new Error("Codex CLI 正在更新，请稍后重试。");
-    return this.sendRequest(method, params, context);
+    // A terminal handoff deliberately stops the current app-server. A request
+    // that was already in flight can therefore lose its child between
+    // ensureStarted() and sendRequest(). Reconnect once instead of exposing
+    // the expected handoff as a provider failure to the renderer.
+    for (let attempt = 0; attempt < 2; attempt += 1) {
+      try {
+        await this.ensureStarted();
+        if (this.options.isRequestBlocked()) throw new Error("Codex CLI 正在更新，请稍后重试。");
+        return await this.sendRequest(method, params, context);
+      } catch (error) {
+        if (!isHandoffError(error) || attempt > 0) throw error;
+      }
+    }
+    throw new Error("Codex app-server 重连失败。");
   }
 
   async respond(id: number | string, result: JsonObject) {
@@ -148,9 +173,16 @@ export class CodexAppServer implements CodexBackendRuntime {
     return this.stopRunningChild(child);
   }
 
-  closeForHandoff() {
+  closeForHandoff(): Promise<void> {
     const child = this.child;
-    if (!child) return Promise.resolve();
+    // ensureStarted() assigns startPromise before its first microtask spawns
+    // the child. Waiting for that promise prevents a late spawn from surviving
+    // the handoff and racing the next workbench request.
+    if (!child) {
+      const pendingStart = this.startPromise;
+      if (!pendingStart) return Promise.resolve();
+      return pendingStart.then(() => this.closeForHandoff(), () => this.closeForHandoff());
+    }
     this.handoffChild = child;
     return this.close().finally(() => {
       if (this.handoffChild === child) this.handoffChild = null;
@@ -263,7 +295,7 @@ export class CodexAppServer implements CodexBackendRuntime {
       child.stderr.removeAllListeners();
       if (wasActive) this.child = null;
       if (this.startPromise === startPromise) this.startPromise = null;
-      this.requests.reject(error, child);
+      this.requests.reject(this.handoffChild === child ? new CodexAppServerHandoffError() : error, child);
       if (wasActive && this.handoffChild !== child && !this.options.isQuitting() && !this.options.isExitNotificationSuppressed()) {
         this.publish({ method: "client/server-exited", params: { code } });
       }

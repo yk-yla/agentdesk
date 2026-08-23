@@ -128,7 +128,15 @@ export default function TerminalPane({ session, bridge, isActive, onModeChange, 
       scrollback: 5_000,
       overviewRuler: { width: 0 },
       scrollOnUserInput: true,
-      theme: { background: "#101214", foreground: "#e7e9ec", cursor: "#e7e9ec", selectionBackground: "#3a4658", scrollbarSliderBackground: "transparent", scrollbarSliderHoverBackground: "transparent", scrollbarSliderActiveBackground: "transparent" },
+      theme: {
+        background: "#101214",
+        foreground: "#e7e9ec",
+        cursor: "#e7e9ec",
+        selectionBackground: "#3a4658",
+        scrollbarSliderBackground: "#66717fcc",
+        scrollbarSliderHoverBackground: "#8d99a8ee",
+        scrollbarSliderActiveBackground: "#aeb9c6f5",
+      },
     });
     const fit = new FitAddon();
     terminal.loadAddon(fit);

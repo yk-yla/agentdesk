@@ -253,9 +253,12 @@ body.resizing-sidebar, body.resizing-sidebar * { cursor: col-resize !important; 
 .terminal-pane > .terminal-presentation-toggle:hover:not(:disabled) { color: #f0f2f5; background: #2b3036; }
 .terminal-host { min-width: 0; min-height: 0; flex: 1; padding: 8px 8px 4px; overflow: hidden; background: #101214; }
 .terminal-host .xterm { height: 100%; }
-.terminal-host .xterm-viewport { scrollbar-width: none; overflow-y: scroll; }
-.terminal-host .xterm-viewport::-webkit-scrollbar { display: none; }
-.terminal-host .xterm .xterm-scrollable-element > .scrollbar { opacity: 0 !important; width: 0 !important; pointer-events: none !important; }
+.terminal-host .xterm-viewport { scrollbar-width: auto; overflow-y: scroll; }
+.terminal-host .xterm-viewport::-webkit-scrollbar { width: 10px; }
+.terminal-host .xterm-viewport::-webkit-scrollbar-track { background: #1b1f24; }
+.terminal-host .xterm-viewport::-webkit-scrollbar-thumb { background: #66717f; border-radius: 5px; }
+.terminal-host .xterm-viewport::-webkit-scrollbar-thumb:hover { background: #8d99a8; }
+.terminal-host .xterm .xterm-scrollable-element > .scrollbar { opacity: 1 !important; width: 10px !important; pointer-events: auto !important; }
 .terminal-status { position: absolute; top: 10px; left: 12px; z-index: 2; padding: 5px 8px; color: #b9c0c9; background: #1d2126e6; border: 1px solid #353c44; border-radius: 5px; font-size: 11px; pointer-events: none; }
 .terminal-empty { position: absolute; right: 12px; bottom: 10px; display: flex; align-items: center; gap: 8px; padding: 7px 8px; color: #b9c0c9; background: #1d2126; border: 1px solid #353c44; border-radius: 6px; font-size: 11px; }
 .terminal-empty button { height: 25px; padding: 0 8px; color: #e7e9ec; background: #2d333a; border: 1px solid #424a53; border-radius: 5px; }
