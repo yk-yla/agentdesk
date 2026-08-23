@@ -79,6 +79,7 @@ export async function authorizeRestoredSessionWorkspaces(
     blockedSessionIds.add(id);
     return [id, {
       ...session,
+      historyLoading: false,
       status: "error" as const,
       statusLabel: "工作区未获授权",
       errorText: `本地会话未恢复：${failure}`,
@@ -294,6 +295,10 @@ export function parseWorkspaceState(value: unknown, currentWorkspace: string): R
       session.statusLabel = "终端已停止";
     }
     session.threadId = stringValue(saved.threadId).slice(0, 240) || null;
+    // A workbench session with a native ID needs its history rehydrated after
+    // startup. Mark it before the first render so the empty-session welcome
+    // view cannot flash while the Provider restore request is in flight.
+    session.historyLoading = Boolean(session.threadId && session.presentationMode === "workbench");
     session.title = stringValue(saved.title, "新会话").slice(0, 500);
     session.titleOrigin = saved.titleOrigin === "manual" || saved.titleOrigin === "provider" || saved.titleOrigin === "fallback"
       ? saved.titleOrigin

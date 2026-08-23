@@ -62,21 +62,20 @@ export default function TerminalPane({ session, bridge, isActive, onModeChange, 
   const resize = useCallback(() => {
     const terminal = terminalRef.current;
     const fit = fitRef.current;
-    const current = infoRef.current;
-    if (!terminal || !fit || !current || current.status === "exited") return;
+    if (!terminal || !fit) return;
     const activeBuffer = terminal.buffer.active;
     const viewportY = activeBuffer.viewportY;
     const atBottom = viewportY >= activeBuffer.baseY;
     try {
       fit.fit();
-      // xterm may move the viewport while fitting a hidden or resized host.
-      // Preserve a user's historical position; only the bottom should follow
-      // new output naturally.
       if (!atBottom) {
         terminal.scrollToLine(viewportY);
         viewportYRef.current = viewportY;
       }
-      void bridge.resizeTerminal({ sessionId: session.id, generation: current.generation, cols: terminal.cols, rows: terminal.rows }).catch(() => undefined);
+      const current = infoRef.current;
+      if (current && current.status !== "exited") {
+        void bridge.resizeTerminal({ sessionId: session.id, generation: current.generation, cols: terminal.cols, rows: terminal.rows }).catch(() => undefined);
+      }
     } catch {
       // The container may be hidden while its pane is being switched.
     }
@@ -288,6 +287,8 @@ export default function TerminalPane({ session, bridge, isActive, onModeChange, 
         aria-label="切换到图形界面"
       ><ArrowLeftRight size={16} /></button>}
       <div ref={hostRef} className="terminal-host" onClick={() => terminalRef.current?.focus()} />
+      {session.terminalSuspended || starting ? <div className="terminal-status" role="status">正在启动终端…</div> : null}
+      {session.errorText ? <div className="terminal-error" role="alert">{session.errorText}</div> : null}
     </section>
   );
 }

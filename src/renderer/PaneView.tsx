@@ -286,6 +286,7 @@ function PaneView(props: PaneViewProps) {
       <div
         className="conversation"
         aria-live="polite"
+        aria-busy={session.historyLoading === true}
         ref={conversationRef}
         onScroll={(event) => {
           if (restoringSessionRef.current === session.id) return;
@@ -309,6 +310,10 @@ function PaneView(props: PaneViewProps) {
           cwd={session.cwd}
           provider={session.provider}
         />
+        {session.historyLoading ? <div className="history-loading-overlay" role="status" aria-busy="true">
+          <RefreshCw className="history-loading-icon spin" size={16} />
+          <span>正在读取会话记录…</span>
+        </div> : null}
       </div>
 
       {session.provider !== "claude" && <button

@@ -6,10 +6,6 @@
 
 [下载最新版](https://github.com/yk-yla/agentdesk/releases/latest) · [查看每个版本的更新内容](https://github.com/yk-yla/agentdesk/releases)
 
-![AgentDesk 主界面，画面中使用的是演示数据](docs/images/agentdesk-overview.png)
-
-> 图片中使用的是演示项目和演示会话，不包含真实用户数据。
-
 ## 为什么使用 AgentDesk
 
 如果你已经在使用 Codex 或 Claude Code，AgentDesk 不会改变它们的能力，而是让日常操作更集中、更直观。
@@ -28,6 +24,7 @@
 - 同时管理 Codex 和 Claude Code 会话，两个工具互不干扰。
 - 打开多个项目目录，用标签或左右分栏处理多个任务。
 - 搜索、收藏、恢复历史会话，减少重复说明工作背景。
+- Codex 支持图形界面和内置黑窗口，Claude Code 使用内置黑窗口运行。
 - 发送图片和附件，查看执行过程、用量和需要确认的操作。
 - 导出会话，或把未完成的任务交接到另一个工具继续处理。
 - 管理可用的插件，并检查 AgentDesk、Codex 和 Claude Code 的更新。
@@ -47,7 +44,8 @@
 
 ### 使用 Claude Code
 
-- 通常不需要另外安装 Claude Code。
+- 必须先安装 Claude Code CLI，并完成登录。
+- AgentDesk 不内置 `claude.exe`，会使用你电脑上已安装的 Claude Code。
 - 必须有可用的 Claude 登录状态或认证信息，否则无法开始会话。
 
 你可以只使用其中一个工具，不要求两个工具都准备好。
@@ -96,6 +94,6 @@ npm run package
 <details>
 <summary><strong>版本发布说明</strong></summary>
 
-每个版本的更新说明放在 `.github/release-notes`，文件名必须与版本标签一致，例如 `v1.0.16.md`。缺少更新说明时，自动发布会停止。
+每个版本的更新说明放在 `.github/release-notes`，文件名必须与版本标签一致，例如 `v1.1.0.md`。缺少更新说明时，自动发布会停止。
 
 </details>

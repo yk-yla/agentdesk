@@ -168,6 +168,8 @@ export interface SessionState {
   provider: AgentProvider;
   presentationMode: "workbench" | "terminal";
   terminalSuspended?: boolean;
+  /** 正在从 Provider 读取历史，避免把临时空状态画成新会话。 */
+  historyLoading?: boolean;
   queryGeneration: number;
   capabilities: AgentCapabilities;
   threadId: string | null;
@@ -323,7 +325,7 @@ export function emptySession(id: string, cwd: string, model = "", effort = "", p
   const now = Date.now();
   return {
     id, provider, presentationMode: "workbench", queryGeneration: 0, capabilities: { ...EMPTY_AGENT_CAPABILITIES }, threadId: null, cwd, title: "新会话", titleOrigin: "placeholder", createdAt: now, updatedAt: now, messages: [], activities: [],
-    model, effort, collaborationMode: "default", status: "idle", statusLabel: "就绪", activeTurnId: null, startedAt: null, errorText: "", retryState: null, pendingApprovals: [], goal: null, plan: null, subagents: [],
+    model, effort, collaborationMode: "default", historyLoading: false, status: "idle", statusLabel: "就绪", activeTurnId: null, startedAt: null, errorText: "", retryState: null, pendingApprovals: [], goal: null, plan: null, subagents: [],
     tokenUsage: { used: 0, total: null }, compactionCount: 0, compactionEventIds: [], detailsOpen: false, detailView: "activity",
   };
 }

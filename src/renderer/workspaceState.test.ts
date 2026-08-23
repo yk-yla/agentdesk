@@ -14,6 +14,15 @@ describe("update workspace state budgets", () => {
     assert.deepEqual([...result.blockedSessionIds], ["denied"]);
   });
 
+  it("removes the history loading state when a restored workspace is denied", async () => {
+    const session = emptySession("denied-history", "C:\\denied", "gpt", "medium", "codex");
+    session.threadId = "codex-thread";
+    session.historyLoading = true;
+    const result = await authorizeRestoredSessionWorkspaces({ [session.id]: session }, async () => null);
+    assert.equal(result.sessions[session.id].historyLoading, false);
+    assert.equal(result.sessions[session.id].status, "error");
+  });
+
   it("restores each tab with its original Provider", () => {
     const codex = emptySession("codex-session", "C:\\work", "gpt", "medium", "codex");
     const claude = emptySession("claude-session", "C:\\work", "sonnet", "high", "claude");
@@ -33,6 +42,8 @@ describe("update workspace state budgets", () => {
     const restored = parseWorkspaceState(state, "C:\\work");
     assert.equal(restored?.sessions[codex.id]?.provider, "codex");
     assert.equal(restored?.sessions[claude.id]?.provider, "claude");
+    assert.equal(restored?.sessions[codex.id]?.historyLoading, true);
+    assert.equal(restored?.sessions[claude.id]?.historyLoading, false);
   });
 
   it("restores terminal tabs as stopped without resuming their native session", () => {
@@ -56,6 +67,7 @@ describe("update workspace state budgets", () => {
     assert.equal(restored?.sessions[terminal.id].terminalSuspended, true);
     assert.equal(restored?.sessions[terminal.id].status, "idle");
     assert.equal(restored?.sessions[terminal.id].statusLabel, "终端已停止");
+    assert.equal(restored?.sessions[terminal.id].historyLoading, false);
     assert.deepEqual(restored?.threadSessionIds, []);
   });
 
