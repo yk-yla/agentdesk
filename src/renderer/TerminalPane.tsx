@@ -100,6 +100,24 @@ export default function TerminalPane({ session, bridge, isActive, onModeChange, 
     terminal.open(host);
     terminalRef.current = terminal;
     fitRef.current = fit;
+    const handlePaste = (event: ClipboardEvent) => {
+      const text = event.clipboardData?.getData("text/plain") || "";
+      if (!text) return;
+      event.preventDefault();
+      event.stopPropagation();
+      event.stopImmediatePropagation();
+      terminal.paste(text);
+    };
+    const handleCustomKey = (event: KeyboardEvent) => {
+      if (event.key.toLowerCase() !== "v" || (!event.ctrlKey && !event.metaKey) || event.altKey) return true;
+      void bridge.readClipboardText().then((text) => {
+        if (text && terminalRef.current === terminal) terminal.paste(text);
+      }).catch(() => undefined);
+      return false;
+    };
+    // Capture text paste before the CLI can interpret Ctrl+V as image input.
+    host.addEventListener("paste", handlePaste, true);
+    terminal.attachCustomKeyEventHandler(handleCustomKey);
     // Codex/Claude TUIs may enable mouse-reporting mode, which makes xterm
     // forward wheel events to the CLI instead of scrolling its own scrollback.
     // Keep the wheel dedicated to terminal history so the embedded view can
@@ -125,6 +143,7 @@ export default function TerminalPane({ session, bridge, isActive, onModeChange, 
     requestAnimationFrame(resize);
     return () => {
       cancelAnimationFrame(focusFrame);
+      host.removeEventListener("paste", handlePaste, true);
       scrollDisposable.dispose();
       resizeObserver.disconnect();
       dataDisposable.dispose();

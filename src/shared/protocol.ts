@@ -252,6 +252,7 @@ export interface CodexBridge {
   writeLog(entry: ClientLogEntry): Promise<void>;
   exportDiagnostics(): Promise<DiagnosticExport | null>;
   saveClipboardImage(dataUrl: string, suggestedName?: string): Promise<SavedImage>;
+  readClipboardText(): Promise<string>;
   copyImage(dataUrl: string): Promise<void>;
   saveTextFile(content: string, suggestedName?: string): Promise<SavedTextFile | null>;
   createHandoffPackage(input: { cwd: string; title: string; threadId: string; content: string }): Promise<HandoffPackage>;

@@ -218,6 +218,7 @@ export function createMockBridge(): CodexBridge {
     writeLog: () => Promise.resolve(),
     exportDiagnostics: () => Promise.resolve(null),
     saveClipboardImage: (dataUrl, suggestedName) => Promise.resolve({ path: "mock://image", dataUrl, name: suggestedName || "粘贴图片" }),
+    readClipboardText: () => Promise.resolve(""),
     copyImage: () => Promise.resolve(),
     saveTextFile: () => Promise.resolve({ path: "mock://codex-session.md" }),
     createHandoffPackage: () => Promise.resolve({ path: "mock://handoff.md", prompt: "请读取交接材料并继续完成任务。" }),

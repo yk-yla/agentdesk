@@ -672,6 +672,7 @@ if (hasLock) {
           const value = input as { dataUrl: string; suggestedName?: unknown };
           return saveClipboardImage(value.dataUrl, typeof value.suggestedName === "string" ? value.suggestedName : undefined);
         },
+        readClipboardText: () => clipboard.readText(),
         copyImage: (dataUrl) => {
           if (typeof dataUrl !== "string") throw new Error("待复制图片无效。");
           copyImageToClipboard(dataUrl);
