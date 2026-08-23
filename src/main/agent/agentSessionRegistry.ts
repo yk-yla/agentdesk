@@ -1,6 +1,7 @@
 import type { AgentEventEnvelope, AgentOperation, AgentProvider, AgentRequestContext, InteractionRef } from "../../shared/agentProtocol";
 import { decodeCodexRpcError, type JsonObject } from "../../shared/protocol";
 import { canonicalPath } from "../localPathPolicy";
+import { NativeSessionOwnershipRegistry } from "./nativeSessionOwnershipRegistry";
 
 interface RegisteredSession {
   provider: AgentProvider;
@@ -90,12 +91,35 @@ function interactionIdFor(requestId: number | string) {
 
 export class AgentSessionRegistry {
   private readonly sessions = new Map<string, RegisteredSession>();
-  private readonly nativeOwners = new Map<string, string>();
   private readonly interactions = new Map<string, RegisteredInteraction>();
   private readonly knownNativeSessions = new Map<string, string>();
   private readonly closedSessions = new Map<string, ClosedSessionGrant>();
+  private interactionSweepTimer: ReturnType<typeof setInterval> | null = null;
 
-  constructor(private readonly isWorkspaceAuthorized: (cwd: string) => boolean = () => true) {}
+  constructor(
+    private readonly isWorkspaceAuthorized: (cwd: string) => boolean = () => true,
+    private readonly nativeOwnership = new NativeSessionOwnershipRegistry(),
+  ) {
+    this.interactionSweepTimer = setInterval(() => this.sweepExpiredInteractions(), 60_000);
+    if (this.interactionSweepTimer.unref) this.interactionSweepTimer.unref();
+  }
+
+  dispose() {
+    if (this.interactionSweepTimer) {
+      clearInterval(this.interactionSweepTimer);
+      this.interactionSweepTimer = null;
+    }
+  }
+
+  private sweepExpiredInteractions() {
+    const now = Date.now();
+    for (const [key, interaction] of this.interactions) {
+      if (interaction.expiresAt <= now) this.interactions.delete(key);
+    }
+    for (const [sessionId, grant] of this.closedSessions) {
+      if (grant.expiresAt <= now) this.closedSessions.delete(sessionId);
+    }
+  }
 
   prepareRequest(provider: AgentProvider, operation: AgentOperation, params: JsonObject, context: AgentRequestContext) {
     if ("trustWorkspace" in params) throw new Error("Agent 请求不能自行授予工作区信任。");
@@ -109,7 +133,7 @@ export class AgentSessionRegistry {
       if (workspaces.some((cwd) => canonicalPath(cwd) !== contextCwd)) throw new Error("Codex 技能目录归属不匹配。");
       return;
     }
-    if (operation === "listSessions" || operation === "searchSessions" || this.isWorkspaceScopedOperation(operation)) {
+    if (operation === "listSessions" || operation === "searchSessions") {
       if ((operation === "listSessions" || operation === "searchSessions") && params.allWorkspaces === true) {
         if (params.cwd || context.canonicalCwd) throw new Error("全部目录历史请求不能绑定单个工作区。");
         return;
@@ -140,7 +164,7 @@ export class AgentSessionRegistry {
       }
       this.assertNativeOwnerAvailable(provider, nativeSessionId, clientSessionId);
       this.sessions.set(clientSessionId, { provider, clientSessionId, canonicalCwd, nativeSessionId, queryGeneration: existing?.queryGeneration || 0, queryActive: false });
-      this.nativeOwners.set(this.nativeKey(provider, nativeSessionId), clientSessionId);
+      this.nativeOwnership.claim(provider, nativeSessionId, clientSessionId, "workbench");
       return;
     }
 
@@ -162,7 +186,7 @@ export class AgentSessionRegistry {
     }
     if (!SESSION_OPERATIONS.has(operation)) return;
     const session = this.requireSession(provider, context);
-    this.assertContextMatches(session, context);
+    this.assertContextMatches(session, context, operation);
     this.assertParamsMatch(session, operation, params);
     if (operation === "generateSessionTitle") {
       if (typeof params.conversation !== "string" || !params.conversation.trim() || Buffer.byteLength(params.conversation, "utf8") > MAX_TITLE_CONVERSATION_BYTES) {
@@ -216,7 +240,7 @@ export class AgentSessionRegistry {
       this.assertNativeOwnerAvailable(provider, nativeSessionId, clientSessionId);
       session.nativeSessionId = nativeSessionId;
       this.knownNativeSessions.set(this.nativeKey(provider, nativeSessionId), session.canonicalCwd);
-      this.nativeOwners.set(this.nativeKey(provider, nativeSessionId), clientSessionId);
+      this.nativeOwnership.claim(provider, nativeSessionId, clientSessionId, "workbench");
     }
     if (operation === "startTurn" || operation === "startReview") {
       if (!turnIdFrom(result)) throw new Error("Provider 没有返回可登记的 Turn ID。");
@@ -326,6 +350,14 @@ export class AgentSessionRegistry {
     }));
   }
 
+  releaseRendererProviderSessions(provider: AgentProvider) {
+    for (const session of [...this.sessions.values()]) if (session.provider === provider) this.releaseSession(session.clientSessionId);
+  }
+
+  releaseRendererSession(clientSessionId: string) {
+    this.releaseSession(clientSessionId);
+  }
+
   clearRendererSessions() {
     for (const sessionId of [...this.sessions.keys()]) this.releaseSession(sessionId);
   }
@@ -362,7 +394,7 @@ export class AgentSessionRegistry {
     this.assertNativeOwnerAvailable("codex", nativeSessionId, clientSessionId);
     session.nativeSessionId = nativeSessionId;
     this.knownNativeSessions.set(this.nativeKey("codex", nativeSessionId), session.canonicalCwd);
-    this.nativeOwners.set(this.nativeKey("codex", nativeSessionId), clientSessionId);
+    this.nativeOwnership.claim("codex", nativeSessionId, clientSessionId, "workbench");
   }
 
   private rejectDangerousCodexOverrides(value: unknown, depth = 0) {
@@ -395,12 +427,6 @@ export class AgentSessionRegistry {
     if (!this.isWorkspaceAuthorized(cwd)) throw new Error("Agent 工作区未经过主进程授权。");
   }
 
-  private isWorkspaceScopedOperation(operation: AgentOperation) {
-    return operation === "listPlugins" || operation === "readPlugin" || operation === "installPlugin"
-      || operation === "uninstallPlugin" || operation === "updatePlugin" || operation === "addMarketplace"
-      || operation === "updateMarketplace" || operation === "removeMarketplace";
-  }
-
   private requireNativeSessionId(params: JsonObject, context: AgentRequestContext) {
     const fromParams = stringValue(params.threadId);
     const fromContext = stringValue(context.nativeSessionId);
@@ -416,10 +442,16 @@ export class AgentSessionRegistry {
     return session;
   }
 
-  private assertContextMatches(session: RegisteredSession, context: AgentRequestContext) {
+  private assertContextMatches(session: RegisteredSession, context: AgentRequestContext, operation: AgentOperation) {
     if (context.canonicalCwd && canonicalPath(context.canonicalCwd) !== session.canonicalCwd) throw new Error("Agent 会话工作区归属不匹配。");
     if (context.nativeSessionId && context.nativeSessionId !== session.nativeSessionId) throw new Error("Agent 原生会话归属不匹配。");
-    if (context.queryGeneration !== undefined && context.queryGeneration !== session.queryGeneration) throw new Error("Agent Query 代次已失效。");
+    // Closing is cleanup: a Query may advance while the renderer is handing
+    // the session to the embedded terminal. Keep identity checks strict, but
+    // allow an older generation to release the session instead of trapping
+    // the handoff on a stale cleanup request.
+    if (operation !== "closeSession" && context.queryGeneration !== undefined && context.queryGeneration !== session.queryGeneration) {
+      throw new Error("Agent Query 代次已失效。");
+    }
   }
 
   private assertParamsMatch(session: RegisteredSession, operation: AgentOperation, params: JsonObject) {
@@ -437,13 +469,17 @@ export class AgentSessionRegistry {
   }
 
   private assertNativeOwnerAvailable(provider: AgentProvider, nativeSessionId: string, clientSessionId: string) {
-    const owner = this.nativeOwners.get(this.nativeKey(provider, nativeSessionId));
-    if (owner && owner !== clientSessionId) throw new Error("原生会话已被其他客户端会话占用。");
+    this.nativeOwnership.assertAvailable(provider, nativeSessionId, clientSessionId, "workbench");
+  }
+
+  assertNativeSessionAuthorized(provider: AgentProvider, nativeSessionId: string, cwd: string) {
+    const knownCwd = this.knownNativeSessions.get(this.nativeKey(provider, nativeSessionId));
+    if (!knownCwd || knownCwd !== canonicalPath(cwd)) throw new Error("原生会话尚未由当前工作区的 Provider 历史登记。");
   }
 
   private sessionByNative(provider: AgentProvider, nativeSessionId: string) {
-    const clientSessionId = this.nativeOwners.get(this.nativeKey(provider, nativeSessionId));
-    return clientSessionId ? this.sessions.get(clientSessionId) : undefined;
+    const owner = this.nativeOwnership.owner(provider, nativeSessionId);
+    return owner?.mode === "workbench" ? this.sessions.get(owner.clientSessionId) : undefined;
   }
 
   private nativeKey(provider: AgentProvider, nativeSessionId: string) {
@@ -491,9 +527,7 @@ export class AgentSessionRegistry {
     } else {
       this.closedSessions.delete(clientSessionId);
     }
-    if (session.nativeSessionId && this.nativeOwners.get(this.nativeKey(session.provider, session.nativeSessionId)) === clientSessionId) {
-      this.nativeOwners.delete(this.nativeKey(session.provider, session.nativeSessionId));
-    }
+    if (session.nativeSessionId) this.nativeOwnership.release(session.provider, session.nativeSessionId, clientSessionId, "workbench");
     this.cancelSessionInteractions(clientSessionId);
     this.sessions.delete(clientSessionId);
   }

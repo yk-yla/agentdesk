@@ -71,4 +71,10 @@ describe("DesktopUpdateManager", () => {
     assert.equal((await manager.check()).phase, "available");
     assert.equal(updater.feedToken, "yk-yla/agentdesk");
   }));
+
+  it("does not contact the update source during initialization", async () => withManager(async (manager, updater) => {
+    manager.initialize();
+    await new Promise((resolve) => setImmediate(resolve));
+    assert.equal(updater.feedToken, "");
+  }));
 });

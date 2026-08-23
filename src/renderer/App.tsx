@@ -1,11 +1,10 @@
 import { ArrowLeftToLine, ArrowRight, ArrowRightToLine, Download, FolderOpen, GitFork, Pencil, Pin, PinOff, Plus, Star, Trash2, X } from "lucide-react";
-import { lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState, type CSSProperties, type DragEvent, type MouseEvent, type PointerEvent as ReactPointerEvent } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type CSSProperties, type DragEvent, type MouseEvent, type PointerEvent as ReactPointerEvent } from "react";
 import type { AgentCapabilities, AgentOperation, AgentProvider } from "../shared/agentProtocol";
-import { DEFAULT_BOSS_KEY } from "../shared/bossKey";
 import { providerDisplayName } from "../shared/providerMetadata";
-import { DEFAULT_BASE_FONT_SIZE, type BossKeyStatus, type ClaudeRuntimeStatus, type CodexCliUpdateStatus, type CompactionRecord, type CodexDefaults, type DesktopPreferences, type DesktopUpdateStatus, type JsonObject } from "../shared/protocol";
+import { DEFAULT_BASE_FONT_SIZE, DEFAULT_PRESENTATION_MODE, type ClaudeRuntimeStatus, type CodexCliUpdateStatus, type CompactionRecord, type CodexDefaults, type DesktopPreferences, type DesktopUpdateStatus, type JsonObject } from "../shared/protocol";
 import {
-  asRecord, basename, DEFAULT_DISPLAY_MODE, DEFAULT_THEME, emptySession, findModelOption,
+  asRecord, basename, DEFAULT_THEME, emptySession, findModelOption, historyThread,
   EMPTY_CODEX_DEFAULTS, normalizedDirectory, numberValue, sameDirectory, stringValue, upsertHistoryEntry,
   type CollaborationMode, type HistoryThread, type ImageAttachment, type LayoutState, type ModelOption, type PaneState, type PendingSteerMessage, type QueuedMessage, type SessionState, type SkillOption,
 } from "./domain";
@@ -43,8 +42,7 @@ import { initializeProviders, providerCanRestore, type ProviderStartupState } fr
 import type { CommandUsage } from "./commandSuggestions";
 import { TurnTelemetry } from "./turnTelemetry";
 import { PreferenceSaveCoordinator } from "./preferenceSaveCoordinator";
-
-const PluginPanel = lazy(() => import("./PluginPanel"));
+import type { ClaudeTerminalSettings } from "./terminalSettings";
 
 declare const __CODEX_BROWSER_PREVIEW__: boolean;
 
@@ -59,10 +57,9 @@ const NO_SKILLS: SkillOption[] = [];
 const READ_ONLY_SESSION_OPERATIONS = new Set<AgentOperation>([
   "readSession", "resumeSession", "getGoal", "readRateLimits", "listMcpServers", "listSkills", "closeSession",
 ]);
-const INITIAL_UPDATE_STATUS: DesktopUpdateStatus = { phase: "idle", currentVersion: "", message: "仅在手动检查时连接公开 GitHub。", repositoryUrl: "https://github.com/yk-yla/agentdesk" };
+const INITIAL_UPDATE_STATUS: DesktopUpdateStatus = { phase: "idle", currentVersion: "", message: "等待检查更新。", repositoryUrl: "https://github.com/yk-yla/agentdesk" };
 const INITIAL_CLI_UPDATE_STATUS: CodexCliUpdateStatus = { phase: "idle", currentVersion: "", message: "正在读取 Codex CLI 版本。" };
-const INITIAL_CLAUDE_RUNTIME_STATUS: ClaudeRuntimeStatus = { phase: "idle", binarySource: "sdk", binaryVersion: "", sdkVersion: "", credentialsAvailable: false, credentialSource: "unavailable", credentialMessage: "正在读取 Claude 配置。", message: "仅在手动检查时连接 Claude Code 发布源。" };
-const INITIAL_BOSS_KEY_STATUS: BossKeyStatus = { accelerator: DEFAULT_BOSS_KEY, registered: false, message: "正在检查老板键。" };
+const INITIAL_CLAUDE_RUNTIME_STATUS: ClaudeRuntimeStatus = { phase: "idle", binarySource: "sdk", binaryVersion: "", sdkVersion: "", credentialsAvailable: false, credentialSource: "unavailable", credentialMessage: "正在读取 Claude 配置。", message: "等待检查更新。" };
 const DEFAULT_SIDEBAR_WIDTH = 250;
 const MIN_SIDEBAR_WIDTH = 184;
 const MAX_SIDEBAR_WIDTH = 480;
@@ -188,9 +185,8 @@ export default function App() {
   const [skillsByCwd, setSkillsByCwd] = useState<Record<string, SkillOption[]>>({});
   const [codexDefaults, setCodexDefaults] = useState<CodexDefaults>(EMPTY_CODEX_DEFAULTS);
   const [providerStartupStates, setProviderStartupStates] = useState<Record<AgentProvider, ProviderStartupState>>({ codex: "connecting", claude: "connecting" });
-  const [preferences, setPreferences] = useState<DesktopPreferences>({ lastWorkspace: "", favoriteWorkspaces: [], theme: DEFAULT_THEME, displayMode: DEFAULT_DISPLAY_MODE, bossKey: DEFAULT_BOSS_KEY });
+  const [preferences, setPreferences] = useState<DesktopPreferences>({ lastWorkspace: "", favoriteWorkspaces: [], theme: DEFAULT_THEME, lastCodexPresentationMode: DEFAULT_PRESENTATION_MODE });
   const recentCommandUsage = (preferences.recentCommandUsage || {}) as CommandUsage;
-  const [bossKeyStatus, setBossKeyStatus] = useState<BossKeyStatus>(INITIAL_BOSS_KEY_STATUS);
   const [updateStatus, setUpdateStatus] = useState<DesktopUpdateStatus>(INITIAL_UPDATE_STATUS);
   const [cliUpdateStatus, setCliUpdateStatus] = useState<CodexCliUpdateStatus>(INITIAL_CLI_UPDATE_STATUS);
   const [claudeRuntimeStatus, setClaudeRuntimeStatus] = useState<ClaudeRuntimeStatus>(INITIAL_CLAUDE_RUNTIME_STATUS);
@@ -204,7 +200,6 @@ export default function App() {
   const [draggingTabId, setDraggingTabId] = useState<string | null>(null);
   const [tabDropPaneId, setTabDropPaneId] = useState<string | null>(null);
   const [tabDropTarget, setTabDropTarget] = useState<TabDropTarget | null>(null);
-  const [pluginPanelOpen, setPluginPanelOpen] = useState(false);
   const [sidebarWidth, setSidebarWidth] = useState(DEFAULT_SIDEBAR_WIDTH);
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
   const [workspaceStateReady, setWorkspaceStateReady] = useState(false);
@@ -289,19 +284,16 @@ export default function App() {
     return () => window.removeEventListener("keydown", closeOnEscape);
   }, [tabRenameTarget]);
 
-  const displayMode = preferences.displayMode || DEFAULT_DISPLAY_MODE;
   const baseFontSize = preferences.baseFontSize ?? DEFAULT_BASE_FONT_SIZE;
   const activePane = layout.panes.find((pane) => pane.id === layout.activePaneId) ?? layout.panes[0];
   const activeSession = activePane ? sessions[activePane.activeTabId] : undefined;
 
   const updateSession = useCallback((id: string, updater: (current: SessionState) => SessionState) => {
-    const currentSession = sessionsRef.current[id];
-    if (!currentSession) return;
-    const nextSession = updater(currentSession);
-    sessionsRef.current = { ...sessionsRef.current, [id]: nextSession };
     setSessions((current) => {
       if (!current[id]) return current;
-      return { ...current, [id]: current[id] === currentSession ? nextSession : updater(current[id]) };
+      const next = { ...current, [id]: updater(current[id]) };
+      sessionsRef.current = next;
+      return next;
     });
   }, []);
 
@@ -413,26 +405,6 @@ export default function App() {
     }
   }, [agentClient, bridge]);
 
-  const requestForPluginPanel = useCallback((provider: AgentProvider, operation: AgentOperation, params: JsonObject) => {
-    const sessionId = Object.keys(sessionsRef.current).find((id) => sessionsRef.current[id]?.provider === provider);
-    const session = sessionId ? sessionsRef.current[sessionId] : undefined;
-    const cwd = typeof params.cwd === "string" ? params.cwd : session?.cwd || workspace;
-    const context = {
-      ...(sessionId ? { sessionId } : {}),
-      canonicalCwd: cwd,
-      ...(session?.threadId ? { nativeSessionId: session.threadId } : {}),
-      ...(session?.queryGeneration !== undefined ? { queryGeneration: session.queryGeneration } : {}),
-    };
-    return agentClient.request(provider, operation, { ...params, cwd }, context).catch(async (error) => {
-      if (provider !== "claude") throw error;
-      const normalized = normalizeAgentRequestError(provider, operation, error);
-      throw normalized;
-    });
-  }, [agentClient, bridge, workspace]);
-
-  const openPluginPanel = useCallback(() => setPluginPanelOpen(true), []);
-  const closePluginPanel = useCallback(() => setPluginPanelOpen(false), []);
-
   const loadSkills = useCallback((sessionId: string, cwd: string, forceReload = false) => {
     if (!normalizedDirectory(cwd)) return Promise.resolve();
     const provider = sessionsRef.current[sessionId]?.provider || "codex";
@@ -458,20 +430,31 @@ export default function App() {
     return load;
   }, [requestForSession]);
 
-  const createSessionState = useCallback((cwd: string, options?: { threadId?: string; title?: string; provider?: AgentProvider }) => {
+  const createSessionState = useCallback((cwd: string, options?: { threadId?: string; title?: string; provider?: AgentProvider; presentationMode?: "workbench" | "terminal" }) => {
     const id = `session-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
     const provider = options?.provider || "codex";
     const defaults = newSessionDefaults(provider, providerModelsRef.current[provider], defaultsRef.current, providerCapabilitiesRef.current[provider], preferencesRef.current.lastReasoningEfforts?.[provider]);
     const session = emptySession(id, cwd, defaults.model, defaults.effort, provider);
     session.capabilities = defaults.capabilities;
+    session.presentationMode = provider === "claude" ? "terminal" : (options?.presentationMode || preferencesRef.current.lastCodexPresentationMode || "workbench");
+    if (session.presentationMode === "terminal") {
+      // A new terminal needs a Provider-native session before PTY startup.
+      // Keep the pane suspended synchronously so React cannot mount a PTY in
+      // the gap before prepareNewTerminalSession performs that handshake.
+      session.terminalSuspended = true;
+      session.statusLabel = "正在准备黑窗口";
+    }
     session.tokenUsage.total = cachedModelContextWindow(preferencesRef.current, session.model);
     session.threadId = options?.threadId ?? null;
     session.title = options?.title || "新会话";
     session.titleOrigin = options?.title ? "provider" : "placeholder";
     session.resumed = false;
     const initialized = withPersistedCompaction(session, preferencesRef.current);
-    sessionsRef.current = { ...sessionsRef.current, [id]: initialized };
-    setSessions((current) => ({ ...current, [id]: initialized }));
+    setSessions((current) => {
+      const next = { ...current, [id]: initialized };
+      sessionsRef.current = next;
+      return next;
+    });
     return id;
   }, []);
 
@@ -501,9 +484,21 @@ export default function App() {
     check();
   }), []);
 
-  const closeBackendSession = useCallback((sessionId: string) => {
+  const closeBackendSession = useCallback((sessionId: string, modeOverride?: "workbench" | "terminal") => {
     const session = sessionsRef.current[sessionId];
     if (!session) return Promise.resolve();
+    if ((modeOverride || session.presentationMode) === "terminal") {
+      if (session.provider === "claude") {
+        return bridge.closeTerminal({ sessionId }).catch((error) => {
+          console.warn("[closeBackendSession] Claude terminal close failed:", error);
+        });
+      }
+      updateSession(sessionId, (current) => ({ ...current, statusLabel: "正在关闭", errorText: "" }));
+      return bridge.closeTerminal({ sessionId }).catch((error) => {
+        updateSession(sessionId, (current) => ({ ...current, statusLabel: "关闭失败", errorText: error instanceof Error ? error.message : "关闭终端失败。" }));
+        throw error;
+      });
+    }
     const context = { sessionId, canonicalCwd: session.cwd, nativeSessionId: session.threadId || undefined, queryGeneration: session.queryGeneration };
     updateSession(sessionId, (current) => ({ ...current, statusLabel: "正在关闭", errorText: "" }));
     return sessionLifecycleRef.current.close(sessionId, () => closeSessionResources({
@@ -522,7 +517,7 @@ export default function App() {
       updateSession(sessionId, (current) => ({ ...current, statusLabel: result.closeError ? "关闭失败" : "停止任务失败", errorText: error instanceof Error ? error.message : "关闭会话失败。" }));
       throw error;
     }));
-  }, [agentClient, updateSession, waitForSessionIdle]);
+  }, [agentClient, bridge, updateSession, waitForSessionIdle]);
 
   const releaseSessionState = useCallback((sessionId: string, reason = "会话已关闭。") => {
     setSessions((current) => { const next = { ...current }; delete next[sessionId]; sessionsRef.current = next; return next; });
@@ -627,7 +622,7 @@ export default function App() {
     try {
       next = await bridge.savePreferences(patch);
     } catch (error) {
-      const fields = Object.keys(patch).filter((field) => ["theme", "displayMode", "baseFontSize", "sidebarWidth", "bossKey"].includes(field));
+      const fields = Object.keys(patch).filter((field) => ["theme", "baseFontSize", "sidebarWidth", "lastCodexPresentationMode"].includes(field));
       if (fields.length) trackUiEvent("preference.save_failed", { fields, errorName: error instanceof Error ? error.name : "unknown" });
       // If the write failed and no newer write replaced this field, restore the
       // last known persisted value before propagating the error to the caller.
@@ -690,7 +685,7 @@ export default function App() {
   useEffect(() => {
     if (!workspaceStateReady) return;
     scheduleWorkspaceStateSave();
-  }, [attachments, layout, pendingSteers, queuedMessages, scheduleWorkspaceStateSave, sessions, sidebarCollapsed, workspace, workspaceStateReady]);
+  }, [layout, sidebarCollapsed, workspace, scheduleWorkspaceStateSave, workspaceStateReady]);
 
   useEffect(() => () => {
     if (workspaceStateSaveTimerRef.current !== undefined) window.clearTimeout(workspaceStateSaveTimerRef.current);
@@ -733,21 +728,6 @@ export default function App() {
     preferencesRef.current = { ...preferencesRef.current, lastReasoningEfforts };
     setPreferences((current) => ({ ...current, lastReasoningEfforts }));
     void bridge.savePreferences({ lastReasoningEfforts }).catch(() => undefined);
-  }, [bridge]);
-
-  const setBossKey = useCallback(async (accelerator: string) => {
-    const status = await bridge.setBossKey(accelerator);
-    setBossKeyStatus(status);
-    setPreferences((current) => ({ ...current, bossKey: status.accelerator }));
-    return status;
-  }, [bridge]);
-
-  useEffect(() => {
-    let active = true;
-    void bridge.getBossKeyStatus()
-      .then((status) => { if (active) setBossKeyStatus(status); })
-      .catch(() => { if (active) setBossKeyStatus((current) => ({ ...current, registered: false, message: "读取老板键状态失败。" })); });
-    return () => { active = false; };
   }, [bridge]);
 
   const favoriteHistory = useMemo(() => favoriteHistoryEntries(history, preferences), [history, preferences]);
@@ -944,29 +924,79 @@ export default function App() {
     await savePreference({ lastWorkspace: registered });
   }, [bridge, savePreference]);
 
+  const prepareNewTerminalSession = useCallback(async (sessionId: string, provider: AgentProvider, directory: string) => {
+    updateSession(sessionId, (current) => ({ ...current, terminalSuspended: true, statusLabel: "正在准备黑窗口", errorText: "" }));
+    try {
+      await ensureProviderInitialized(provider);
+      if (provider === "claude") {
+        // Claude terminal doesn't need a Backend session — CLI creates its own.
+        // Just unsuspend so TerminalPane starts without --resume.
+        if (!sessionsRef.current[sessionId]) return;
+        updateSession(sessionId, (current) => ({ ...current, resumed: true, status: "idle", statusLabel: "正在启动终端", errorText: "", terminalSuspended: false }));
+        return;
+      }
+      const value = asRecord(await agentClient.request(provider, "startSession", { cwd: directory, effort: sessionsRef.current[sessionId]?.effort || null }, { sessionId, canonicalCwd: directory }));
+      const thread = asRecord(value.thread);
+      const threadId = stringValue(thread.id) || stringValue(value.threadId);
+      if (!threadId) throw new Error("Provider 没有返回可绑定的原生会话 ID。");
+      providerEventRef.current?.bindSession(provider, threadId, sessionId);
+      if (!sessionsRef.current[sessionId]) {
+        await agentClient.request(provider, "closeSession", {}, { sessionId, canonicalCwd: directory, nativeSessionId: threadId });
+        return;
+      }
+      updateSession(sessionId, (current) => ({ ...current, threadId, resumed: true, status: "idle", statusLabel: "正在启动终端", errorText: "", terminalSuspended: false }));
+    } catch (error) {
+      updateSession(sessionId, (current) => ({ ...current, presentationMode: provider === "claude" ? "terminal" : "workbench", terminalSuspended: false, status: "error", statusLabel: "黑窗口准备失败", errorText: error instanceof Error ? error.message : "黑窗口准备失败。" }));
+    }
+  }, [agentClient, ensureProviderInitialized, updateSession]);
+
+  const restoreTerminalSession = useCallback(async (sessionId: string, provider: AgentProvider, directory: string, threadId: string) => {
+    try {
+      await ensureProviderInitialized(provider);
+      await agentClient.request(provider, "readSession", { cwd: directory, threadId, includeTurns: false });
+      providerEventRef.current?.bindSession(provider, threadId, sessionId);
+      if (!sessionsRef.current[sessionId]) return;
+      updateSession(sessionId, (current) => ({ ...current, terminalSuspended: false, status: "idle", statusLabel: "正在启动终端", errorText: "" }));
+    } catch (error) {
+      updateSession(sessionId, (current) => ({
+        ...current,
+        presentationMode: "workbench",
+        terminalSuspended: false,
+        status: "error",
+        statusLabel: "黑窗口恢复失败",
+        errorText: error instanceof Error ? error.message : "黑窗口恢复失败。",
+      }));
+    }
+  }, [agentClient, ensureProviderInitialized, updateSession]);
+
   const createSessionInDirectory = useCallback(async (
     directory: string,
     provider: AgentProvider = "codex",
     placement?: { paneId: string; afterSessionId?: string },
+    presentationMode?: "workbench" | "terminal",
   ) => {
     const registered = await bridge.registerWorkspace(directory);
     if (!registered) return undefined;
     directory = registered;
-    void ensureProviderInitialized(provider);
+    const selectedPresentationMode = provider === "claude" ? "terminal" : (presentationMode || preferencesRef.current.lastCodexPresentationMode || "workbench");
+    if (selectedPresentationMode === "workbench") void ensureProviderInitialized(provider);
     setWorkspace(directory);
     const sessionId = placement
-      ? addSessionToPane(placement.paneId, directory, { provider }, placement.afterSessionId)
-      : addSession(directory, { provider });
+      ? addSessionToPane(placement.paneId, directory, { provider, presentationMode: selectedPresentationMode }, placement.afterSessionId)
+      : addSession(directory, { provider, presentationMode: selectedPresentationMode });
+    if (selectedPresentationMode === "terminal") void prepareNewTerminalSession(sessionId, provider, directory);
     trackUiEvent("session.create", { provider, placement: placement ? "tab" : "pane" });
-    void agentClient.request(provider, "getCapabilities", {}, { sessionId, canonicalCwd: directory })
-      .then((value) => {
-        const capabilities = value as SessionState["capabilities"];
-        updateSession(sessionId, (current) => ({ ...current, capabilities }));
-      })
-      .catch((error) => setError(sessionId, error, "读取 Provider 能力失败"));
-    void savePreference({ lastWorkspace: directory });
+    if (selectedPresentationMode === "workbench") {
+      void agentClient.request(provider, "getCapabilities", {}, { sessionId, canonicalCwd: directory })
+        .then((value) => {
+          const capabilities = value as SessionState["capabilities"];
+          updateSession(sessionId, (current) => ({ ...current, capabilities }));
+        })
+        .catch((error) => setError(sessionId, error, "读取 Provider 能力失败"));
+    }
+    void savePreference({ lastWorkspace: directory, ...(provider === "codex" && selectedPresentationMode ? { lastCodexPresentationMode: selectedPresentationMode } : {}) });
     return sessionId;
-  }, [addSession, addSessionToPane, agentClient, bridge, ensureProviderInitialized, savePreference, setError, updateSession]);
+  }, [addSession, addSessionToPane, bridge, prepareNewTerminalSession, savePreference, setError]);
 
   useEffect(() => {
     const handleNewSessionShortcut = (event: KeyboardEvent) => {
@@ -995,14 +1025,6 @@ export default function App() {
     updateSession(sessionId, (current) => (current.threadId ? current : { ...current, cwd: next, updatedAt: Date.now() }));
   }, [bridge, savePreference, updateSession, workspace]);
 
-  const openWindowsTerminal = useCallback((cwd: string) => {
-    void bridge.openWindowsTerminal(cwd).catch((error) => {
-      const pane = layoutRef.current.panes.find((entry) => entry.id === layoutRef.current.activePaneId);
-      const sessionId = pane?.activeTabId;
-      if (sessionId) setError(sessionId, error, "打开 Windows Terminal 失败");
-    });
-  }, [bridge, setError]);
-
   const openDirectoryInExplorer = useCallback((directory: string, sessionId?: string) => {
     void bridge.openLocalPath({ path: directory }).then((result) => {
       if (typeof result === "string" && result.trim()) throw new Error(result.trim());
@@ -1021,6 +1043,10 @@ export default function App() {
   const setSessionSetting = useCallback(async (sessionId: string, field: "model" | "effort", value: string) => {
     const session = sessionsRef.current[sessionId];
     if (!session) return;
+    if (session.provider === "claude") {
+      updateSession(sessionId, (current) => ({ ...current, errorText: "Claude Code 的模型和思考等级请在黑窗口中修改。" }));
+      return;
+    }
     const fallback = { model: session.model, effort: session.effort };
     settingsCoordinatorRef.current.initialize(sessionId, fallback);
     const currentTarget = settingsCoordinatorRef.current.desired(sessionId, fallback);
@@ -1088,7 +1114,7 @@ export default function App() {
 
   const cycleEffort = useCallback((sessionId: string, direction: 1 | -1) => {
     const session = sessionsRef.current[sessionId];
-    if (!session) return;
+    if (!session || session.provider === "claude") return;
     const target = settingsCoordinatorRef.current.desired(sessionId, { model: session.model, effort: session.effort });
     if (session.capabilities.effort !== "supported") return;
     const model = findModelOption(providerModelsRef.current[session.provider], target.model);
@@ -1134,10 +1160,15 @@ export default function App() {
       resumed: session.resumed === true,
       claimExisting: session.threadId ? () => providerEventRef.current?.bindSession(session.provider, session.threadId as string, sessionId) : undefined,
       resume: session.threadId ? async () => {
-        await requestForSession(sessionId, "resumeSession", { threadId: session.threadId, cwd: session.cwd });
-        updateSession(sessionId, (current) => ({ ...current, resumed: true }));
+        const value = asRecord(await requestForSession(sessionId, "resumeSession", { threadId: session.threadId, cwd: session.cwd }));
+        const queryGeneration = numberValue(value.queryGeneration, -1);
+        updateSession(sessionId, (current) => ({
+          ...current,
+          resumed: true,
+          ...(queryGeneration >= 0 ? { queryGeneration } : {}),
+        }));
       } : undefined,
-      start: () => requestForSession(sessionId, "startSession", { cwd: session.cwd, model: session.model || null, sessionStartSource: "startup" }),
+      start: () => requestForSession(sessionId, "startSession", { cwd: session.cwd, model: session.model || null, effort: session.effort || null, sessionStartSource: "startup" }),
       adopt: (value) => adoptStartedThread(sessionId, value),
       isStartTimeout: (error) => isCodexRequestTimeout(error) && codexRequestMethod(error) === "startSession",
       onStartTimeout: () => {
@@ -1596,15 +1627,50 @@ export default function App() {
   const historyController = historyControllerRef.current;
   const { refresh: refreshHistory, loadMore: loadMoreHistory, loadRecent: loadRecentHistory, loadMoreRecent: loadMoreRecentHistory, search: searchHistory, loadMoreSearch: loadMoreHistorySearch } = historyController;
 
-  const openHistory = useCallback(async (entry: HistoryThread) => {
+  const openHistory = useCallback(async (entry: HistoryThread, presentationMode?: "workbench" | "terminal", options?: { activate?: boolean }) => {
+    const activateHistorySession = (sessionId: string) => {
+      if (options?.activate !== false) activateSessionTab(sessionId);
+    };
+    const selectedPresentationMode = entry.provider === "claude" ? "terminal" : (presentationMode || preferencesRef.current.lastCodexPresentationMode || "workbench");
+    if (entry.provider === "codex" && presentationMode) {
+      void savePreference({ lastCodexPresentationMode: selectedPresentationMode });
+    }
     const existing = Object.values(sessionsRef.current).find((session) => session.provider === entry.provider && session.threadId === entry.id && sameDirectory(session.cwd, entry.cwd));
+    if (existing?.presentationMode === "terminal" && selectedPresentationMode === "terminal" && !existing.terminalSuspended) {
+      activateHistorySession(existing.id);
+      return existing.id;
+    }
+    if (existing && selectedPresentationMode === "terminal") {
+      activateHistorySession(existing.id);
+      if (existing.presentationMode !== "terminal") {
+        try {
+          await closeBackendSession(existing.id);
+          updateSession(existing.id, (current) => ({ ...current, presentationMode: "terminal", terminalSuspended: false, resumed: false, status: "idle", statusLabel: "正在启动终端", errorText: "" }));
+        } catch (error) {
+          setError(existing.id, error, "切换到内置终端失败");
+          return existing.id;
+        }
+      }
+    }
+    if (existing?.presentationMode === "terminal" && selectedPresentationMode === "workbench") {
+      try {
+        await bridge.closeTerminal({ sessionId: existing.id });
+      } catch (error) {
+        setError(existing.id, error, "关闭内置终端失败");
+        activateHistorySession(existing.id);
+        return existing.id;
+      }
+      updateSession(existing.id, (current) => ({ ...current, presentationMode: "workbench", terminalSuspended: false, errorText: "" }));
+      activateHistorySession(existing.id);
+      if (!existing.threadId) return existing.id;
+    }
     let registeredCwd: string;
     try {
       await ensureProviderInitialized(entry.provider);
       registeredCwd = await registerHistoricalWorkspace((cwd) => bridge.registerWorkspace(cwd), entry.cwd);
     } catch (error) {
       if (existing) {
-        activateSessionTab(existing.id);
+        activateHistorySession(existing.id);
         setError(existing.id, error, "打开历史会话失败");
         return existing.id;
       }
@@ -1613,8 +1679,66 @@ export default function App() {
       if (activePane) setError(activePane.activeTabId, error, "打开历史会话失败");
       return undefined;
     }
+    if (selectedPresentationMode === "terminal") {
+      // A favorite/history summary is only renderer state after restart. Read
+      // it through the Provider first so the main-process registry can authorize
+      // the terminal's native-session ownership.
+      try {
+        await agentClient.request(entry.provider, "readSession", { cwd: registeredCwd, threadId: entry.id, includeTurns: false });
+      } catch (error) {
+        if (existing) {
+          activateHistorySession(existing.id);
+          setError(existing.id, error, "打开历史终端失败");
+        } else {
+          const activePane = layoutRef.current.panes.find((pane) => pane.id === layoutRef.current.activePaneId) ?? layoutRef.current.panes[0];
+          if (activePane) setError(activePane.activeTabId, error, "打开历史终端失败");
+        }
+        return undefined;
+      }
+      if (existing?.presentationMode === "terminal" && existing.terminalSuspended) {
+        updateSession(existing.id, (current) => ({ ...current, terminalSuspended: false, status: "idle", statusLabel: "正在启动终端", errorText: "" }));
+      }
+      const currentLayout = layoutRef.current;
+      const activePane = currentLayout.panes.find((pane) => pane.id === currentLayout.activePaneId) ?? currentLayout.panes[0];
+      const placeholder = activePane ? sessionsRef.current[activePane.activeTabId] : undefined;
+      const canReusePlaceholder = Boolean(
+        placeholder
+        && !placeholder.threadId
+        && !placeholder.messages.length
+        && !placeholder.activities.length
+        && placeholder.status === "idle"
+        && !(attachmentsRef.current[placeholder.id] || []).length
+        && !draftsRef.current.get(placeholder.id),
+      );
+      const sessionId = existing?.id ?? (canReusePlaceholder && placeholder
+        ? placeholder.id
+        : addSession(registeredCwd, { threadId: entry.id, title: entry.title, provider: entry.provider, presentationMode: "terminal" }));
+      if (!existing && canReusePlaceholder && placeholder) {
+        updateSession(sessionId, (current) => {
+          const next = retargetEmptySession(
+            current,
+            entry.provider,
+            registeredCwd,
+            entry.id,
+            entry.title,
+            providerModelsRef.current[entry.provider],
+            defaultsRef.current,
+            providerCapabilitiesRef.current[entry.provider],
+          );
+          next.presentationMode = "terminal";
+          next.terminalSuspended = false;
+          next.tokenUsage.total = cachedModelContextWindow(preferencesRef.current, next.model);
+          return withPersistedCompaction(next, preferencesRef.current);
+        });
+      }
+      activateHistorySession(sessionId);
+      return sessionId;
+    }
     if (existing) {
-      activateSessionTab(existing.id);
+      activateHistorySession(existing.id);
+      if (existing.presentationMode === "terminal") {
+        updateSession(existing.id, (current) => ({ ...current, presentationMode: "workbench", terminalSuspended: false, errorText: "" }));
+      }
       if (existing.resumed || existing.readOnly) return existing.id;
     }
     const currentLayout = layoutRef.current;
@@ -1672,9 +1796,17 @@ export default function App() {
         applyResume: (resumeValue) => {
           resumed = true;
           const resume = asRecord(resumeValue);
+          const queryGeneration = numberValue(resume.queryGeneration, -1);
           updateSession(sessionId, (current) => {
             const model = stringValue(resume.model) || current.model;
-            return { ...current, model, effort: stringValue(resume.reasoningEffort) || current.effort, resumed: true, tokenUsage: tokenUsageForModel(current, model, preferencesRef.current) };
+            return {
+              ...current,
+              model,
+              effort: stringValue(resume.reasoningEffort) || current.effort,
+              resumed: true,
+              ...(queryGeneration >= 0 ? { queryGeneration } : {}),
+              tokenUsage: tokenUsageForModel(current, model, preferencesRef.current),
+            };
           });
         },
         read: readHistoricalSession,
@@ -1701,13 +1833,15 @@ export default function App() {
       }
     }
     return sessionId;
-  }, [activateSessionTab, addSession, bridge, ensureProviderInitialized, persistCompactionSnapshot, requestForSession, setError, updateSession]);
+  }, [activateSessionTab, addSession, agentClient, bridge, closeBackendSession, ensureProviderInitialized, persistCompactionSnapshot, requestForSession, savePreference, setError, updateSession]);
 
   const retryReadOnlySession = useCallback(async (sessionId: string) => {
     const session = sessionsRef.current[sessionId];
     if (!session?.readOnly || !session.threadId) return;
     try {
-      await requestForSession(sessionId, "resumeSession", { threadId: session.threadId, cwd: session.cwd });
+      const resume = asRecord(await requestForSession(sessionId, "resumeSession", { threadId: session.threadId, cwd: session.cwd }));
+      const queryGeneration = numberValue(resume.queryGeneration, -1);
+      if (queryGeneration >= 0) updateSession(sessionId, (current) => ({ ...current, queryGeneration }));
       const readValue = await requestForSession(sessionId, "readSession", { threadId: session.threadId, includeTurns: true });
       updateSession(sessionId, (current) => ({
         ...hydrateAgentSession(current, current.provider, asRecord(readValue).thread),
@@ -1729,7 +1863,32 @@ export default function App() {
   ), []);
 
   const runHistoryAction = useCallback(async (entry: HistoryThread, action: HistoryAction, value?: string) => {
-    const existing = Object.values(sessionsRef.current).find((session) => session.provider === entry.provider && session.threadId === entry.id && sameDirectory(session.cwd, entry.cwd));
+    let existing = Object.values(sessionsRef.current).find((session) => session.provider === entry.provider && session.threadId === entry.id && sameDirectory(session.cwd, entry.cwd));
+    const closedTerminal = existing?.presentationMode === "terminal" && action !== "favorite" ? existing : undefined;
+    const reportError = (error: unknown, fallback: string) => {
+      const currentLayout = layoutRef.current;
+      const pane = currentLayout.panes.find((candidate) => candidate.id === currentLayout.activePaneId) ?? currentLayout.panes[0];
+      if (pane?.activeTabId) setError(pane.activeTabId, error, fallback);
+    };
+    if (action === "openWorkbench") {
+      await openHistory(entry, "workbench");
+      return;
+    }
+    if (action === "openTerminal") {
+      await openHistory(entry, "terminal");
+      return;
+    }
+    if (existing?.presentationMode === "terminal" && action !== "favorite") {
+      try {
+        await bridge.closeTerminal({ sessionId: existing.id });
+        // The rest of this handler deliberately uses the history-only request
+        // path below; a terminal tab has no active workbench Query context.
+        existing = undefined;
+      } catch (error) {
+        reportError(error, "关闭内置终端失败");
+        return;
+      }
+    }
     if (existing) {
       if (action === "rename" && value) await renameSession(existing.id, value);
       else if (action === "pin") await toggleThreadPin(existing.id);
@@ -1742,11 +1901,6 @@ export default function App() {
       return;
     }
 
-    const reportError = (error: unknown, fallback: string) => {
-      const currentLayout = layoutRef.current;
-      const pane = currentLayout.panes.find((candidate) => candidate.id === currentLayout.activePaneId) ?? currentLayout.panes[0];
-      if (pane?.activeTabId) setError(pane.activeTabId, error, fallback);
-    };
     const key = nativeSessionKey(entry.provider, entry.id);
 
     if (action === "favorite") {
@@ -1793,6 +1947,7 @@ export default function App() {
           };
         }
         await savePreference(patch);
+        if (closedTerminal) updateSession(closedTerminal.id, (current) => ({ ...current, title: name, titleOrigin: "manual", updatedAt: Date.now() }));
         setHistory((current) => sortHistory(current.map((candidate) => candidate.provider === entry.provider && candidate.id === entry.id ? { ...candidate, title: name, titleLower: name.toLowerCase() } : candidate)));
       } else if (action === "pin") {
         const nextPinned = !entry.isPinned;
@@ -1853,11 +2008,16 @@ export default function App() {
           ...(entry.provider === "codex" ? { codexCompactionCounts: legacyCodexCompactionCounts } : {}),
         });
         setHistory((current) => current.filter((candidate) => candidate.provider !== entry.provider || candidate.id !== entry.id));
+        if (closedTerminal) {
+          const replacementId = createSessionState(closedTerminal.cwd, { provider: closedTerminal.provider });
+          layoutController.replaceSession(closedTerminal.id, replacementId);
+          releaseSessionState(closedTerminal.id, "会话已删除。");
+        }
       }
     } catch (error) {
       reportError(normalizeAgentRequestError(entry.provider, action === "pin" ? "updateSessionMetadata" : action === "rename" ? "renameSession" : action === "delete" ? "deleteSession" : action === "fork" ? "forkSession" : "readSession", error), "历史会话操作失败");
     }
-  }, [addSession, agentClient, bridge, createSessionInDirectory, deleteSession, exportSession, forkSession, handoffSession, persistCompactionSnapshot, renameSession, requestForSession, restoreMessagesToDraft, runMessage, savePreference, sessionMessages, setError, toggleSessionFavorite, toggleThreadPin, updateSession]);
+  }, [addSession, agentClient, bridge, createSessionInDirectory, createSessionState, deleteSession, exportSession, forkSession, handoffSession, layoutController, openHistory, persistCompactionSnapshot, releaseSessionState, renameSession, requestForSession, restoreMessagesToDraft, runMessage, savePreference, sessionMessages, setError, toggleSessionFavorite, toggleThreadPin, updateSession]);
 
   const addImages = useCallback(async (sessionId: string, files: File[]) => {
     const session = sessionsRef.current[sessionId];
@@ -1913,6 +2073,113 @@ export default function App() {
 
   const clearError = useCallback((sessionId: string) => {
     updateSession(sessionId, (current) => ({ ...current, errorText: "", ...(current.status === "error" && !current.activeTurnId ? { status: "idle" as const, statusLabel: "就绪" } : {}) }));
+  }, [updateSession]);
+
+  const setPresentationMode = useCallback(async (sessionId: string, mode: "workbench" | "terminal") => {
+    const session = sessionsRef.current[sessionId];
+    if (!session || session.presentationMode === mode) return;
+    if (session.provider === "claude") return;
+    if (mode === "terminal" && session.provider === "codex" && session.readOnly) {
+      setError(sessionId, new Error("该会话正被其他 Codex 窗口使用，请先关闭占用它的窗口后再切换。"), "切换到内置终端失败");
+      return;
+    }
+    if (mode === "workbench" && session.presentationMode === "terminal") {
+      const entry = session.threadId
+        ? history.find((candidate) => candidate.provider === session.provider && candidate.id === session.threadId && sameDirectory(candidate.cwd, session.cwd))
+          || historyThread({ id: session.threadId, provider: session.provider, title: session.title, cwd: session.cwd, updatedAt: session.updatedAt, source: "tab" })
+        : undefined;
+      // Show the workbench immediately, but keep Provider recovery suspended
+      // until the terminal process has fully released its native session.
+      updateSession(sessionId, (current) => ({
+        ...current,
+        presentationMode: "workbench",
+        terminalSuspended: true,
+        resumed: false,
+        status: "idle",
+        statusLabel: "正在关闭黑窗口",
+        errorText: "",
+      }));
+      try {
+        await bridge.closeTerminal({ sessionId });
+      } catch (error) {
+        updateSession(sessionId, (current) => ({ ...current, presentationMode: "terminal", terminalSuspended: false, statusLabel: "终端运行中" }));
+        setError(sessionId, error, "关闭内置终端失败");
+        return;
+      }
+      updateSession(sessionId, (current) => ({ ...current, terminalSuspended: false, status: "idle", statusLabel: "就绪", errorText: "" }));
+      if (entry) void openHistory(entry, "workbench", { activate: false });
+      else void savePreference({ lastCodexPresentationMode: "workbench" });
+      return;
+    }
+    if (mode === "terminal" && (session.threadId || session.messages.length || session.activities.length || session.status === "working" || session.pendingApprovals.length)) {
+      // Render the terminal pane while the workbench Provider session is being
+      // released. TerminalPane waits for terminalSuspended=false before
+      // spawning the native CLI, so the handoff remains exclusive without
+      // making the whole pane appear frozen.
+      updateSession(sessionId, (current) => ({
+        ...current,
+        presentationMode: "terminal",
+        terminalSuspended: true,
+        statusLabel: "正在关闭图形会话",
+        errorText: "",
+      }));
+      try {
+        await closeBackendSession(sessionId, "workbench");
+      } catch (error) {
+        updateSession(sessionId, (current) => ({ ...current, presentationMode: "workbench", terminalSuspended: false, statusLabel: "就绪" }));
+        setError(sessionId, error, "切换到内置终端失败");
+        return;
+      }
+      updateSession(sessionId, (current) => ({ ...current, terminalSuspended: false, status: "idle", statusLabel: "正在启动终端", errorText: "" }));
+      void savePreference({ lastCodexPresentationMode: mode });
+      return;
+    }
+    if (mode === "terminal") {
+      updateSession(sessionId, (current) => ({ ...current, presentationMode: "terminal", terminalSuspended: true, status: "idle", statusLabel: "正在准备黑窗口", errorText: "" }));
+      void prepareNewTerminalSession(sessionId, session.provider, session.cwd);
+      void savePreference({ lastCodexPresentationMode: mode });
+      return;
+    }
+    updateSession(sessionId, (current) => ({
+      ...current,
+      presentationMode: mode,
+      terminalSuspended: false,
+      status: "idle",
+      statusLabel: "就绪",
+      errorText: "",
+    }));
+    void savePreference({ lastCodexPresentationMode: mode });
+  }, [bridge, closeBackendSession, history, openHistory, prepareNewTerminalSession, savePreference, setError, updateSession]);
+
+  const setTerminalError = useCallback((sessionId: string, message: string) => {
+    setError(sessionId, new Error(message), "终端操作失败");
+  }, [setError]);
+
+  const applyTerminalSettings = useCallback((sessionId: string, settings: ClaudeTerminalSettings) => {
+    if (!settings.model && !settings.effort) return;
+    updateSession(sessionId, (current) => {
+      if (current.provider !== "claude") return current;
+      return {
+        ...current,
+        // The terminal is the source of truth for Claude settings. Keep the
+        // SDK-facing alias/ID in `model`; a previous SDK-resolved value is no
+        // longer valid after changing the model in the terminal.
+        ...(settings.model ? { model: settings.model, resolvedModel: undefined } : {}),
+        ...(settings.effort ? { effort: settings.effort } : {}),
+      };
+    });
+  }, [updateSession]);
+
+  const resumeTerminal = useCallback((sessionId: string) => {
+    const session = sessionsRef.current[sessionId];
+    if (session?.provider === "codex") {
+      for (const candidate of Object.values(sessionsRef.current)) {
+        if (candidate.provider === "codex" && candidate.presentationMode === "workbench" && candidate.resumed) {
+          updateSession(candidate.id, (current) => ({ ...current, resumed: false }));
+        }
+      }
+    }
+    updateSession(sessionId, (current) => ({ ...current, terminalSuspended: false, status: "idle", statusLabel: "正在启动终端", errorText: "" }));
   }, [updateSession]);
 
   const recoverProvider = useCallback((provider: AgentProvider) => {
@@ -2033,6 +2300,12 @@ export default function App() {
       const restored = parseWorkspaceState(value.workspaceState, currentWorkspace);
       if (!restored) {
         const initial = emptySession("session-1", currentWorkspace, "", "", launchProvider || "codex");
+        const initialPresentationMode = initial.provider === "claude" ? "terminal" : (value.lastCodexPresentationMode || "workbench");
+        initial.presentationMode = initialPresentationMode;
+        if (initialPresentationMode === "terminal") {
+          initial.terminalSuspended = true;
+          initial.statusLabel = "正在准备黑窗口";
+        }
         sessionsRef.current = { "session-1": initial };
         setSessions({ "session-1": initial });
         if (preferencesResult.status === "rejected") {
@@ -2040,7 +2313,8 @@ export default function App() {
         }
         workspaceStateReadyRef.current = true;
         setWorkspaceStateReady(true);
-        void ensureProviderInitialized(initial.provider);
+        if (initialPresentationMode === "terminal") void prepareNewTerminalSession(initial.id, initial.provider, currentWorkspace);
+        else void ensureProviderInitialized(initial.provider);
         return;
       }
 
@@ -2130,7 +2404,7 @@ export default function App() {
       setProviderStartupStates(providerStartupStatesRef.current);
     });
     return () => { active = false; };
-  }, [addSession, bridge, ensureProviderInitialized, restoreMessagesToDraft, updateSession]);
+  }, [addSession, bridge, ensureProviderInitialized, prepareNewTerminalSession, restoreMessagesToDraft, updateSession]);
 
   useEffect(() => {
     if (!workspaceRestoreIdsRef.current.size) return;
@@ -2151,9 +2425,17 @@ export default function App() {
         )),
         applyResume: (resumeValue) => {
           const resume = asRecord(resumeValue);
+          const queryGeneration = numberValue(resume.queryGeneration, -1);
           updateSession(sessionId, (current) => {
             const model = stringValue(resume.model) || current.model;
-            return { ...current, model, effort: stringValue(resume.reasoningEffort) || current.effort, resumed: true, tokenUsage: tokenUsageForModel(current, model, preferencesRef.current) };
+            return {
+              ...current,
+              model,
+              effort: stringValue(resume.reasoningEffort) || current.effort,
+              resumed: true,
+              ...(queryGeneration >= 0 ? { queryGeneration } : {}),
+              tokenUsage: tokenUsageForModel(current, model, preferencesRef.current),
+            };
           });
         },
         read: () => requestForSession(sessionId, "readSession", { threadId: session.threadId as string, includeTurns: true }),
@@ -2199,6 +2481,18 @@ export default function App() {
     }
   }, [persistCompactionSnapshot, providerStartupStates, requestForSession, sessions, setError, updateSession, workspaceRestoreRevision]);
 
+  const terminalRestoreInFlightRef = useRef(new Set<string>());
+  useEffect(() => {
+    if (!workspaceStateReady) return;
+    for (const session of Object.values(sessions)) {
+      if (session.presentationMode !== "terminal" || !session.terminalSuspended || !session.threadId) continue;
+      if (terminalRestoreInFlightRef.current.has(session.id)) continue;
+      terminalRestoreInFlightRef.current.add(session.id);
+      void restoreTerminalSession(session.id, session.provider, session.cwd, session.threadId)
+        .finally(() => terminalRestoreInFlightRef.current.delete(session.id));
+    }
+  }, [restoreTerminalSession, sessions, workspaceStateReady]);
+
   useEffect(() => () => {
     for (const timer of workspaceRestoreRetryTimersRef.current.values()) window.clearTimeout(timer);
     workspaceRestoreRetryTimersRef.current.clear();
@@ -2228,15 +2522,26 @@ export default function App() {
     };
   }, [bridge]);
 
-  useEffect(() => {
-    const requested = new Set<string>();
+  const skillSessionKeys = useMemo(() => {
+    const keys: string[] = [];
     for (const session of Object.values(sessions)) {
+      if (normalizedDirectory(session.cwd) && session.capabilities.skills === "supported") {
+        keys.push(providerDirectoryKey(session.provider, session.cwd));
+      }
+    }
+    return [...new Set(keys)].sort().join("\n");
+  }, [sessions]);
+
+  useEffect(() => {
+    if (!skillSessionKeys) return;
+    const requested = new Set<string>();
+    for (const session of Object.values(sessionsRef.current)) {
       const key = providerDirectoryKey(session.provider, session.cwd);
       if (!normalizedDirectory(session.cwd) || requested.has(key)) continue;
       requested.add(key);
       if (session.capabilities.skills === "supported") void loadSkills(session.id, session.cwd);
     }
-  }, [loadSkills, sessions]);
+  }, [loadSkills, skillSessionKeys]);
 
   useEffect(() => {
     const unsubscribe = agentClient.onEvent(providerEvents.handleEnvelope);
@@ -2246,12 +2551,14 @@ export default function App() {
     };
   }, [agentClient, providerEvents]);
 
+  const lastReasoningEfforts = preferences.lastReasoningEfforts;
+  const modelContextWindows = preferences.modelContextWindows;
   useEffect(() => {
     setSessions((current) => Object.fromEntries(Object.entries(current).map(([id, session]) => {
-      const withDefaults = applyProviderModelDefaults(session, providerModels[session.provider], codexDefaults, preferences.lastReasoningEfforts?.[session.provider]);
+      const withDefaults = applyProviderModelDefaults(session, providerModels[session.provider], codexDefaults, lastReasoningEfforts?.[session.provider]);
       const model = withDefaults.model;
       if (!model) return [id, session];
-      const tokenUsage = tokenUsageForModel(session, model, preferences);
+      const tokenUsage = tokenUsageForModel(session, model, { ...preferences, modelContextWindows });
       if (withDefaults === session && tokenUsage === session.tokenUsage) return [id, session];
       return [id, {
         ...withDefaults,
@@ -2259,14 +2566,21 @@ export default function App() {
         tokenUsage,
       }];
     })));
-  }, [providerModels, codexDefaults, preferences]);
+  }, [providerModels, codexDefaults, lastReasoningEfforts, modelContextWindows]);
 
   useEffect(() => {
     return historyController.loadInitial(workspace);
   }, [historyController, workspace]);
 
   useEffect(() => {
-    const refresh = () => { void refreshHistory(); };
+    let lastRefreshAt = 0;
+    const MIN_REFRESH_INTERVAL_MS = 5_000;
+    const refresh = () => {
+      const now = Date.now();
+      if (now - lastRefreshAt < MIN_REFRESH_INTERVAL_MS) return;
+      lastRefreshAt = now;
+      void refreshHistory();
+    };
     const interval = window.setInterval(refresh, 120_000);
     const onFocus = () => refresh();
     const onVisibility = () => { if (document.visibilityState === "visible") refresh(); };
@@ -2346,12 +2660,10 @@ export default function App() {
     onResizeStart: startSidebarResize,
   }), [sidebarCollapsed, startSidebarResize, toggleSidebarCollapsed]);
   const sidebarToolbar = useMemo<SidebarProps["toolbar"]>(() => ({
-    pluginMarketplaceState: providerCapabilities.codex.pluginMarketplace === "supported" || providerCapabilities.claude.pluginMarketplace === "supported" ? "supported" : "temporarilyUnavailable",
     splitDisabled: layout.panes.length >= 2,
     onChooseWorkspace: chooseWorkspace,
-    onOpenPlugins: openPluginPanel,
     onSplitPane: () => splitPane(layout.activePaneId || "pane-1"),
-  }), [chooseWorkspace, layout.activePaneId, layout.panes.length, openPluginPanel, providerCapabilities.claude.pluginMarketplace, providerCapabilities.codex.pluginMarketplace, splitPane]);
+  }), [chooseWorkspace, layout.activePaneId, layout.panes.length, splitPane]);
   const sidebarWorkspace = useMemo<SidebarProps["workspace"]>(() => ({
     viewModel: {
       currentCwd: sidebarCurrentCwd,
@@ -2364,10 +2676,9 @@ export default function App() {
       onSelectWorkspace: selectWorkspace,
       onToggleFavorite: toggleFavorite,
       onSavePreference: savePreference,
-      onOpenTerminal: openWindowsTerminal,
       onOpenDirectory: openDirectoryInExplorer,
     },
-  }), [createSessionInDirectory, openDirectoryInExplorer, openWindowsTerminal, preferences.favoriteWorkspaces, savePreference, selectWorkspace, sidebarCurrentCwd, sidebarDirectoryHistory.length, toggleFavorite]);
+  }), [createSessionInDirectory, openDirectoryInExplorer, preferences.favoriteWorkspaces, savePreference, selectWorkspace, sidebarCurrentCwd, sidebarDirectoryHistory.length, toggleFavorite]);
   const sidebarHistory = useMemo<SidebarProps["history"]>(() => ({
     viewModel: {
       activeCwd: sidebarCurrentCwd,
@@ -2400,16 +2711,12 @@ export default function App() {
   const sidebarSettings = useMemo<SidebarProps["settings"]>(() => ({
     viewModel: {
       theme: preferences.theme,
-      baseFontSize,
-      displayMode,
       updateStatus,
       cliUpdateStatus,
       claudeStatus: claudeRuntimeStatus,
-      bossKeyStatus,
     },
     actions: {
       onSavePreference: savePreference,
-      onSetBossKey: setBossKey,
       onCheckForUpdates: checkForUpdates,
       onCheckCodexCliUpdates: checkCodexCliUpdates,
       onUpdateCodexCli: updateCodexCli,
@@ -2420,17 +2727,22 @@ export default function App() {
       onOpenUpdateRepository: openUpdateRepository,
       onExportDiagnostics: bridge.exportDiagnostics,
     },
-  }), [baseFontSize, bossKeyStatus, bridge.exportDiagnostics, checkClaudeCodeUpdates, checkCodexCliUpdates, checkForUpdates, claudeRuntimeStatus, cliUpdateStatus, displayMode, downloadUpdate, installUpdate, openUpdateRepository, preferences.theme, savePreference, setBossKey, updateClaudeCode, updateCodexCli, updateStatus]);
+  }), [bridge.exportDiagnostics, checkClaudeCodeUpdates, checkCodexCliUpdates, checkForUpdates, claudeRuntimeStatus, cliUpdateStatus, downloadUpdate, installUpdate, openUpdateRepository, preferences.theme, savePreference, updateClaudeCode, updateCodexCli, updateStatus]);
 
   const renderPane = (pane: PaneState) => {
-    const session = sessions[pane.activeTabId];
-    if (!session) return null;
-    return (
-      <PaneView
-        key={pane.id}
-        pane={pane}
-        session={session}
-        isActivePane={pane.id === layout.activePaneId}
+    const sessionIds = pane.tabIds.filter((sessionId) => sessionId === pane.activeTabId || sessions[sessionId]?.presentationMode === "terminal");
+    if (!sessionIds.length) return null;
+    return <div className="pane-tab-stack" key={pane.id}>
+      {sessionIds.map((sessionId) => {
+        const session = sessions[sessionId];
+        if (!session) return null;
+        const isActiveTab = session.id === pane.activeTabId;
+        return <PaneView
+          key={session.id}
+          pane={pane}
+          session={session}
+          isActivePane={pane.id === layout.activePaneId && isActiveTab}
+          isActiveTab={isActiveTab}
         models={providerModels[session.provider]}
         skills={skillsByCwd[providerDirectoryKey(session.provider, session.cwd)] ?? NO_SKILLS}
         recentCommandUsage={recentCommandUsage}
@@ -2438,7 +2750,6 @@ export default function App() {
         queuedMessages={queuedMessages[session.id] ?? NO_QUEUED_MESSAGES}
         pendingSteers={pendingSteers[session.id] ?? NO_PENDING_STEERS}
         draftRevision={draftRevisions[session.id] || 0}
-        displayMode={displayMode}
         bridge={bridge}
         onFocusPane={focusPane}
         onMoveTab={moveTab}
@@ -2461,8 +2772,13 @@ export default function App() {
         onRemoveImage={removeImage}
         onRemoveQueuedMessage={removeQueuedMessage}
         onChooseDirectory={chooseDirectoryForSession}
-      />
-    );
+        onModeChange={setPresentationMode}
+        onResumeTerminal={resumeTerminal}
+        onTerminalError={setTerminalError}
+          onTerminalSettings={applyTerminalSettings}
+        />;
+      })}
+    </div>;
   };
 
   return <div className="window-shell">
@@ -2572,7 +2888,6 @@ export default function App() {
         {layout.panes.map(renderPane)}
       </div>
     </div>
-    {pluginPanelOpen ? <Suspense fallback={<div className="plugin-overlay" role="dialog" aria-modal="true" aria-label="正在打开插件市场"><section className="plugin-panel lazy-panel-loading">正在打开插件市场</section></div>}><PluginPanel cwd={activeSession?.cwd || workspace} initialProvider={activeSession?.provider || "codex"} request={requestForPluginPanel} chooseClaudeMarketplaceDirectory={bridge.chooseClaudeMarketplaceDirectory} onClose={closePluginPanel} /></Suspense> : null}
     {tabContextMenu && contextPane ? <div
       className="tab-context-menu"
       role="menu"

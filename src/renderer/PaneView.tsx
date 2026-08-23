@@ -1,6 +1,6 @@
-import { CircleDot, CornerDownRight, ListChecks, MoreHorizontal, PanelRight, Play, RefreshCw, Square, Target, X } from "lucide-react";
+import { ArrowLeftRight, CircleDot, CornerDownRight, ListChecks, MoreHorizontal, PanelRight, Play, RefreshCw, Square, Target, X } from "lucide-react";
 import { lazy, memo, Suspense, useCallback, useEffect, useLayoutEffect, useMemo, useRef, type DragEvent } from "react";
-import type { AgentBridge, DisplayMode, JsonObject } from "../shared/protocol";
+import type { AgentBridge, JsonObject } from "../shared/protocol";
 import Composer from "./Composer";
 import { findModelOption, formatCount, type Activity, type CollaborationMode, type ImageAttachment, type ModelOption, type PaneState, type PendingSteerMessage, type QueuedMessage, type SessionState, type SkillOption } from "./domain";
 import ElapsedTimer from "./ElapsedTimer";
@@ -10,11 +10,13 @@ import { findQuestionAnchorIndex, QUESTION_ANCHOR_SELECTOR, QUESTION_SCROLL_TOP_
 import ServerRequestPanel from "./ServerRequestPanel";
 import { activitiesForMainConversation } from "./activityPresentation";
 import type { CommandUsage } from "./commandSuggestions";
+import TerminalPane from "./TerminalPane";
+import type { ClaudeTerminalSettings } from "./terminalSettings";
 
 const DetailsPanel = lazy(() => import("./DetailsPanel"));
 
 const NO_VISIBLE_ACTIVITIES: Activity[] = [];
-const NAVIGATION_BLOCKING_SELECTOR = '[aria-modal="true"], [role="menu"], .image-lightbox, .plugin-detail-overlay, .command-suggestions, .composer-more[open]';
+const NAVIGATION_BLOCKING_SELECTOR = '[aria-modal="true"], [role="menu"], .image-lightbox, .command-suggestions, .composer-more[open]';
 
 function questionNavigationBlocked(event: KeyboardEvent) {
   const target = event.target;
@@ -26,6 +28,7 @@ export interface PaneViewProps {
   pane: PaneState;
   session: SessionState;
   isActivePane: boolean;
+  isActiveTab: boolean;
   models: ModelOption[];
   skills: SkillOption[];
   recentCommandUsage: CommandUsage;
@@ -33,7 +36,6 @@ export interface PaneViewProps {
   queuedMessages: QueuedMessage[];
   pendingSteers: PendingSteerMessage[];
   draftRevision: number;
-  displayMode: DisplayMode;
   bridge: AgentBridge;
   onFocusPane: (paneId: string) => void;
   onMoveTab: (sessionId: string, targetPaneId: string, target?: { paneId: string; sessionId: string; position: "before" | "after" }, split?: "horizontal" | "vertical") => void;
@@ -56,6 +58,10 @@ export interface PaneViewProps {
   onRemoveImage: (sessionId: string, index: number) => void;
   onRemoveQueuedMessage: (sessionId: string, queuedId: string) => void;
   onChooseDirectory: (sessionId: string) => void;
+  onModeChange: (sessionId: string, mode: "workbench" | "terminal") => void;
+  onResumeTerminal: (sessionId: string) => void;
+  onTerminalError: (sessionId: string, message: string) => void;
+  onTerminalSettings: (sessionId: string, settings: ClaudeTerminalSettings) => void;
 }
 
 /**
@@ -63,7 +69,7 @@ export interface PaneViewProps {
  * 不再因为输入、计时、侧栏搜索或其他分栏的事件而整体重建。
  */
 function PaneView(props: PaneViewProps) {
-  const { pane, session, models, attachments, displayMode, bridge } = props;
+  const { pane, session, models, attachments, bridge } = props;
   const conversationRef = useRef<HTMLDivElement>(null);
   const composerMoreRef = useRef<HTMLDetailsElement>(null);
   const followLatestRef = useRef(true);
@@ -71,18 +77,19 @@ function PaneView(props: PaneViewProps) {
   const questionNavigationFrameRef = useRef<number | null>(null);
   const scrollStatesRef = useRef(new Map<string, { top: number; atBottom: boolean }>());
   const restoringSessionRef = useRef<string | null>(null);
+  const previousPresentationModeRef = useRef(session.presentationMode);
   const model = useMemo(() => findModelOption(models, session.model), [models, session.model]);
+  const claudeModel = useMemo(() => models.find((entry) => entry.id === session.model), [models, session.model]);
+  const claudeModelLabel = session.resolvedModel
+    || (session.model ? claudeModel?.displayName || session.model : "未设置");
   const efforts = useMemo(() => (model?.efforts.length ? model.efforts : [session.effort || "medium"]), [model, session.effort]);
   const supports = (capability: keyof SessionState["capabilities"]) => session.capabilities[capability] === "supported";
   const temporarilyUnavailable = (capability: keyof SessionState["capabilities"]) => session.capabilities[capability] === "temporarilyUnavailable";
   // 展示过滤只发生在渲染层，底层活动数据始终完整保留。
   const visibleActivities = useMemo(() => {
-    if (displayMode === "simple") {
-      const visible = activitiesForMainConversation(session.activities);
-      return visible.length ? visible : NO_VISIBLE_ACTIVITIES;
-    }
-    return session.activities;
-  }, [session.activities, displayMode]);
+    const visible = activitiesForMainConversation(session.activities);
+    return visible.length ? visible : NO_VISIBLE_ACTIVITIES;
+  }, [session.activities]);
   const emptySession = session.messages.length === 0 && visibleActivities.length === 0;
   const latestMessageLength = session.messages[session.messages.length - 1]?.text.length ?? 0;
   const latestActivityLength = session.activities[session.activities.length - 1]?.output?.length ?? 0;
@@ -105,10 +112,13 @@ function PaneView(props: PaneViewProps) {
   }, []);
 
   useLayoutEffect(() => {
+    const previousPresentationMode = previousPresentationModeRef.current;
+    previousPresentationModeRef.current = session.presentationMode;
     const conversation = conversationRef.current;
     if (!conversation) return undefined;
-    const saved = scrollStatesRef.current.get(session.id);
-    const atBottom = saved?.atBottom ?? true;
+    const returningFromTerminal = previousPresentationMode === "terminal" && session.presentationMode === "workbench";
+    const saved = returningFromTerminal ? undefined : scrollStatesRef.current.get(session.id);
+    const atBottom = returningFromTerminal || (saved?.atBottom ?? true);
     followLatestRef.current = atBottom;
     restoringSessionRef.current = session.id;
     conversation.scrollTop = saved && !saved.atBottom
@@ -122,7 +132,7 @@ function PaneView(props: PaneViewProps) {
       });
     });
     return () => window.cancelAnimationFrame(frame);
-  }, [session.id]);
+  }, [session.id, session.presentationMode]);
 
   useLayoutEffect(() => {
     if (!followLatestRef.current) return undefined;
@@ -131,7 +141,7 @@ function PaneView(props: PaneViewProps) {
     conversation.scrollTop = conversation.scrollHeight;
     scrollStatesRef.current.set(session.id, { top: conversation.scrollTop, atBottom: true });
     return undefined;
-  }, [session.id, session.messages.length, latestMessageLength, session.activities.length, latestActivityLength]);
+  }, [session.id, session.presentationMode, session.messages.length, latestMessageLength, session.activities.length, latestActivityLength]);
 
   const jumpToQuestion = useCallback((direction: QuestionNavigationDirection, loadAttempts = 0): boolean => {
     const conversation = conversationRef.current;
@@ -193,7 +203,11 @@ function PaneView(props: PaneViewProps) {
   };
 
   const composerToolbar = useMemo(() => <div className="pane-controls">
-    {session.capabilities.models !== "unsupported" ? <select
+    {session.capabilities.models !== "unsupported" ? session.provider === "claude" ? <span
+      className="readonly-control readonly-model"
+      aria-label={`当前模型：${claudeModelLabel}`}
+      title={`当前模型：${claudeModelLabel}`}
+    >{claudeModelLabel}</span> : <select
       value={model?.id || session.model}
       onChange={(event) => props.onSetSessionSetting(session.id, "model", event.target.value)}
       aria-label="选择模型"
@@ -204,7 +218,11 @@ function PaneView(props: PaneViewProps) {
       {session.model && !model ? <option value={session.model}>{session.model}</option> : null}
       {models.length ? models.map((entry) => <option value={entry.id} key={entry.id}>{entry.displayName}</option>) : !session.model ? <option value="">加载模型</option> : null}
     </select> : null}
-    {session.capabilities.effort !== "unsupported" ? <select
+    {session.capabilities.effort !== "unsupported" ? session.provider === "claude" ? <span
+      className="readonly-control readonly-effort"
+      aria-label={`当前思考等级：${session.effort || "未设置"}`}
+      title={`当前思考等级：${session.effort || "未设置"}`}
+    >{session.effort || "未设置"}</span> : <select
       value={session.effort}
       onChange={(event) => props.onSetSessionSetting(session.id, "effort", event.target.value)}
       aria-label="选择思考等级"
@@ -229,15 +247,38 @@ function PaneView(props: PaneViewProps) {
       </div>
     </details>
   </div>, [
-    efforts, model?.displayName, models, props.onCompact, props.onSetCollaborationMode, props.onSetDetailView,
+    claudeModelLabel, efforts, model?.displayName, models, props.onCompact, props.onSetCollaborationMode, props.onSetDetailView,
     props.onSetSessionSetting, props.onToggleDetails, session.collaborationMode,
-    session.compactionCount, session.detailView, session.detailsOpen, session.effort, session.id, session.model, session.readOnly,
+    session.compactionCount, session.detailView, session.detailsOpen, session.effort, session.id, session.model, session.provider, session.readOnly,
+    session.resolvedModel,
     session.tokenUsage.total, session.tokenUsage.used,
   ]);
 
+  if (session.presentationMode === "terminal") {
+    return (
+      <section
+        className={`main-panel pane-panel terminal-pane-panel${props.isActivePane ? " active-pane" : ""}${props.isActiveTab ? "" : " inactive-tab"}`}
+        aria-hidden={!props.isActiveTab}
+        onMouseDown={() => props.onFocusPane(pane.id)}
+      >
+        <TerminalPane
+          key={session.id}
+          session={session}
+          bridge={bridge}
+          isActive={props.isActivePane}
+          onModeChange={(mode) => props.onModeChange(session.id, mode)}
+          onResume={() => props.onResumeTerminal(session.id)}
+          onError={(message) => props.onTerminalError(session.id, message)}
+          onSettings={(settings) => props.onTerminalSettings(session.id, settings)}
+        />
+      </section>
+    );
+  }
+
   return (
     <section
-      className={`main-panel pane-panel ${props.isActivePane ? "active-pane" : ""}${emptySession ? " empty-pane" : ""}`}
+      className={`main-panel pane-panel ${props.isActivePane ? "active-pane" : ""}${emptySession ? " empty-pane" : ""}${props.isActiveTab ? "" : " inactive-tab"}`}
+      aria-hidden={!props.isActiveTab}
       onMouseDown={() => props.onFocusPane(pane.id)}
       onDragOver={(event) => event.preventDefault()}
       onDrop={handleDrop}
@@ -264,12 +305,19 @@ function PaneView(props: PaneViewProps) {
           key={session.id}
           messages={session.messages}
           visibleActivities={visibleActivities}
-          displayMode={displayMode}
           bridge={bridge}
           cwd={session.cwd}
           provider={session.provider}
         />
       </div>
+
+      {session.provider !== "claude" && <button
+        className="presentation-toggle workbench-presentation-toggle"
+        onClick={() => props.onModeChange(session.id, "terminal")}
+        title="切换到黑窗口"
+        aria-label="切换到黑窗口"
+        disabled={session.status === "error" && !session.threadId}
+      ><ArrowLeftRight size={16} /></button>}
 
       <div className="composer-area">
         {session.readOnly ? <div className="read-only-banner" role="status"><CircleDot size={15} /><span>该会话正被其他程序使用，当前为只读模式。</span><button type="button" onClick={() => props.onToggleDetails(session.id)}>{session.detailsOpen ? "关闭详情" : "查看详情"}</button><button type="button" onClick={() => props.onRetryReadOnly(session.id)}>重新尝试编辑</button></div> : null}
@@ -287,6 +335,7 @@ function PaneView(props: PaneViewProps) {
         {!session.readOnly ? <Composer
           key={`${session.id}-${props.draftRevision}`}
           sessionId={session.id}
+          provider={session.provider}
           cwd={session.cwd}
           threadId={session.threadId}
           skills={props.skills}

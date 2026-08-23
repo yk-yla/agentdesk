@@ -43,21 +43,31 @@ export function desktopUpdateErrorMessage(error: unknown) {
   const message = error instanceof Error ? error.message : String(error);
   if (/404|not found|no published versions|latest version/i.test(message)) return "GitHub 还没有可用的正式版本，请先发布一个版本。";
   if (/401|403|unauthorized|forbidden|rate limit/i.test(message)) return "更新服务器暂时拒绝请求，请稍后重试。";
-  if (/net::|network|fetch|socket|timeout|timed out/i.test(message)) return "无法连接 GitHub，请检查网络后重试。";
+  if (/net::|network|fetch|socket|timeout|timed out|ETIMEDOUT|ECONNREFUSED|ENOTFOUND|ECONNRESET/i.test(message)) return "无法连接 GitHub（需要外网环境），请确认网络可以访问 github.com 后重试，或联系 IT 同事协助。";
   return "更新操作失败，请稍后重试。";
 }
 
 export class DesktopUpdateManager {
   private initialized = false;
   private busy = false;
+  private disposed = false;
   private status: DesktopUpdateStatus = {
     phase: "idle",
     currentVersion: "",
-    message: "仅在手动检查时连接公开 GitHub Release。",
+    message: "等待检查更新。",
     repositoryUrl: UPDATE_REPOSITORY_URL,
   };
 
   constructor(private readonly dependencies: DesktopUpdateManagerDependencies) {}
+
+  initialize() {
+    if (this.disposed || !this.dependencies.isPackaged()) return;
+    this.initializeUpdater();
+  }
+
+  dispose() {
+    this.disposed = true;
+  }
 
   currentStatus() {
     this.status = {
@@ -80,9 +90,10 @@ export class DesktopUpdateManager {
   }
 
   async check() {
+    if (this.disposed) return this.currentStatus();
     if (!this.dependencies.isPackaged()) return this.setStatus({ phase: "unsupported", message: "开发环境不检查软件更新。", progress: undefined });
     if (this.busy) return this.currentStatus();
-    this.initialize();
+    this.initializeUpdater();
     this.busy = true;
     this.setStatus({ phase: "checking", availableVersion: undefined, releaseNotes: undefined, message: "正在检查新版本。", progress: undefined });
     try {
@@ -122,7 +133,7 @@ export class DesktopUpdateManager {
     }
   }
 
-  private initialize() {
+  private initializeUpdater() {
     if (this.initialized) return;
     this.initialized = true;
     const updater = this.dependencies.updater;
@@ -149,6 +160,7 @@ export class DesktopUpdateManager {
       this.setStatus({ phase: "error", progress: undefined, message: desktopUpdateErrorMessage(error) });
     });
   }
+
 }
 
 function normalizeReleaseNotes(value: UpdateInfo["releaseNotes"], fallbackVersion: string): DesktopReleaseNote[] {

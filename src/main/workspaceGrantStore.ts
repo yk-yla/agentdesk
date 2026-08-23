@@ -59,4 +59,22 @@ export class WorkspaceGrantStore {
     await writeTextFileAtomicAsync(filePath, JSON.stringify(next, null, 2));
     return next;
   }
+
+  async revoke(directory: string) {
+    const result = this.readFile();
+    if (result.corrupt) {
+      quarantineCorruptFile(this.resolvePath());
+      throw new Error("工作区授权文件损坏，已保留备份，请稍后重试。");
+    }
+    const key = process.platform === "win32" ? directory.trim().toLowerCase() : directory.trim();
+    const next = result.paths.filter((entry) => {
+      const entryKey = process.platform === "win32" ? entry.toLowerCase() : entry;
+      return entryKey !== key;
+    });
+    if (next.length === result.paths.length) return next;
+    const filePath = this.resolvePath();
+    mkdirSync(path.dirname(filePath), { recursive: true });
+    await writeTextFileAtomicAsync(filePath, JSON.stringify(next, null, 2));
+    return next;
+  }
 }

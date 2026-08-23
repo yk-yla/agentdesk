@@ -26,6 +26,7 @@ describe("CodexCliUpdateManager", () => {
     const notifications: string[] = [];
     let installed = "1.0.0";
     let restarts = 0;
+    const terminalGates: boolean[] = [];
     try {
       const manager = new CodexCliUpdateManager({
         processSupervisor: new ProcessSupervisor(async () => undefined),
@@ -38,6 +39,7 @@ describe("CodexCliUpdateManager", () => {
         isQuitting: () => false,
         emitStatus: (status) => statuses.push(status),
         notify: (title) => notifications.push(title),
+        setTerminalProviderBlocked: (_provider, blocked) => terminalGates.push(blocked),
         environment: {},
         operations: {
           readInstalledVersion: async () => installed,
@@ -51,6 +53,7 @@ describe("CodexCliUpdateManager", () => {
       assert.equal((await manager.update()).phase, "upToDate");
       assert.equal(restarts, 1);
       assert.deepEqual(notifications, ["Codex CLI 已更新"]);
+      assert.deepEqual(terminalGates, [true, false]);
       assert.equal(manager.active, false);
       manager.dispose();
     } finally {

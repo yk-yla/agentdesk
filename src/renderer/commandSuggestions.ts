@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState } from "react";
 import type { SkillOption } from "./domain";
-import type { AgentCapabilities } from "../shared/agentProtocol";
+import type { AgentCapabilities, AgentProvider } from "../shared/agentProtocol";
 
 export type BuiltInCommandName = "clear" | "compact" | "status" | "review" | "mcp" | "model" | "rename" | "plan";
 
@@ -47,11 +47,12 @@ export function slashQuery(value: string) {
   return match ? match[1].toLowerCase() : null;
 }
 
-export function suggestionsFor(value: string, skills: SkillOption[], capabilities?: AgentCapabilities, recentUsage: CommandUsage = {}): CommandSuggestion[] {
+export function suggestionsFor(value: string, skills: SkillOption[], capabilities?: AgentCapabilities, recentUsage: CommandUsage = {}, provider?: AgentProvider): CommandSuggestion[] {
   const query = slashQuery(value);
   if (query === null) return [];
   const commands = BUILT_IN_COMMANDS.filter((entry) => {
     if (!entry.name.startsWith(query)) return false;
+    if (entry.name === "model" && provider === "claude") return false;
     if (!capabilities) return true;
     if (entry.name === "model") return capabilities.models !== "unsupported";
     if (entry.name === "rename") return capabilities.rename !== "unsupported";
@@ -91,8 +92,8 @@ export function resolveComposerInput(text: string, skills: SkillOption[], capabi
   return skill ? { kind: "skill", skill, prompt } : { kind: "message", text };
 }
 
-export function useCommandSuggestions(value: string, skills: SkillOption[], capabilities?: AgentCapabilities, recentUsage: CommandUsage = {}) {
-  const suggestions = useMemo(() => suggestionsFor(value, skills, capabilities, recentUsage), [capabilities, recentUsage, skills, value]);
+export function useCommandSuggestions(value: string, skills: SkillOption[], capabilities?: AgentCapabilities, recentUsage: CommandUsage = {}, provider?: AgentProvider) {
+  const suggestions = useMemo(() => suggestionsFor(value, skills, capabilities, recentUsage, provider), [capabilities, provider, recentUsage, skills, value]);
   const [selectedIndex, setSelectedIndex] = useState(0);
 
   useEffect(() => {

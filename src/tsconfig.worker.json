@@ -12,10 +12,7 @@
     "types": ["node"]
   },
   "include": [
-    "main/providers/claude/claudeWorker.mts",
     "main/providers/claude/claudeWorkerProtocol.ts",
-    "main/providers/claude/claudeRedaction.ts",
-    "main/providers/claude/claudeImageInput.ts",
     "main/providers/claude/claudeHistorySearch.ts",
     "shared/protocol.ts",
     "shared/agentProtocol.ts"

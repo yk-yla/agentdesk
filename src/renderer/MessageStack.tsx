@@ -1,9 +1,8 @@
 import { Check, FolderOpen, Copy } from "lucide-react";
 import { Fragment, lazy, memo, Suspense, useMemo, useState } from "react";
-import type { AgentBridge, DisplayMode } from "../shared/protocol";
+import type { AgentBridge } from "../shared/protocol";
 import type { AgentProvider } from "../shared/agentProtocol";
 import ActivityIcon from "./ActivityIcon";
-import ActivityOutput from "./ActivityOutput";
 import { basename, type Activity, type Message } from "./domain";
 import { formatMessageTimestamp, getMessageTimeDivider } from "./messageTimestamp";
 
@@ -16,7 +15,6 @@ const EMPTY_IMAGES: Message["images"] = [];
 interface Props {
   messages: Message[];
   visibleActivities: Activity[];
-  displayMode: DisplayMode;
   bridge: AgentBridge;
   cwd: string;
   provider: AgentProvider;
@@ -91,10 +89,9 @@ const MemoMessageItem = memo(MessageItem);
  * 只渲染最近一段消息，历史更早的部分按需展开。
  * 长会话首次挂载不再一次性解析全部 Markdown。
  */
-function MessageStackBase({ messages, visibleActivities, displayMode, bridge, cwd, provider }: Props) {
+function MessageStackBase({ messages, visibleActivities, bridge, cwd, provider }: Props) {
   const [visibleCount, setVisibleCount] = useState(MESSAGE_WINDOW);
-  const [activityWindow, setActivityWindow] = useState({ mode: displayMode, count: ACTIVITY_WINDOW });
-  const visibleActivityCount = activityWindow.mode === displayMode ? activityWindow.count : ACTIVITY_WINDOW;
+  const [visibleActivityCount, setVisibleActivityCount] = useState(ACTIVITY_WINDOW);
   const shown = useMemo(
     () => (messages.length > visibleCount ? messages.slice(messages.length - visibleCount) : messages),
     [messages, visibleCount],
@@ -138,14 +135,13 @@ function MessageStackBase({ messages, visibleActivities, displayMode, bridge, cw
           </Fragment>
         );
       })}
-      {hiddenActivities > 0 ? <button className="history-more" onClick={() => setActivityWindow({ mode: displayMode, count: visibleActivityCount + ACTIVITY_WINDOW })}>加载更早活动 · 剩余 {hiddenActivities}</button> : null}
+      {hiddenActivities > 0 ? <button className="history-more" onClick={() => setVisibleActivityCount((count) => count + ACTIVITY_WINDOW)}>加载更早活动 · 剩余 {hiddenActivities}</button> : null}
       {shownActivities.map((activity, index) => (
         <article className={`visible-activity ${activity.status}`} key={`visible-${activity.id}:${index}`}>
           <ActivityIcon kind={activity.kind} status={activity.status} />
           <div>
             <strong>{activity.title}</strong>
             <span>{activity.detail}</span>
-            {displayMode === "full" ? <ActivityOutput output={activity.output || ""} variant="main" /> : null}
           </div>
         </article>
       ))}

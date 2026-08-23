@@ -1,7 +1,6 @@
 import { mkdirSync, readFileSync, statSync } from "node:fs";
 import path from "node:path";
-import { DEFAULT_BASE_FONT_SIZE, MAX_BASE_FONT_SIZE, MIN_BASE_FONT_SIZE, type ClaudeModelCache, type ClaudeModelCacheModel, type CompactionRecord, type DesktopPreferences, type DisplayMode, type ThemeId } from "../shared/protocol";
-import { DEFAULT_BOSS_KEY, normalizeBossKeyAccelerator } from "../shared/bossKey";
+import { DEFAULT_BASE_FONT_SIZE, DEFAULT_PRESENTATION_MODE, MAX_BASE_FONT_SIZE, MIN_BASE_FONT_SIZE, type ClaudeModelCache, type ClaudeModelCacheModel, type CompactionRecord, type DesktopPreferences, type PresentationMode, type ThemeId } from "../shared/protocol";
 import { normalizeFavoriteSessionSummaries } from "../shared/favoriteSessions";
 import { writeTextFileAtomicAsync } from "./atomicFile";
 import { quarantineCorruptFile } from "./corruptFile";
@@ -24,12 +23,12 @@ export const DEFAULT_PREFERENCES: DesktopPreferences = {
   favoriteSessionSummaries: {},
   modelContextWindows: {},
   lastReasoningEfforts: {},
+  lastPresentationModes: { codex: DEFAULT_PRESENTATION_MODE, claude: DEFAULT_PRESENTATION_MODE },
+  lastCodexPresentationMode: DEFAULT_PRESENTATION_MODE,
   recentCommandUsage: {},
   compactionCounts: {},
   codexCompactionCounts: {},
   theme: "github-light",
-  displayMode: "simple",
-  bossKey: DEFAULT_BOSS_KEY,
 };
 
 const THEME_IDS: ThemeId[] = [
@@ -38,10 +37,6 @@ const THEME_IDS: ThemeId[] = [
 
 export function normalizeTheme(value: unknown): ThemeId {
   return typeof value === "string" && THEME_IDS.includes(value as ThemeId) ? value as ThemeId : DEFAULT_PREFERENCES.theme;
-}
-
-export function normalizeDisplayMode(value: unknown): DisplayMode {
-  return value === "full" || value === "standard" || value === "raw" ? "full" : "simple";
 }
 
 export function normalizeSidebarWidth(value: unknown) {
@@ -63,6 +58,21 @@ export function normalizeLastReasoningEfforts(value: unknown): NonNullable<Deskt
     const effort = typeof record[provider] === "string" ? record[provider].trim() : "";
     return effort && effort.length <= 32 ? [[provider, effort]] : [];
   }));
+}
+
+export function normalizeLastPresentationModes(value: unknown): NonNullable<DesktopPreferences["lastPresentationModes"]> {
+  const record = value && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : {};
+  return Object.fromEntries((['codex', 'claude'] as const).map((provider) => {
+    const mode = record[provider];
+    return [provider, mode === "terminal" ? "terminal" : DEFAULT_PRESENTATION_MODE] as const;
+  })) as Record<"codex" | "claude", PresentationMode>;
+}
+
+export function normalizeLastCodexPresentationMode(value: unknown, legacy?: unknown): PresentationMode {
+  if (value === "terminal") return "terminal";
+  if (value === "workbench") return "workbench";
+  const legacyRecord = legacy && typeof legacy === "object" && !Array.isArray(legacy) ? legacy as Record<string, unknown> : {};
+  return legacyRecord.codex === "terminal" ? "terminal" : DEFAULT_PRESENTATION_MODE;
 }
 
 export function normalizeRecentCommandUsage(value: unknown): NonNullable<DesktopPreferences["recentCommandUsage"]> {
@@ -147,8 +157,6 @@ export function normalizePreferences(value: unknown): DesktopPreferences {
   const preferences: DesktopPreferences = {
     ...DEFAULT_PREFERENCES,
     theme: normalizeTheme(parsed.theme),
-    displayMode: normalizeDisplayMode(parsed.displayMode),
-    bossKey: normalizeBossKeyAccelerator(parsed.bossKey) || DEFAULT_BOSS_KEY,
     lastWorkspace: typeof parsed.lastWorkspace === "string" ? parsed.lastWorkspace : "",
     favoriteWorkspaces: Array.isArray(parsed.favoriteWorkspaces) ? parsed.favoriteWorkspaces.filter((item): item is string => typeof item === "string").slice(0, 32) : [],
     sidebarWidth: normalizeSidebarWidth(parsed.sidebarWidth),
@@ -161,6 +169,8 @@ export function normalizePreferences(value: unknown): DesktopPreferences {
     modelContextWindows: normalizeModelContextWindows(parsed.modelContextWindows),
     ...(claudeModelCache ? { claudeModelCache } : {}),
     lastReasoningEfforts: normalizeLastReasoningEfforts(parsed.lastReasoningEfforts),
+    lastPresentationModes: normalizeLastPresentationModes(parsed.lastPresentationModes),
+    lastCodexPresentationMode: normalizeLastCodexPresentationMode(parsed.lastCodexPresentationMode, parsed.lastPresentationModes),
     recentCommandUsage: normalizeRecentCommandUsage(parsed.recentCommandUsage),
     compactionCounts: normalizeCompactionCounts({
       ...normalizeCompactionCounts(parsed.codexCompactionCounts),

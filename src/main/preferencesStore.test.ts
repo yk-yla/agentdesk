@@ -3,7 +3,7 @@ import { mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "n
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { describe, it } from "node:test";
-import { DEFAULT_PREFERENCES, normalizeClaudeModelCache, normalizePreferences, normalizeRecentCommandUsage, PreferencesStore } from "./preferencesStore";
+import { DEFAULT_PREFERENCES, normalizeClaudeModelCache, normalizeLastPresentationModes, normalizePreferences, normalizeRecentCommandUsage, PreferencesStore } from "./preferencesStore";
 
 async function withStore(run: (store: PreferencesStore, filePath: string) => void | Promise<void>) {
   const directory = mkdtempSync(path.join(tmpdir(), "agentdesk-preferences-"));
@@ -29,13 +29,10 @@ describe("PreferencesStore", () => {
   });
 
   it("normalizes legacy and untrusted preference values", () => {
-    assert.equal(normalizePreferences({ theme: "dracula" }).bossKey, "F2");
     assert.equal(normalizePreferences({ theme: "system" }).theme, "github-light");
 
     const preferences = normalizePreferences({
       theme: "graphite",
-      displayMode: "standard",
-      bossKey: "ctrl+shift+k",
       sidebarWidth: 999,
       baseFontSize: 99,
       favoriteWorkspaces: Array.from({ length: 40 }, (_, index) => `favorite-${index}`),
@@ -45,6 +42,7 @@ describe("PreferencesStore", () => {
         invalid: { tokens: -1, updatedAt: 1 },
       },
       lastReasoningEfforts: { codex: " xhigh ", claude: "high", unknown: "medium" },
+      lastPresentationModes: { codex: "terminal", claude: "workbench", unknown: "terminal", invalid: "chat" },
       recentCommandUsage: { "command:status": 20, "skill:review": 30, invalid: -1, bad: "later" },
       codexCompactionCounts: {
         "codex:thread-1": { count: 12, eventIds: ["compact-1", "compact-2", "compact-1"], updatedAt: 100 },
@@ -58,14 +56,14 @@ describe("PreferencesStore", () => {
     });
 
     assert.equal(preferences.theme, "github-light");
-    assert.equal(preferences.displayMode, "full");
-    assert.equal(preferences.bossKey, "Control+Shift+K");
+    assert.deepEqual(preferences.lastPresentationModes, { codex: "terminal", claude: "workbench" });
     assert.equal(preferences.sidebarWidth, 480);
     assert.equal(preferences.baseFontSize, 14);
     assert.equal(preferences.favoriteWorkspaces.length, 32);
     assert.deepEqual(preferences.sessionAliases, { valid: "Title" });
     assert.deepEqual(preferences.modelContextWindows, { valid: { tokens: 200_000, updatedAt: 2 } });
     assert.deepEqual(preferences.lastReasoningEfforts, { codex: "xhigh", claude: "high" });
+    assert.deepEqual(preferences.lastPresentationModes, { codex: "terminal", claude: "workbench" });
     assert.deepEqual(preferences.recentCommandUsage, { "skill:review": 30, "command:status": 20 });
     assert.deepEqual(preferences.codexCompactionCounts, { "codex:thread-1": { count: 12, eventIds: ["compact-1", "compact-2"], updatedAt: 100 } });
     assert.deepEqual(preferences.compactionCounts, {
@@ -78,6 +76,15 @@ describe("PreferencesStore", () => {
 
   it("keeps recent command usage sorted and bounded", () => {
     assert.deepEqual(normalizeRecentCommandUsage({ "command:old": 1, "skill:new": 3, "command:middle": 2, invalid: 4 }), { "skill:new": 3, "command:middle": 2, "command:old": 1 });
+  });
+
+  it("normalizes the per-provider presentation mode preference", () => {
+    assert.deepEqual(normalizeLastPresentationModes({ codex: "terminal", claude: "workbench", unknown: "terminal" }), {
+      codex: "terminal",
+      claude: "workbench",
+    });
+    assert.deepEqual(normalizeLastPresentationModes({ codex: "chat", claude: 1 }), { codex: "workbench", claude: "workbench" });
+    assert.deepEqual(normalizeLastPresentationModes(null), { codex: "workbench", claude: "workbench" });
   });
 
   it("accepts only the three supported themes and migrates removed themes", async () => {
@@ -115,12 +122,11 @@ describe("PreferencesStore", () => {
 
   it("merges, validates and atomically persists patches", async () => {
     await withStore(async (store, filePath) => {
-      await store.write({ lastWorkspace: "first", theme: "modern-dark", bossKey: "Alt+Q", lastReasoningEfforts: { codex: "xhigh", claude: "high" } });
+      await store.write({ lastWorkspace: "first", theme: "modern-dark", lastReasoningEfforts: { codex: "xhigh", claude: "high" } });
       const result = await store.write({ lastWorkspace: "second", sidebarWidth: 100, baseFontSize: 13 });
 
       assert.equal(result.lastWorkspace, "second");
       assert.equal(result.theme, "modern-dark");
-      assert.equal(result.bossKey, "Alt+Q");
       assert.equal(result.sidebarWidth, 184);
       assert.equal(result.baseFontSize, 13);
       assert.deepEqual(result.lastReasoningEfforts, { codex: "xhigh", claude: "high" });

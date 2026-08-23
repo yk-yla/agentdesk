@@ -1,4 +1,4 @@
-import { Download, ExternalLink, FileDown, RefreshCw } from "lucide-react";
+import { Download, FileDown, RefreshCw } from "lucide-react";
 import { memo, useState } from "react";
 import type { ClaudeRuntimeStatus, CodexCliUpdateStatus, DesktopUpdateStatus, DiagnosticExport } from "../shared/protocol";
 
@@ -8,7 +8,7 @@ interface Props {
   onCheck: () => Promise<void>;
   onDownload: () => Promise<void>;
   onInstall: () => Promise<void>;
-  onOpenRepository: () => Promise<void>;
+  onOpenRepository?: () => Promise<void>;
   onCheckCli: () => Promise<void>;
   onUpdateCli: () => Promise<void>;
   claudeStatus: ClaudeRuntimeStatus;
@@ -17,119 +17,77 @@ interface Props {
   onExportDiagnostics: () => Promise<DiagnosticExport | null>;
 }
 
-function formatCheckTime(value?: number) {
-  return value ? new Intl.DateTimeFormat("zh-CN", { month: "numeric", day: "numeric", hour: "2-digit", minute: "2-digit" }).format(value) : "-";
+function shortStatus(phase: string, message: string, availableVersion?: string) {
+  if (phase === "available") return `有新版 v${availableVersion || ""}`.trim();
+  if (phase === "upToDate") return "已是最新版本";
+  if (phase === "checking") return "检查中…";
+  if (phase === "updating") return "更新中…";
+  if (phase === "downloaded") return "新版已下载";
+  if (phase === "notInstalled") return "未安装";
+  if (phase === "unsupported") return "当前版本不支持更新";
+  if (phase === "error") return "检查失败，请稍后重试";
+  return message || "尚未检查";
 }
 
-function UpdateSettingsBase({ status, cliStatus, claudeStatus, onCheck, onDownload, onInstall, onOpenRepository, onCheckCli, onUpdateCli, onCheckClaude, onUpdateClaude, onExportDiagnostics }: Props) {
+function UpdateSettingsBase({ status, cliStatus, claudeStatus, onCheck, onDownload, onInstall, onCheckCli, onUpdateCli, onCheckClaude, onUpdateClaude, onExportDiagnostics }: Props) {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
   const [cliBusy, setCliBusy] = useState(false);
-  const [cliError, setCliError] = useState("");
   const [claudeBusy, setClaudeBusy] = useState(false);
   const [diagnosticsBusy, setDiagnosticsBusy] = useState(false);
   const [diagnosticsMessage, setDiagnosticsMessage] = useState("");
 
   const run = async (action: () => Promise<void>) => {
     if (busy) return;
-    setBusy(true);
-    setError("");
-    try {
-      await action();
-    } catch (reason) {
-      setError(reason instanceof Error ? reason.message : "操作失败，请重试。");
-    } finally {
-      setBusy(false);
-    }
+    setBusy(true); setError("");
+    try { await action(); } catch (reason) { setError(reason instanceof Error ? reason.message : "操作失败，请重试"); } finally { setBusy(false); }
   };
-
-  const install = () => {
-    if (!window.confirm("软件将自动安装并重启。正在运行的任务会停止，其他可恢复状态会在重启后恢复。确定现在安装吗？")) return;
-    void run(onInstall);
-  };
-
-  const checking = status.phase === "checking";
-  const downloading = status.phase === "downloading";
-  const unsupported = status.phase === "unsupported";
-  const cliChecking = cliStatus.phase === "checking";
-  const cliUpdating = cliStatus.phase === "updating";
-  const cliWorking = cliChecking || cliUpdating || cliBusy;
-
   const runCli = async (action: () => Promise<void>) => {
-    if (cliWorking) return;
+    if (cliBusy || cliStatus.phase === "checking" || cliStatus.phase === "updating") return;
     setCliBusy(true);
-    setCliError("");
-    try {
-      await action();
-    } catch (reason) {
-      setCliError(reason instanceof Error ? reason.message : "操作失败，请重试。");
-    } finally {
-      setCliBusy(false);
-    }
+    try { await action(); } finally { setCliBusy(false); }
   };
-
-  const canRetryCliUpdate = cliStatus.phase === "error" && Boolean(cliStatus.latestVersion) && cliStatus.latestVersion !== cliStatus.currentVersion;
-  const claudeUpdating = claudeBusy || claudeStatus.phase === "checking" || claudeStatus.phase === "updating";
-  const claudeAvailable = claudeStatus.phase === "available";
-
   const runClaude = async (action: () => Promise<void>) => {
-    if (claudeUpdating) return;
+    if (claudeBusy || claudeStatus.phase === "checking" || claudeStatus.phase === "updating") return;
     setClaudeBusy(true);
     try { await action(); } finally { setClaudeBusy(false); }
   };
-
+  const install = () => {
+    if (!window.confirm("软件将自动安装并重启。确定现在安装吗？")) return;
+    void run(onInstall);
+  };
   const exportDiagnostics = async () => {
     if (diagnosticsBusy) return;
-    setDiagnosticsBusy(true);
-    setDiagnosticsMessage("");
+    setDiagnosticsBusy(true); setDiagnosticsMessage("");
     try {
       const result = await onExportDiagnostics();
       if (result) setDiagnosticsMessage(`已导出：${result.path}`);
-    } catch (reason) {
-      setDiagnosticsMessage(reason instanceof Error ? reason.message : "导出失败，请重试。");
-    } finally {
-      setDiagnosticsBusy(false);
-    }
+    } catch (reason) { setDiagnosticsMessage(reason instanceof Error ? reason.message : "导出失败，请重试"); }
+    finally { setDiagnosticsBusy(false); }
   };
 
+  const appBusy = busy || status.phase === "checking" || status.phase === "downloading";
+  const cliBusyNow = cliBusy || cliStatus.phase === "checking" || cliStatus.phase === "updating";
+  const claudeBusyNow = claudeBusy || claudeStatus.phase === "checking" || claudeStatus.phase === "updating";
+
   return <div className="update-settings">
-    <section className="cli-update-section">
-      <div className="update-heading"><strong>Codex CLI</strong><span>{cliStatus.currentVersion ? `v${cliStatus.currentVersion}` : "未安装"}</span></div>
-      <div className="cli-version-row">
-        <span>{cliStatus.latestVersion ? `最新 v${cliStatus.latestVersion}` : "最新版本待检查"}</span>
-        <button className="bare-button" onClick={() => void runCli(onCheckCli)} disabled={cliWorking} title="刷新 Codex CLI 版本" aria-label="刷新 Codex CLI 版本"><RefreshCw className={cliChecking ? "spin" : ""} size={12} /></button>
-      </div>
-      <div className={`update-status cli-status ${cliStatus.phase}`}>{cliError || cliStatus.message}</div>
-      {cliStatus.phase === "available" || canRetryCliUpdate
-        ? <button className="update-action primary cli-update-action" onClick={() => void runCli(onUpdateCli)} disabled={cliWorking}><Download size={13} />{canRetryCliUpdate ? "重试更新" : `更新到 v${cliStatus.latestVersion}`}</button>
-        : cliUpdating ? <button className="update-action primary cli-update-action" disabled><RefreshCw className="spin" size={13} />更新中</button> : null}
-      <div className="cli-check-meta"><span>上次 {formatCheckTime(cliStatus.checkedAt)}</span><span>下次 {formatCheckTime(cliStatus.nextCheckAt)}</span></div>
+    <div className="settings-section-title">更新</div>
+    <section className="update-row">
+      <div className="update-row-info"><strong>AgentDesk</strong><span>当前 v{status.currentVersion || "-"}</span><em className={status.phase}>{error || shortStatus(status.phase, status.message, status.availableVersion)}</em></div>
+      <div className="update-row-actions">{status.phase === "available" ? <button className="update-action primary" onClick={() => void run(onDownload)} disabled={appBusy}><Download size={13} />更新</button> : status.phase === "downloaded" ? <button className="update-action primary" onClick={install} disabled={busy}><RefreshCw size={13} />重启安装</button> : <button className="bare-button" onClick={() => void run(onCheck)} disabled={appBusy || status.phase === "unsupported"} title="检查 AgentDesk 更新" aria-label="检查 AgentDesk 更新"><RefreshCw className={status.phase === "checking" ? "spin" : ""} size={14} /></button>}</div>
     </section>
-    <section className="claude-runtime-section">
-      <div className="update-heading"><strong>Claude Code</strong><span>{claudeStatus.binaryVersion ? `v${claudeStatus.binaryVersion}` : "未检测到受管二进制"}</span></div>
-      <div className="cli-version-row"><span>Agent SDK {claudeStatus.sdkVersion || "-"} · {claudeStatus.binarySource === "managed" ? "受管二进制" : "SDK 随包二进制"}</span><button className="bare-button" onClick={() => void runClaude(onCheckClaude)} disabled={claudeUpdating} title="刷新 Claude Code 版本" aria-label="刷新 Claude Code 版本"><RefreshCw className={claudeStatus.phase === "checking" ? "spin" : ""} size={12} /></button></div>
-      <div className={`update-status ${claudeStatus.phase}`}>{claudeStatus.message}</div>
-      <div className={`update-status ${claudeStatus.credentialsAvailable ? "ready" : "error"}`}>{claudeStatus.credentialMessage}</div>
-      {claudeAvailable ? <button className="update-action primary" onClick={() => void runClaude(onUpdateClaude)} disabled={claudeUpdating}><Download size={13} />更新到 v{claudeStatus.latestVersion}</button> : null}
-      <div className="cli-check-meta"><span>上次 {formatCheckTime(claudeStatus.checkedAt)}</span></div>
+    <section className="update-row">
+      <div className="update-row-info"><strong>Codex CLI</strong><span>当前 {cliStatus.currentVersion ? `v${cliStatus.currentVersion}` : "未安装"}</span><em className={cliStatus.phase}>{shortStatus(cliStatus.phase, cliStatus.message, cliStatus.latestVersion)}</em></div>
+      <div className="update-row-actions">{cliStatus.phase === "available" ? <button className="update-action primary" onClick={() => void runCli(onUpdateCli)} disabled={cliBusyNow}><Download size={13} />更新</button> : <button className="bare-button" onClick={() => void runCli(onCheckCli)} disabled={cliBusyNow} title="检查 Codex CLI 更新" aria-label="检查 Codex CLI 更新"><RefreshCw className={cliStatus.phase === "checking" ? "spin" : ""} size={14} /></button>}</div>
     </section>
-    <section className="desktop-update-section">
-      <div className="update-heading"><strong>软件更新</strong><span>v{status.currentVersion || "-"}</span></div>
-      <div className="update-auth-row">
-        <span>更新来源：公开 GitHub 仓库</span>
-        <button className="bare-button" onClick={() => void run(onOpenRepository)} title="打开更新仓库" aria-label="打开更新仓库"><ExternalLink size={12} /></button>
-      </div>
-      <div className={`update-status ${status.phase}`}>{error || status.message}</div>
-      {status.releaseNotes?.length ? <div className="release-notes" aria-label="更新内容">{status.releaseNotes.map((release) => <article className="release-note" key={`${release.version}-${release.note.slice(0, 20)}`}><strong>v{release.version}</strong><div>{release.note || "暂无更新说明。"}</div></article>)}</div> : null}
-      {status.phase === "available" ? <button className="update-action" onClick={() => void run(onDownload)} disabled={busy}><Download size={13} />下载 v{status.availableVersion}</button>
-        : status.phase === "downloaded" ? <button className="update-action primary" onClick={install} disabled={busy}><RefreshCw size={13} />重启安装</button>
-          : <button className="update-action" onClick={() => void run(onCheck)} disabled={busy || checking || downloading || unsupported}><RefreshCw className={checking ? "spin" : ""} size={13} />{downloading ? `下载中 ${status.progress || 0}%` : checking ? "检查中" : unsupported ? "仅安装版可用" : "检查更新"}</button>}
+    <section className="update-row">
+      <div className="update-row-info"><strong>Claude Code</strong><span>当前 {claudeStatus.binaryVersion ? `v${claudeStatus.binaryVersion}` : "未安装"}</span><em className={claudeStatus.phase}>{shortStatus(claudeStatus.phase, claudeStatus.message, claudeStatus.latestVersion)}</em></div>
+      <div className="update-row-actions">{claudeStatus.phase === "available" ? <button className="update-action primary" onClick={() => void runClaude(onUpdateClaude)} disabled={claudeBusyNow}><Download size={13} />更新</button> : <button className="bare-button" onClick={() => void runClaude(onCheckClaude)} disabled={claudeBusyNow} title="检查 Claude Code 更新" aria-label="检查 Claude Code 更新"><RefreshCw className={claudeStatus.phase === "checking" ? "spin" : ""} size={14} /></button>}</div>
     </section>
-    <section className="diagnostics-section">
-      <div className="update-heading"><strong>故障排查</strong><span>仅本地导出</span></div>
-      <button className="update-action" onClick={() => void exportDiagnostics()} disabled={diagnosticsBusy}><FileDown size={13} />{diagnosticsBusy ? "导出中" : "导出诊断日志"}</button>
-      {diagnosticsMessage ? <div className="update-status ready" title={diagnosticsMessage}>{diagnosticsMessage}</div> : null}
-    </section>
+    <details className="diagnostics-details">
+      <summary>故障排查</summary>
+      <div className="diagnostics-section"><button className="diagnostics-link" onClick={() => void exportDiagnostics()} disabled={diagnosticsBusy}><FileDown size={13} />{diagnosticsBusy ? "导出中" : "导出诊断日志"}</button>{diagnosticsMessage ? <div className="diagnostics-message" title={diagnosticsMessage}>{diagnosticsMessage}</div> : null}</div>
+    </details>
   </div>;
 }
 

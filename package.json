@@ -26,15 +26,17 @@
     "build": "npm run build:main && npm run build:renderer && npm run test",
     "test": "tsc -p src/tsconfig.test.json && node --test build/tests/main/*.test.js build/tests/main/agent/*.test.js build/tests/main/ipc/*.test.js build/tests/main/providers/codex/*.test.js build/tests/main/providers/claude/*.test.js build/tests/renderer/*.test.js build/tests/renderer/agent/*.test.js",
     "test:restart": "pwsh -NoProfile -ExecutionPolicy Bypass -File scripts/electron-restart-regression.ps1 -PlaywrightWrapper scripts/playwright-cli-wrapper.ps1",
-    "test:claude-plugin-isolated": "npm run build:main && node scripts/claude-plugin-isolated-smoke.js",
-    "package": "npm run build && cross-env ELECTRON_MIRROR=https://npmmirror.com/mirrors/electron/ ELECTRON_BUILDER_BINARIES_MIRROR=https://npmmirror.com/mirrors/electron-builder-binaries/ electron-builder --win nsis --publish never",
+    "package": "npm run build && cross-env ELECTRON_MIRROR=https://npmmirror.com/mirrors/electron/ ELECTRON_BUILDER_BINARIES_MIRROR=https://npmmirror.com/mirrors/electron-builder-binaries/ electron-builder --win nsis --publish never --config.npmRebuild=false",
     "release:github": "npm run build && cross-env ELECTRON_MIRROR=https://npmmirror.com/mirrors/electron/ ELECTRON_BUILDER_BINARIES_MIRROR=https://npmmirror.com/mirrors/electron-builder-binaries/ electron-builder --win nsis --publish always",
     "preview": "vite build --config src/vite.config.ts --mode browser-preview && vite preview --config src/vite.config.ts --mode browser-preview --host 127.0.0.1 --port 4174"
   },
   "dependencies": {
     "@anthropic-ai/claude-agent-sdk": "0.3.224",
+    "@xterm/addon-fit": "^0.11.0",
+    "@xterm/xterm": "^6.0.0",
     "electron-updater": "^6.8.9",
     "lucide-react": "^0.468.0",
+    "node-pty": "^1.1.0",
     "react": "^19.0.0",
     "react-dom": "^19.0.0",
     "react-markdown": "^10.1.0",
@@ -62,7 +64,7 @@
     "asarUnpack": [
       "build/electron/main/providers/claude/**/*",
       "node_modules/@anthropic-ai/claude-agent-sdk/**/*",
-      "node_modules/@anthropic-ai/claude-agent-sdk-win32-x64/**/*"
+      "node_modules/node-pty/**/*"
     ],
     "directories": {
       "output": "build/release"
@@ -70,7 +72,12 @@
     "files": [
       "build/renderer/**/*",
       "build/electron/**/*",
-      "package.json"
+      "package.json",
+      "!node_modules/@anthropic-ai/claude-agent-sdk-win32-x64",
+      "!node_modules/@anthropic-ai/claude-agent-sdk-win32-arm64",
+      "!node_modules/@anthropic-ai/claude-agent-sdk-darwin-arm64",
+      "!node_modules/@anthropic-ai/claude-agent-sdk-darwin-x64",
+      "!node_modules/@anthropic-ai/claude-agent-sdk-linux-*"
     ],
     "publish": [
       {

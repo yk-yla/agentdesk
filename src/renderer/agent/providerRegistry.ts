@@ -45,7 +45,6 @@ const CLAUDE_INITIAL_CAPABILITIES: AgentCapabilities = {
   interrupt: "supported",
   steer: "unsupported",
   review: "unsupported",
-  pluginMarketplace: "supported",
   goals: "unsupported",
   plans: "unsupported",
 };

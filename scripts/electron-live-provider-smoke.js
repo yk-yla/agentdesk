@@ -26,7 +26,6 @@ async page => {
   };
 
   const sidebar = page.locator("aside.sidebar");
-  const pluginButton = sidebar.locator('button[aria-label="插件市场"]');
   const activeModel = () => page.locator('.pane-panel select[aria-label="选择模型"]');
   const activeEffort = () => page.locator('.pane-panel select[aria-label="选择思考等级"]');
   const activeInput = () => page.locator('.pane-panel textarea[aria-label="消息输入"]');
@@ -37,22 +36,6 @@ async page => {
   };
 
   try {
-    stage = "双 Provider 插件标签";
-    await page.evaluate(() => window.agentDesk.dev.setClaudeLifecycleFixture(null));
-    await pluginButton.waitFor({ state: "visible", timeout: 15_000 });
-    await pluginButton.click({ force: true });
-    const pluginDialog = page.locator('.plugin-overlay[aria-label="插件市场"]');
-    await pluginDialog.waitFor({ state: "visible", timeout: 30_000 });
-    await pluginDialog.locator(".plugin-provider-tabs").waitFor({ state: "visible", timeout: 30_000 });
-    const pluginTabs = pluginDialog.locator('.plugin-provider-tabs button[role="tab"]');
-    assert(await pluginTabs.count() === 2, "插件市场缺少 Codex 与 Claude Code 两个 Provider 标签。");
-    await pluginDialog.getByRole("tab", { name: "Claude Code" }).click({ force: true });
-    await pluginDialog.locator(".plugin-empty").waitFor({ state: "visible", timeout: 30_000 });
-    await pluginDialog.getByRole("tab", { name: "Codex" }).click({ force: true });
-    await pluginDialog.locator(".plugin-empty").waitFor({ state: "visible", timeout: 30_000 });
-    await pluginDialog.getByRole("button", { name: "关闭插件市场" }).click({ force: true });
-    results.push("插件市场可在 Codex 与 Claude Code 标签间切换且状态不串台");
-
     stage = "Codex 首条消息";
     await sidebar.locator("button.provider-new-codex").first().click({ force: true });
     await page.waitForFunction(() => Boolean(document.querySelector(".tab.active .provider-mark.codex")), null, { timeout: 10_000 });

@@ -1,5 +1,6 @@
 import { contextBridge, ipcRenderer } from "electron";
 import type { AgentEventEnvelope, AgentInteractionResponse, AgentOperation, AgentProvider, AgentRequestContext } from "../shared/agentProtocol";
+import type { TerminalEvent, TerminalInputRequest, TerminalResizeRequest, TerminalSessionCommand, TerminalSessionRequest } from "../shared/terminalProtocol";
 import type { AgentBridge, ClaudeRuntimeStatus, CodexBridge, CodexCliUpdateStatus, DesktopPreferences, DesktopUpdateStatus, DesktopWindowState, JsonObject, ClientLogEntry } from "../shared/protocol";
 
 const bridge: Omit<CodexBridge, "request" | "respond" | "onMessage"> = {
@@ -30,12 +31,6 @@ const bridge: Omit<CodexBridge, "request" | "respond" | "onMessage"> = {
   exportDiagnostics() {
     return ipcRenderer.invoke("agentdesk:export-diagnostics");
   },
-  getBossKeyStatus() {
-    return ipcRenderer.invoke("agentdesk:boss-key-status");
-  },
-  setBossKey(accelerator: string) {
-    return ipcRenderer.invoke("agentdesk:boss-key-set", accelerator);
-  },
   saveClipboardImage(dataUrl: string, suggestedName?: string) {
     return ipcRenderer.invoke("agentdesk:save-clipboard-image", { dataUrl, suggestedName });
   },
@@ -47,12 +42,6 @@ const bridge: Omit<CodexBridge, "request" | "respond" | "onMessage"> = {
   },
   createHandoffPackage(input) {
     return ipcRenderer.invoke("agentdesk:create-handoff", input);
-  },
-  chooseClaudeMarketplaceDirectory(defaultPath?: string) {
-    return ipcRenderer.invoke("agentdesk:choose-claude-marketplace-directory", defaultPath);
-  },
-  openWindowsTerminal(cwd: string) {
-    return ipcRenderer.invoke("agentdesk:open-windows-terminal", cwd);
   },
   readLocalImage(filePath: string) {
     return ipcRenderer.invoke("agentdesk:read-local-image", filePath);
@@ -147,6 +136,26 @@ const agentBridge: AgentBridge = {
     ipcRenderer.on("agent:event", wrapped);
     return () => ipcRenderer.removeListener("agent:event", wrapped);
   },
+  startTerminalSession(request: TerminalSessionRequest) {
+    return ipcRenderer.invoke("terminal:start", request);
+  },
+  writeTerminalInput(request: TerminalInputRequest) {
+    return ipcRenderer.invoke("terminal:write", request);
+  },
+  resizeTerminal(request: TerminalResizeRequest) {
+    return ipcRenderer.invoke("terminal:resize", request);
+  },
+  interruptTerminal(request: TerminalSessionCommand) {
+    return ipcRenderer.invoke("terminal:interrupt", request);
+  },
+  closeTerminal(request: TerminalSessionCommand) {
+    return ipcRenderer.invoke("terminal:close", request);
+  },
+  onTerminalEvent(listener: (event: TerminalEvent) => void) {
+    const wrapped = (_event: Electron.IpcRendererEvent, value: TerminalEvent) => listener(value);
+    ipcRenderer.on("terminal:event", wrapped);
+    return () => ipcRenderer.removeListener("terminal:event", wrapped);
+  },
   getWorkspace: bridge.getWorkspace,
   getLaunchProvider: bridge.getLaunchProvider,
   chooseWorkspace: bridge.chooseWorkspace,
@@ -156,14 +165,10 @@ const agentBridge: AgentBridge = {
   savePreferences: bridge.savePreferences,
   writeLog: bridge.writeLog,
   exportDiagnostics: bridge.exportDiagnostics,
-  getBossKeyStatus: bridge.getBossKeyStatus,
-  setBossKey: bridge.setBossKey,
   saveClipboardImage: bridge.saveClipboardImage,
   copyImage: bridge.copyImage,
   saveTextFile: bridge.saveTextFile,
   createHandoffPackage: bridge.createHandoffPackage,
-  chooseClaudeMarketplaceDirectory: bridge.chooseClaudeMarketplaceDirectory,
-  openWindowsTerminal: bridge.openWindowsTerminal,
   readLocalImage: bridge.readLocalImage,
   openLocalPath: bridge.openLocalPath,
   openExternal: bridge.openExternal,

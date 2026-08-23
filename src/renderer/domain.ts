@@ -1,4 +1,4 @@
-import type { CodexDefaults, DisplayMode, JsonObject, ThemeId } from "../shared/protocol";
+import type { CodexDefaults, JsonObject, ThemeId } from "../shared/protocol";
 import type { AgentCapabilities, AgentProvider } from "../shared/agentProtocol";
 
 export type Role = "user" | "assistant" | "system";
@@ -166,6 +166,8 @@ export interface RetryState {
 export interface SessionState {
   id: string;
   provider: AgentProvider;
+  presentationMode: "workbench" | "terminal";
+  terminalSuspended?: boolean;
   queryGeneration: number;
   capabilities: AgentCapabilities;
   threadId: string | null;
@@ -230,21 +232,20 @@ export interface LayoutState {
 }
 
 export const DEFAULT_THEME: ThemeId = "github-light";
-export const DEFAULT_DISPLAY_MODE: DisplayMode = "simple";
 export const EMPTY_CODEX_DEFAULTS: CodexDefaults = { model: "", effort: "" };
 
 export const CODEX_CAPABILITIES: AgentCapabilities = {
   models: "supported", effort: "supported", images: "supported", history: "supported", historySearch: "supported",
   rename: "supported", pin: "supported", favorite: "supported", fork: "supported", delete: "supported", interrupt: "supported",
   steer: "supported", compact: "supported", review: "supported", skills: "supported", commands: "supported", mcp: "supported",
-  pluginsLoad: "supported", pluginMarketplace: "supported", goals: "supported", plans: "supported", subagents: "supported", contextUsage: "supported",
+  pluginsLoad: "supported", goals: "supported", plans: "supported", subagents: "supported", contextUsage: "supported",
 };
 
 export const EMPTY_AGENT_CAPABILITIES: AgentCapabilities = {
   models: "temporarilyUnavailable", effort: "temporarilyUnavailable", images: "temporarilyUnavailable", history: "temporarilyUnavailable", historySearch: "temporarilyUnavailable",
   rename: "temporarilyUnavailable", pin: "temporarilyUnavailable", favorite: "temporarilyUnavailable", fork: "temporarilyUnavailable", delete: "temporarilyUnavailable", interrupt: "temporarilyUnavailable",
   steer: "temporarilyUnavailable", compact: "temporarilyUnavailable", review: "temporarilyUnavailable", skills: "temporarilyUnavailable", commands: "temporarilyUnavailable", mcp: "temporarilyUnavailable",
-  pluginsLoad: "temporarilyUnavailable", pluginMarketplace: "temporarilyUnavailable", goals: "temporarilyUnavailable", plans: "temporarilyUnavailable", subagents: "temporarilyUnavailable", contextUsage: "temporarilyUnavailable",
+  pluginsLoad: "temporarilyUnavailable", goals: "temporarilyUnavailable", plans: "temporarilyUnavailable", subagents: "temporarilyUnavailable", contextUsage: "temporarilyUnavailable",
 };
 
 export function defaultModelFor(models: ModelOption[], defaults: CodexDefaults) {
@@ -321,7 +322,7 @@ export function formatElapsed(startedAt: number | null, now: number) {
 export function emptySession(id: string, cwd: string, model = "", effort = "", provider: AgentProvider = "codex") : SessionState {
   const now = Date.now();
   return {
-    id, provider, queryGeneration: 0, capabilities: { ...EMPTY_AGENT_CAPABILITIES }, threadId: null, cwd, title: "新会话", titleOrigin: "placeholder", createdAt: now, updatedAt: now, messages: [], activities: [],
+    id, provider, presentationMode: "workbench", queryGeneration: 0, capabilities: { ...EMPTY_AGENT_CAPABILITIES }, threadId: null, cwd, title: "新会话", titleOrigin: "placeholder", createdAt: now, updatedAt: now, messages: [], activities: [],
     model, effort, collaborationMode: "default", status: "idle", statusLabel: "就绪", activeTurnId: null, startedAt: null, errorText: "", retryState: null, pendingApprovals: [], goal: null, plan: null, subagents: [],
     tokenUsage: { used: 0, total: null }, compactionCount: 0, compactionEventIds: [], detailsOpen: false, detailView: "activity",
   };

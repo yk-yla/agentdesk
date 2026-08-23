@@ -35,10 +35,28 @@ export function isOfficialClaudeSignature(signature: ClaudeSignatureInspection) 
   return signature.enhancedKeyUsages.some((item) => item === CODE_SIGNING_OID || /代码签名|code signing/i.test(item));
 }
 
+/** The signed binary path used by the managed updater. */
 export function managedClaudeExecutablePath() {
   const configured = process.env.CLAUDE_CODE_EXECUTABLE?.trim();
-  if (configured) return configured;
-  return resolveExecutableFromPath("claude.exe") || path.join(homedir(), ".local", "bin", "claude.exe");
+  if (configured && /\.exe$/i.test(configured) && existsSync(configured)) return configured;
+  const fromPath = resolveExecutableFromPath("claude.exe");
+  if (fromPath) return fromPath;
+  const localPath = path.join(homedir(), ".local", "bin", "claude.exe");
+  if (existsSync(localPath)) return localPath;
+  return localPath;
+}
+
+/**
+ * Runtime entry point. npm installs on Windows expose `claude.cmd`; that shim
+ * is valid for the SDK/terminal but must never be treated as an update target.
+ */
+export function claudeCodeExecutablePath() {
+  const configured = process.env.CLAUDE_CODE_EXECUTABLE?.trim();
+  if (configured && existsSync(configured) && (process.platform !== "win32" || /\.(?:exe|cmd|bat)$/i.test(configured))) return path.resolve(configured);
+  const fromPath = resolveExecutableFromPath(process.platform === "win32" ? "claude.cmd" : "claude")
+    || resolveExecutableFromPath(process.platform === "win32" ? "claude.exe" : "claude");
+  if (fromPath) return fromPath;
+  return managedClaudeExecutablePath();
 }
 
 function normalizedSignature(output: string) {

@@ -23,6 +23,11 @@ describe("command suggestions", () => {
     });
   });
 
+  it("does not offer model switching in the Claude workbench", () => {
+    const suggestions = suggestionsFor("/", [], CODEX_CAPABILITIES, {}, "claude");
+    assert.equal(suggestions.some((entry) => entry.kind === "command" && entry.name === "model"), false);
+  });
+
   it("keeps a Provider-native command visible when the matching local feature is unavailable", () => {
     const capabilities = { ...CODEX_CAPABILITIES, plans: "unsupported" as const };
     const suggestions = suggestionsFor("/plan", [

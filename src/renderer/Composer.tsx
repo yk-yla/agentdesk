@@ -4,10 +4,11 @@ import CommandSuggestions from "./CommandSuggestionMenu";
 import { useCommandSuggestions, type CommandSuggestion, type CommandUsage } from "./commandSuggestions";
 import { type ImageAttachment, type PendingSteerMessage, type QueuedMessage, type SkillOption } from "./domain";
 import ImageLightbox from "./ImageLightbox";
-import type { AgentCapabilities } from "../shared/agentProtocol";
+import type { AgentCapabilities, AgentProvider } from "../shared/agentProtocol";
 
 interface Props {
   sessionId: string;
+  provider: AgentProvider;
   cwd: string;
   threadId: string | null;
   skills: SkillOption[];
@@ -35,7 +36,7 @@ interface Props {
  * 打字不再触发顶层 setSessions，因此不会重渲染消息流。
  */
 function ComposerBase({
-  sessionId, cwd, threadId, skills, recentCommandUsage, capabilities, attachments, queuedMessages, pendingSteers, working, placeholder, toolbar,
+  sessionId, provider, cwd, threadId, skills, recentCommandUsage, capabilities, attachments, queuedMessages, pendingSteers, working, placeholder, toolbar,
   copyImage, getDraft, onDraftChange, onSend, onCycleEffort, onAddImages, onRemoveImage,
   onRemoveQueuedMessage, onChooseDirectory,
 }: Props) {
@@ -43,7 +44,7 @@ function ComposerBase({
   const [dragging, setDragging] = useState(false);
   const [previewSource, setPreviewSource] = useState<string | null>(null);
   const [dismissedSuggestionsFor, setDismissedSuggestionsFor] = useState<string | null>(null);
-  const { suggestions, selectedIndex, moveSelection, selectIndex } = useCommandSuggestions(value, skills, capabilities, recentCommandUsage);
+  const { suggestions, selectedIndex, moveSelection, selectIndex } = useCommandSuggestions(value, skills, capabilities, recentCommandUsage, provider);
   const visibleSuggestions = dismissedSuggestionsFor === value ? [] : suggestions;
 
   const update = (next: string) => {

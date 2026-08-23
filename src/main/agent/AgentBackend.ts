@@ -8,6 +8,7 @@ export interface AgentBackend {
   subscribeEvents(listener: (event: AgentEventEnvelope) => void): () => void;
   getCapabilities(): Promise<AgentCapabilities>;
   closeSession(context: AgentRequestContext): Promise<void>;
+  prepareTerminalSession?(context: AgentRequestContext): Promise<void>;
   resetSession?(context: AgentRequestContext): Promise<void>;
   close(): Promise<void>;
 }

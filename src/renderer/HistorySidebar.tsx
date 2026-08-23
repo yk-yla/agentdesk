@@ -1,4 +1,4 @@
-import { ArrowRight, Download, FileSearch, FolderOpen, GitFork, Pencil, Pin, PinOff, Star, Trash2, X } from "lucide-react";
+import { ArrowRight, Download, FileSearch, FolderOpen, GitFork, Pencil, Pin, PinOff, Star, Terminal, Trash2, X } from "lucide-react";
 import { memo, useEffect, useMemo, useState } from "react";
 import type { AgentCapabilities, AgentProvider } from "../shared/agentProtocol";
 import { basename, formatRelativeTime, sameDirectory, type HistoryThread } from "./domain";
@@ -8,7 +8,7 @@ import { filterSidebarHistory } from "./sidebarViewModel";
 
 const HISTORY_BATCH_SIZE = 80;
 
-export type HistoryAction = "rename" | "pin" | "favorite" | "export" | "handoffCodex" | "handoffClaude" | "fork" | "delete";
+export type HistoryAction = "rename" | "pin" | "favorite" | "export" | "handoffCodex" | "handoffClaude" | "fork" | "delete" | "openWorkbench" | "openTerminal";
 export type HistoryView = "directory" | "favorites" | "recent";
 
 export interface HistorySidebarViewModel {
@@ -110,7 +110,10 @@ function HistorySidebarBase({ view, viewModel, actions }: HistorySidebarProps) {
       })}
       {visible.length < filtered.length ? <button className="history-more" onClick={() => setVisibleCount((count) => count + HISTORY_BATCH_SIZE)}>加载更多 · 剩余 {filtered.length - visible.length}</button> : null}
     </> : <div className="empty-thread"><span className="sidebar-copy">{search.trim() ? "没有匹配会话" : view === "favorites" ? "暂无收藏会话" : view === "recent" ? viewModel.recentLoading ? "正在加载最近会话" : "暂无最近会话" : viewModel.historyLoading ? "正在加载当前目录会话" : "当前目录暂无会话"}</span></div>}{view !== "favorites" && viewModel.historySearchResults && viewModel.historySearchHasMore ? <button className="history-more" onClick={actions.onLoadMoreHistorySearch} disabled={viewModel.historySearchLoading}>{viewModel.historySearchLoading ? "正在加载更多结果" : "加载更多搜索结果"}</button> : view === "recent" && viewModel.recentHasMore && !viewModel.historySearchResults ? <button className="history-more" onClick={actions.onLoadMoreRecent} disabled={viewModel.recentLoading}>{viewModel.recentLoading ? "正在加载更早会话" : "加载更早会话"}</button> : view === "directory" && viewModel.historyHasMore && !viewModel.historySearchResults ? <button className="history-more" onClick={actions.onLoadMoreHistory} disabled={viewModel.historyLoading}>{viewModel.historyLoading ? "正在加载更早会话" : "加载更早会话"}</button> : null}</nav>
-    {contextMenu ? <div className="tab-context-menu history-context-menu" role="menu" aria-label={`${contextMenu.entry.title} 会话操作`} style={{ left: Math.min(contextMenu.x, Math.max(8, window.innerWidth - 190)), top: Math.min(contextMenu.y, Math.max(8, window.innerHeight - 284)) }} onMouseDown={(event) => event.stopPropagation()} onContextMenu={(event) => event.preventDefault()}>
+    {contextMenu ? <div className="tab-context-menu history-context-menu" role="menu" aria-label={`${contextMenu.entry.title} 会话操作`} style={{ left: Math.min(contextMenu.x, Math.max(8, window.innerWidth - 190)), top: Math.min(contextMenu.y, Math.max(8, window.innerHeight - 390)) }} onMouseDown={(event) => event.stopPropagation()} onContextMenu={(event) => event.preventDefault()}>
+      <button type="button" role="menuitem" onClick={() => { const entry = contextMenu.entry; setContextMenu(null); void actions.onHistoryAction(entry, "openWorkbench"); }}><FolderOpen size={14} /><span>在工作台打开</span></button>
+      <button type="button" role="menuitem" onClick={() => { const entry = contextMenu.entry; setContextMenu(null); void actions.onHistoryAction(entry, "openTerminal"); }}><Terminal size={14} /><span>在内置终端打开</span></button>
+      <div className="context-menu-separator" />
       {viewModel.providerCapabilities[contextMenu.entry.provider].rename !== "unsupported" ? <button type="button" role="menuitem" disabled={viewModel.providerCapabilities[contextMenu.entry.provider].rename !== "supported"} onClick={() => { const entry = contextMenu.entry; setContextMenu(null); setRenameName(entry.title); setRenameTarget(entry); }}><Pencil size={14} /><span>重命名</span></button> : null}
       {viewModel.providerCapabilities[contextMenu.entry.provider].pin !== "unsupported" ? <button type="button" role="menuitem" disabled={viewModel.providerCapabilities[contextMenu.entry.provider].pin !== "supported"} onClick={() => { const entry = contextMenu.entry; setContextMenu(null); void actions.onHistoryAction(entry, "pin"); }}>{contextMenu.entry.isPinned ? <PinOff size={14} /> : <Pin size={14} />}<span>{contextMenu.entry.isPinned ? "取消置顶" : "置顶"}</span></button> : null}
       <button type="button" role="menuitem" onClick={() => { const entry = contextMenu.entry; setContextMenu(null); void actions.onHistoryAction(entry, "favorite"); }}><Star size={14} fill={contextMenu.entry.isFavorite ? "currentColor" : "none"} /><span>{contextMenu.entry.isFavorite ? "取消收藏" : "收藏"}</span></button>

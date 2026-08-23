@@ -26,21 +26,13 @@ const METHODS: Record<Exclude<AgentOperation, "getCapabilities" | "closeSession"
   getGoal: "thread/goal/get",
   setGoal: "thread/goal/set",
   clearGoal: "thread/goal/clear",
-  listPlugins: "plugin/list",
-  readPlugin: "plugin/read",
-  installPlugin: "plugin/install",
-  uninstallPlugin: "plugin/uninstall",
-  updatePlugin: "plugin/update",
-  addMarketplace: "marketplace/add",
-  updateMarketplace: "marketplace/upgrade",
-  removeMarketplace: "marketplace/remove",
 };
 
 const CAPABILITIES: AgentCapabilities = {
   models: "supported", effort: "supported", images: "supported", history: "supported", historySearch: "supported",
   rename: "supported", pin: "supported", favorite: "supported", fork: "supported", delete: "supported", interrupt: "supported",
   steer: "supported", compact: "supported", review: "supported", skills: "supported", commands: "supported", mcp: "supported",
-  pluginsLoad: "supported", pluginMarketplace: "supported", goals: "supported", plans: "supported", subagents: "supported", contextUsage: "supported",
+  pluginsLoad: "supported", goals: "supported", plans: "supported", subagents: "supported", contextUsage: "supported",
 };
 
 const THREAD_CONFIGURATION_OPERATIONS = new Set<AgentOperation>(["startSession", "resumeSession", "forkSession"]);
@@ -67,10 +59,12 @@ export interface CodexBackendRuntime {
   respond(id: number | string, result: JsonObject): Promise<void>;
   subscribe(listener: (message: JsonRpcMessage) => void): () => void;
   close(): Promise<void>;
+  closeForHandoff?(): Promise<void>;
 }
 
 export class CodexBackend implements AgentBackend {
   readonly provider = "codex" as const;
+  private readonly activeSessions = new Map<string, string>();
 
   constructor(
     private readonly runtime: CodexBackendRuntime,
@@ -85,7 +79,20 @@ export class CodexBackend implements AgentBackend {
     if (!method) throw new Error(`Codex 不支持该操作：${operation}`);
     const providerParams = providerRequestParams(operation, params);
     try {
-      return await this.runtime.request(method, providerParams, context, operation);
+      const result = await this.runtime.request(method, providerParams, context, operation);
+      if ((operation === "startSession" || operation === "resumeSession") && context.sessionId) {
+        const payload = result && typeof result === "object" && !Array.isArray(result)
+          ? result as { thread?: unknown; threadId?: unknown }
+          : {};
+        const thread = payload.thread && typeof payload.thread === "object" && !Array.isArray(payload.thread)
+          ? payload.thread as { id?: unknown }
+          : {};
+        const nativeSessionId = typeof thread.id === "string"
+          ? thread.id
+          : typeof payload.threadId === "string" ? payload.threadId : context.nativeSessionId;
+        if (nativeSessionId) this.activeSessions.set(context.sessionId, nativeSessionId);
+      }
+      return result;
     } catch (error) {
       const payload = decodeCodexRpcError(error);
       if (!payload) throw error;
@@ -112,13 +119,22 @@ export class CodexBackend implements AgentBackend {
     return { ...CAPABILITIES };
   }
 
-  async closeSession(_context: AgentRequestContext) {
-    // Codex app-server 是多会话共享进程；关闭空闲 Tab 只释放渲染层状态。
-    if (_context.sessionId) this.titleGenerator?.cancel(_context.sessionId);
+  async closeSession(context: AgentRequestContext) {
+    if (context.sessionId) this.titleGenerator?.cancel(context.sessionId);
+    if (context.nativeSessionId) {
+      await this.runtime.request("thread/unsubscribe", { threadId: context.nativeSessionId }, context, "closeSession");
+    }
+    if (context.sessionId) this.activeSessions.delete(context.sessionId);
+  }
+
+  async prepareTerminalSession(context: AgentRequestContext) {
+    await (this.runtime.closeForHandoff || this.runtime.close).call(this.runtime);
+    this.activeSessions.clear();
   }
 
   async close() {
     await Promise.all([this.titleGenerator?.close() || Promise.resolve(), this.runtime.close()]);
+    this.activeSessions.clear();
   }
 
   private async generateSessionTitle(params: JsonObject, context: AgentRequestContext) {

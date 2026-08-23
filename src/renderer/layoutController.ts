@@ -5,6 +5,7 @@ export interface SessionCreationOptions {
   threadId?: string;
   title?: string;
   provider?: AgentProvider;
+  presentationMode?: "workbench" | "terminal";
 }
 
 export type TabDropPosition = "before" | "after";
@@ -110,7 +111,6 @@ export class LayoutController {
     const pane = this.state.getLayout().panes.find((entry) => entry.id === paneId);
     if (!pane || pane.tabIds.length <= 1 || !pane.tabIds.includes(sessionId)) return false;
     if (!this.services.confirmClose([sessionId])) return false;
-    try { await this.services.closeSession(sessionId); } catch { return false; }
     this.state.updateLayout((current) => {
       const target = current.panes.find((entry) => entry.id === paneId);
       if (!target || target.tabIds.length <= 1) return current;
@@ -122,7 +122,7 @@ export class LayoutController {
           : entry),
       };
     });
-    this.services.releaseSession(sessionId);
+    void this.services.closeSession(sessionId).finally(() => this.services.releaseSession(sessionId));
     return true;
   };
 
@@ -192,7 +192,6 @@ export class LayoutController {
     if (!session) return false;
     if (pane.tabIds.length > 1) return this.removeTab(pane.id, sessionId);
     if (!this.services.confirmClose([sessionId])) return false;
-    try { await this.services.closeSession(sessionId); } catch { return false; }
     if (current.panes.length > 1) {
       this.state.updateLayout((layout) => {
         const index = layout.panes.findIndex((entry) => entry.id === pane.id);
@@ -204,7 +203,7 @@ export class LayoutController {
       const nextSessionId = this.services.createSession(session.cwd, { provider: session.provider });
       this.replaceSession(sessionId, nextSessionId);
     }
-    this.services.releaseSession(sessionId);
+    void this.services.closeSession(sessionId).finally(() => this.services.releaseSession(sessionId));
     return true;
   };
 

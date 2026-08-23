@@ -16,6 +16,7 @@ export interface TimedOutRpcRequest<TChild> {
   method: string;
   requestId?: string;
   sessionId?: string;
+  timedOutAt: number;
 }
 
 export type TrackedRpcResponse<TChild> =
@@ -25,15 +26,34 @@ export type TrackedRpcResponse<TChild> =
 export class RpcRequestRegistry<TChild> {
   private readonly pending = new Map<number, TrackedPendingRpcRequest<TChild>>();
   private readonly timedOut = new Map<number, TimedOutRpcRequest<TChild>>();
+  private sweepTimer: ReturnType<typeof setInterval> | null = null;
+  private static readonly STALE_TIMED_OUT_MS = 10 * 60_000;
 
-  constructor(private readonly maxTimedOutRequests: number) {}
+  constructor(private readonly maxTimedOutRequests: number) {
+    this.sweepTimer = setInterval(() => this.sweepStaleTimedOut(), 60_000);
+    if (this.sweepTimer.unref) this.sweepTimer.unref();
+  }
+
+  dispose() {
+    if (this.sweepTimer) {
+      clearInterval(this.sweepTimer);
+      this.sweepTimer = null;
+    }
+  }
+
+  private sweepStaleTimedOut() {
+    const cutoff = Date.now() - RpcRequestRegistry.STALE_TIMED_OUT_MS;
+    for (const [id, entry] of this.timedOut) {
+      if (entry.timedOutAt < cutoff) this.timedOut.delete(id);
+    }
+  }
 
   add(id: number, request: PendingRpcRequest<TChild>, timeoutMs: number, timeoutError: () => Error) {
     const timeout = setTimeout(() => {
       const current = this.pending.get(id);
       if (!current || current.child !== request.child) return;
       this.pending.delete(id);
-      this.timedOut.set(id, { child: current.child, method: current.method, requestId: current.requestId, sessionId: current.sessionId });
+      this.timedOut.set(id, { child: current.child, method: current.method, requestId: current.requestId, sessionId: current.sessionId, timedOutAt: Date.now() });
       while (this.timedOut.size > this.maxTimedOutRequests) {
         const oldest = this.timedOut.keys().next().value as number | undefined;
         if (oldest === undefined) break;

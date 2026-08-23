@@ -4,6 +4,7 @@ import type { JsonObject } from "../../shared/protocol";
 import type { AppLogger } from "../logger";
 import { logErrorDetails } from "../logger";
 import { AgentSessionRegistry } from "./agentSessionRegistry";
+import { NativeSessionOwnershipRegistry } from "./nativeSessionOwnershipRegistry";
 
 export class BackendManager {
   private readonly backends = new Map<AgentProvider, AgentBackend>();
@@ -12,8 +13,8 @@ export class BackendManager {
   private closePromise: Promise<void> | null = null;
   private readonly sessions: AgentSessionRegistry;
 
-  constructor(private readonly logger?: AppLogger, isWorkspaceAuthorized?: (cwd: string) => boolean) {
-    this.sessions = new AgentSessionRegistry(isWorkspaceAuthorized);
+  constructor(private readonly logger?: AppLogger, isWorkspaceAuthorized?: (cwd: string) => boolean, nativeOwnership?: NativeSessionOwnershipRegistry) {
+    this.sessions = new AgentSessionRegistry(isWorkspaceAuthorized, nativeOwnership);
   }
 
   register(backend: AgentBackend) {
@@ -107,6 +108,21 @@ export class BackendManager {
     }));
     if (failures.length) this.logger?.log("warn", "provider.renderer_session_reset_partial", { count: failures.length });
     return { reset: registrations.length, failures: failures.length };
+  }
+
+  assertNativeSessionAuthorized(provider: AgentProvider, nativeSessionId: string, cwd: string) {
+    this.sessions.assertNativeSessionAuthorized(provider, nativeSessionId, cwd);
+  }
+
+  async prepareTerminalSession(provider: AgentProvider, context: AgentRequestContext) {
+    if (!context.nativeSessionId) return;
+    this.sessions.assertNativeSessionAuthorized(provider, context.nativeSessionId, context.canonicalCwd || "");
+    const activeWork = this.sessions.rendererSessions().some((registration) => registration.provider === provider && registration.queryActive);
+    if (activeWork) throw new Error(`${provider === "codex" ? "Codex" : "Claude Code"} 还有任务正在运行，完成或停止后才能切换黑窗口。`);
+    await this.require(provider).prepareTerminalSession?.(context);
+    // Release only the handoff target. Other idle workbench tabs remain
+    // registered and can be resumed after the shared runtime restarts.
+    this.sessions.releaseRendererSession(context.sessionId || "");
   }
 
   private require(provider: AgentProvider) {

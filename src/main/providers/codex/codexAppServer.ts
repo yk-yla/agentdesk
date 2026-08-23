@@ -15,13 +15,6 @@ const REQUEST_TIMEOUTS_MS: Record<string, number> = {
   "model/list": 30_000,
   "skills/list": 60_000,
   "collaborationMode/list": 30_000,
-  "plugin/list": 60_000,
-  "plugin/read": 30_000,
-  "plugin/install": 120_000,
-  "plugin/uninstall": 60_000,
-  "marketplace/add": 120_000,
-  "marketplace/remove": 60_000,
-  "marketplace/upgrade": 120_000,
   "account/rateLimits/read": 30_000,
   "mcpServerStatus/list": 60_000,
   "thread/list": 30_000,
@@ -35,6 +28,7 @@ const REQUEST_TIMEOUTS_MS: Record<string, number> = {
   "thread/goal/clear": 30_000,
   "thread/read": 120_000,
   "thread/resume": 60_000,
+  "thread/unsubscribe": 30_000,
   "thread/start": 60_000,
   "thread/settings/update": 30_000,
   "turn/start": 60_000,
@@ -71,6 +65,7 @@ export class CodexAppServer implements CodexBackendRuntime {
   private child: ChildProcessWithoutNullStreams | null = null;
   private stopPromise: Promise<void> | null = null;
   private startPromise: Promise<void> | null = null;
+  private handoffChild: ChildProcessWithoutNullStreams | null = null;
   private requestId = 1;
   private readonly requests = new RpcRequestRegistry<ChildProcessWithoutNullStreams>(MAX_TIMED_OUT_REQUESTS);
   private readonly listeners = new Set<(message: JsonRpcMessage) => void>();
@@ -153,6 +148,15 @@ export class CodexAppServer implements CodexBackendRuntime {
     return this.stopRunningChild(child);
   }
 
+  closeForHandoff() {
+    const child = this.child;
+    if (!child) return Promise.resolve();
+    this.handoffChild = child;
+    return this.close().finally(() => {
+      if (this.handoffChild === child) this.handoffChild = null;
+    });
+  }
+
   private write(message: JsonRpcMessage, child = this.child) {
     if (!child?.stdin.writable || child.exitCode !== null || child.killed) throw new Error("Codex app-server is not available.");
     child.stdin.write(`${JSON.stringify(message)}\n`);
@@ -219,6 +223,7 @@ export class CodexAppServer implements CodexBackendRuntime {
     child.stdout.on("data", (chunk: string) => {
       if (protocolFailed) return;
       stdoutBuffer += chunk;
+      if (Buffer.byteLength(stdoutBuffer, "utf8") > MAX_JSONL_LINE_BYTES && !stdoutBuffer.includes("\n")) return failProtocol();
       let newlineIndex = stdoutBuffer.indexOf("\n");
       while (newlineIndex >= 0) {
         const line = stdoutBuffer.slice(0, newlineIndex).replace(/\r$/, "");
@@ -259,7 +264,7 @@ export class CodexAppServer implements CodexBackendRuntime {
       if (wasActive) this.child = null;
       if (this.startPromise === startPromise) this.startPromise = null;
       this.requests.reject(error, child);
-      if (wasActive && !this.options.isQuitting() && !this.options.isExitNotificationSuppressed()) {
+      if (wasActive && this.handoffChild !== child && !this.options.isQuitting() && !this.options.isExitNotificationSuppressed()) {
         this.publish({ method: "client/server-exited", params: { code } });
       }
     };

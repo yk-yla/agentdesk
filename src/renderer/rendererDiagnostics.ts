@@ -29,7 +29,7 @@ function interactionState() {
     visibility: document.visibilityState,
     activeElement: elementKind(document.activeElement),
     bodyClasses: [...document.body.classList].filter((name) => name.startsWith("resizing-") || name.startsWith("dragging-")),
-    modalCount: document.querySelectorAll('[aria-modal="true"], .dialog-backdrop, .plugin-overlay, .image-lightbox').length,
+    modalCount: document.querySelectorAll('[aria-modal="true"], .dialog-backdrop, .image-lightbox').length,
     openMenuCount: document.querySelectorAll('[role="menu"], details[open], .command-suggestions').length,
   };
 }

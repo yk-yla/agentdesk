@@ -48,6 +48,8 @@ export interface CodexCliUpdateManagerDependencies {
   isQuitting(): boolean;
   emitStatus(status: CodexCliUpdateStatus): void;
   notify(title: string, body: string): void;
+  shutdownTerminals?(): Promise<void>;
+  setTerminalProviderBlocked?(provider: "codex", blocked: boolean): void;
   environment?: NodeJS.ProcessEnv;
   platform?: NodeJS.Platform;
   operations?: Partial<CodexCliUpdateOperations>;
@@ -159,7 +161,7 @@ export class CodexCliUpdateManager {
           return this.setStatus({ phase: "error", currentVersion, message: "重试失败，将按 6 小时周期再检查。" });
         }
         this.scheduleCheck(CLI_RETRY_MS, true);
-        return this.setStatus({ phase: "error", currentVersion, message: "无法连接 npm，30 分钟后重试一次。" });
+        return this.setStatus({ phase: "error", currentVersion, message: "无法连接 npm 仓库，请检查网络连接。如果使用了镜像源请确认镜像地址可用，30 分钟后将自动重试。" });
       }
     }).finally(() => {
       this.checkPromise = null;
@@ -172,6 +174,9 @@ export class CodexCliUpdateManager {
       const latestVersion = this.status.latestVersion?.trim() || "";
       let currentVersion = this.status.currentVersion;
       let shouldRestartLocalAppServer = false;
+      let terminalUpdateBlocked = false;
+      this.dependencies.setTerminalProviderBlocked?.("codex", true);
+      terminalUpdateBlocked = true;
       const restoreLocalAppServer = async () => {
         this.suppressExitNotification = false;
         if (!shouldRestartLocalAppServer || this.dependencies.isQuitting()) return "";
@@ -195,6 +200,7 @@ export class CodexCliUpdateManager {
         shouldRestartLocalAppServer = this.dependencies.appServer.isRunning;
         this.suppressExitNotification = shouldRestartLocalAppServer;
         this.setStatus({ phase: "updating", currentVersion, latestVersion, message: "正在停止所有 Codex app-server。", nextCheckAt: undefined });
+        await this.dependencies.shutdownTerminals?.();
         await this.prepareAppServerUpdate();
         if (this.dependencies.isQuitting()) return this.currentStatus();
         this.setStatus({ phase: "updating", currentVersion, latestVersion, message: `正在更新 Codex CLI 到 ${latestVersion}。`, nextCheckAt: undefined });
@@ -219,6 +225,7 @@ export class CodexCliUpdateManager {
         this.dependencies.notify("Codex CLI 更新失败", message);
         return this.setStatus({ phase: "error", currentVersion: await this.readInstalledVersion() || currentVersion, latestVersion, message });
       } finally {
+        if (terminalUpdateBlocked) this.dependencies.setTerminalProviderBlocked?.("codex", false);
         this.suppressExitNotification = false;
       }
     });
@@ -491,6 +498,7 @@ export class CodexCliUpdateManager {
     const message = error instanceof Error ? error.message : String(error || "");
     if (/custom Codex CLI|自定义 Codex CLI/i.test(message)) return "当前使用自定义 Codex CLI，请按自定义来源更新。";
     if (/timed out|ETIMEDOUT|timeout|超时/i.test(message)) return "更新超时，请稍后重试。";
+    if (/ENOTFOUND|ECONNREFUSED|ECONNRESET|network|net::/i.test(message)) return "无法连接 npm 仓库，请检查网络连接后重试。";
     if (/app-server|进程列表|无法读取本机进程/i.test(message)) return message;
     return "更新失败，请稍后重试。";
   }

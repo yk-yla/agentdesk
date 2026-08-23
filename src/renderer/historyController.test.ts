@@ -51,7 +51,7 @@ function createHarness(request: (provider: AgentProvider, operation: AgentOperat
     setSearchCursor: (value) => { searchCursor = value; },
   }, {
     request,
-    getPreferences: () => ({ lastWorkspace: "", favoriteWorkspaces: [], theme: "github-light", displayMode: "simple", bossKey: "", sessionAliases: {}, favoriteSessions: [] }),
+    getPreferences: () => ({ lastWorkspace: "", favoriteWorkspaces: [], theme: "github-light", sessionAliases: {}, favoriteSessions: [] }),
     isVisible: () => true,
   });
   return {
@@ -72,7 +72,7 @@ describe("history helpers", () => {
     const merged = mergeHistory([thread("same", "codex", 1)], [thread("same", "claude", 2), thread("same", "codex", 3)]);
     const decorated = applyLocalSessionMetadata(merged, {
       lastWorkspace: "", favoriteWorkspaces: [],
-      theme: "github-light", displayMode: "simple", bossKey: "",
+      theme: "github-light",
       sessionAliases: { "claude:same": "Claude alias" },
       favoriteSessions: ["codex:same"],
     });
@@ -85,7 +85,7 @@ describe("history helpers", () => {
   it("restores cross-directory favorites from saved summaries", () => {
     const favorites = favoriteHistoryEntries([thread("loaded", "codex", 2)], {
       lastWorkspace: "", favoriteWorkspaces: [],
-      theme: "github-light", displayMode: "simple", bossKey: "",
+      theme: "github-light",
       favoriteSessions: ["codex:loaded", "claude:saved"],
       favoriteSessionSummaries: {
         "claude:saved": { provider: "claude", id: "saved", title: "跨目录收藏", cwd: "D:\\other", updatedAt: 3 },

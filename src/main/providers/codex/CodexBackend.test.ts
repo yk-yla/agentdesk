@@ -78,6 +78,80 @@ describe("CodexBackend", () => {
     assert.throws(() => backend.respondToInteraction({ provider: "claude", sessionId: "s", queryGeneration: 0, interactionId: "i", requestId: 8 }, {}), /引用无效/);
   });
 
+  it("unsubscribes the native thread before releasing a Codex session", async () => {
+    const requests: Array<{ method: string; params: unknown; operation: string }> = [];
+    let cancelledSessionId = "";
+    const backend = new CodexBackend(runtime({
+      request: async (method, params, _context, operation) => {
+        requests.push({ method, params, operation });
+        return { status: "unsubscribed" };
+      },
+    }), {
+      generate: async () => "",
+      cancel: (sessionId: string) => { cancelledSessionId = sessionId; },
+      close: async () => undefined,
+    } as never);
+
+    await backend.closeSession({ sessionId: "client-1", nativeSessionId: "thread-1" });
+
+    assert.equal(cancelledSessionId, "client-1");
+    assert.deepEqual(requests, [{
+      method: "thread/unsubscribe",
+      params: { threadId: "thread-1" },
+      operation: "closeSession",
+    }]);
+  });
+
+  it("closes app-server for a Codex terminal handoff", async () => {
+    let closes = 0;
+    const backend = new CodexBackend(runtime({
+      request: async () => ({ status: "unsubscribed" }),
+      close: async () => { closes += 1; },
+    }));
+
+    await backend.prepareTerminalSession({ sessionId: "client-1", nativeSessionId: "thread-1" });
+
+    assert.equal(closes, 1);
+  });
+
+  it("lets the manager hand off a shared app-server after idle sessions are checked", async () => {
+    let closes = 0;
+    const backend = new CodexBackend(runtime({
+      request: async () => ({ thread: { id: "thread-1" } }),
+      close: async () => { closes += 1; },
+    }));
+    await backend.request("resumeSession", { threadId: "thread-1", cwd: "D:\\work" }, { sessionId: "other-session" });
+
+    await backend.prepareTerminalSession({ sessionId: "client-1", nativeSessionId: "thread-1" });
+    assert.equal(closes, 1);
+  });
+
+  it("allows terminal handoff after the tracked workbench session closes", async () => {
+    let closes = 0;
+    const backend = new CodexBackend(runtime({
+      request: async (method) => method === "thread/resume" ? { thread: { id: "thread-1" } } : { status: "unsubscribed" },
+      close: async () => { closes += 1; },
+    }));
+    const context = { sessionId: "client-1", nativeSessionId: "thread-1", canonicalCwd: "D:\\work" };
+    await backend.request("resumeSession", { threadId: "thread-1", cwd: "D:\\work" }, context);
+
+    await backend.closeSession(context);
+    await backend.prepareTerminalSession(context);
+
+    assert.equal(closes, 1);
+  });
+
+  it("does not contact app-server when a Codex session has no native thread", async () => {
+    let requests = 0;
+    const backend = new CodexBackend(runtime({
+      request: async () => { requests += 1; },
+    }));
+
+    await backend.closeSession({ sessionId: "client-1" });
+
+    assert.equal(requests, 0);
+  });
+
   it("uses a native Codex name before invoking the title generator", async () => {
     let generated = 0;
     const backend = new CodexBackend(runtime({

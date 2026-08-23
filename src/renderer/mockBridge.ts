@@ -1,5 +1,5 @@
 import type { AgentEventEnvelope, AgentOperation, AgentProvider } from "../shared/agentProtocol";
-import type { AgentBridge, BossKeyStatus, ClaudeRuntimeStatus, CodexBridge, CodexCliUpdateStatus, CodexDefaults, DesktopPreferences, DesktopUpdateStatus, JsonRpcMessage } from "../shared/protocol";
+import type { AgentBridge, ClaudeRuntimeStatus, CodexBridge, CodexCliUpdateStatus, CodexDefaults, DesktopPreferences, DesktopUpdateStatus, JsonRpcMessage } from "../shared/protocol";
 import { asRecord, CODEX_CAPABILITIES, stringValue } from "./domain";
 
 /** 浏览器预览用的假桥接。真实 Electron 走 preload 暴露的 window.agentDesk。 */
@@ -16,8 +16,7 @@ export function createMockBridge(): CodexBridge {
   let threadCounter = 0;
   let turnCounter = 0;
   const mockWorkspace = "mock-workspace";
-  let mockPreferences: DesktopPreferences = { lastWorkspace: mockWorkspace, favoriteWorkspaces: [], sidebarWidth: 250, theme: "github-light", displayMode: "simple", bossKey: "F2" };
-  let mockBossKeyStatus: BossKeyStatus = { accelerator: "F2", registered: true, message: "老板键 F2 已启用。" };
+  let mockPreferences: DesktopPreferences = { lastWorkspace: mockWorkspace, favoriteWorkspaces: [], sidebarWidth: 250, theme: "github-light", lastCodexPresentationMode: "workbench" };
   let mockUpdateStatus: DesktopUpdateStatus = { phase: "unsupported", currentVersion: "1.0.7", message: "浏览器预览不检查软件更新。", repositoryUrl: "https://github.com/yk-yla/agentdesk" };
   let mockCodexCliUpdateStatus: CodexCliUpdateStatus = { phase: "available", currentVersion: "0.146.1", latestVersion: "0.147.0", checkedAt: Date.now(), nextCheckAt: Date.now() + 6 * 60 * 60 * 1000, message: "发现新版本 0.147.0，可立即更新。" };
   let mockClaudeRuntimeStatus: ClaudeRuntimeStatus = { phase: "available", binarySource: "sdk", binaryVersion: "1.0.0", sdkVersion: "0.1.0", latestVersion: "1.1.0", checkedAt: Date.now(), credentialsAvailable: true, credentialSource: "settings", credentialMessage: "已从 Claude 配置读取凭据。", integrityVerified: true, message: "发现 Claude Code 新版本 1.1.0。" };
@@ -27,10 +26,6 @@ export function createMockBridge(): CodexBridge {
     { name: "commit", description: "整理并提交当前更改", path: "mock-skills/commit/SKILL.md", scope: "user", enabled: true },
     { name: "review", description: "按项目规则检查代码", path: "mock-skills/review/SKILL.md", scope: "repo", enabled: true },
   ];
-  const mockPlugins = [
-    { id: "mock-security", name: "security", installed: true, enabled: true, version: "1.0.0", localVersion: "1.0.0", interface: { shortDescription: "扫描常见代码安全问题", category: "代码质量", capabilities: ["skills", "hooks"] }, source: { type: "remote" } },
-    { id: "mock-release", name: "release-notes", installed: false, enabled: true, version: "0.4.0", localVersion: null, interface: { shortDescription: "整理版本发布说明", category: "工作流", capabilities: ["skills"] }, source: { type: "remote" } },
-  ];
   const threadMap = new Map<string, { id: string; cwd: string; name: string; turns: unknown[]; isPinned: boolean }>();
   const goalMap = new Map<string, { threadId: string; objective: string; status: "active" | "paused" | "blocked" | "usageLimited" | "budgetLimited" | "complete"; tokenBudget: number | null; tokensUsed: number; timeUsedSeconds: number; createdAt: number; updatedAt: number }>();
   const activeTurns = new Map<string, { id: string; steerable: boolean }>();
@@ -39,13 +34,6 @@ export function createMockBridge(): CodexBridge {
       if (method === "model/list") return Promise.resolve({ data: models, nextCursor: null });
       if (method === "skills/list") return Promise.resolve({ data: [{ cwd: stringValue(params.cwds && Array.isArray(params.cwds) ? params.cwds[0] : undefined, mockWorkspace), skills: mockSkills, errors: [] }] });
       if (method === "collaborationMode/list") return Promise.resolve({ data: [{ name: "default", mode: "default", model: models[0].id, reasoning_effort: "high" }, { name: "plan", mode: "plan", model: models[0].id, reasoning_effort: "high" }] });
-      if (method === "plugin/list") return Promise.resolve({ marketplaces: [{ name: "Codex 官方市场", path: null, plugins: mockPlugins }] });
-      if (method === "plugin/install") { const plugin = mockPlugins.find((entry) => entry.name === stringValue(params.pluginName)); if (plugin) plugin.installed = true; return Promise.resolve({ appsNeedingAuth: [], authPolicy: "ON_USE" }); }
-      if (method === "plugin/uninstall") { const plugin = mockPlugins.find((entry) => entry.id === stringValue(params.pluginId)); if (plugin) plugin.installed = false; return Promise.resolve({}); }
-      if (method === "plugin/read") { const plugin = mockPlugins.find((entry) => entry.name === stringValue(params.pluginName)); return Promise.resolve({ plugin: plugin ? { summary: plugin, marketplaceName: "Codex 官方市场", marketplacePath: null, description: stringValue(asRecord(asRecord(plugin).interface).longDescription), skills: [{ name: `${plugin.name}-skill`, description: "Mock skill", enabled: true }], apps: [], hooks: [{ eventName: "userPromptSubmit", key: "mock" }], mcpServers: ["mock-server"], scheduledTasks: [] } : null }); }
-      if (method === "marketplace/add") return Promise.resolve({ alreadyAdded: false, installedRoot: "mock-marketplace", marketplaceName: "本地市场" });
-      if (method === "marketplace/upgrade") return Promise.resolve({ errors: [], selectedMarketplaces: [], upgradedRoots: [] });
-      if (method === "marketplace/remove") return Promise.resolve({});
       if (method === "account/rateLimits/read") return Promise.resolve({ rateLimits: { primary: { usedPercent: 18, windowDurationMins: 300, resetsAt: Math.floor(Date.now() / 1000) + 3600 }, secondary: null } });
       if (method === "mcpServerStatus/list") return Promise.resolve({ data: [{ name: "filesystem", tools: { read_file: {}, write_file: {} }, authStatus: "unsupported" }], nextCursor: null });
       if (method === "thread/list") {
@@ -223,24 +211,16 @@ export function createMockBridge(): CodexBridge {
     getWorkspace: () => Promise.resolve(mockWorkspace),
     getLaunchProvider: () => Promise.resolve(null),
     chooseWorkspace: (defaultPath?: string) => Promise.resolve(defaultPath || mockWorkspace),
-    chooseClaudeMarketplaceDirectory: (defaultPath?: string) => Promise.resolve(defaultPath || mockWorkspace),
     registerWorkspace: (cwd: string) => Promise.resolve(cwd),
     getPreferences: () => Promise.resolve(mockPreferences),
     getCodexDefaults: () => Promise.resolve(mockDefaults),
     savePreferences: (preferences) => { mockPreferences = { ...mockPreferences, ...preferences }; return Promise.resolve(mockPreferences); },
     writeLog: () => Promise.resolve(),
     exportDiagnostics: () => Promise.resolve(null),
-    getBossKeyStatus: () => Promise.resolve(mockBossKeyStatus),
-    setBossKey: (accelerator) => {
-      mockBossKeyStatus = { accelerator, registered: true, message: `老板键 ${accelerator} 已启用。` };
-      mockPreferences = { ...mockPreferences, bossKey: accelerator };
-      return Promise.resolve(mockBossKeyStatus);
-    },
     saveClipboardImage: (dataUrl, suggestedName) => Promise.resolve({ path: "mock://image", dataUrl, name: suggestedName || "粘贴图片" }),
     copyImage: () => Promise.resolve(),
     saveTextFile: () => Promise.resolve({ path: "mock://codex-session.md" }),
     createHandoffPackage: () => Promise.resolve({ path: "mock://handoff.md", prompt: "请读取交接材料并继续完成任务。" }),
-    openWindowsTerminal: () => Promise.resolve(),
     readLocalImage: () => Promise.resolve(null),
     openLocalPath: () => Promise.resolve(""),
     openExternal: () => Promise.resolve(),
@@ -304,8 +284,6 @@ const MOCK_METHODS: Record<Exclude<AgentOperation, "getCapabilities" | "closeSes
   updateSessionSettings: "thread/settings/update", startTurn: "turn/start", startReview: "review/start", steerTurn: "turn/steer",
   interruptTurn: "turn/interrupt", compactSession: "thread/compact/start", readRateLimits: "account/rateLimits/read",
   listMcpServers: "mcpServerStatus/list", getGoal: "thread/goal/get", setGoal: "thread/goal/set", clearGoal: "thread/goal/clear",
-  listPlugins: "plugin/list", readPlugin: "plugin/read", installPlugin: "plugin/install", uninstallPlugin: "plugin/uninstall", updatePlugin: "plugin/install",
-  addMarketplace: "marketplace/add", updateMarketplace: "marketplace/upgrade", removeMarketplace: "marketplace/remove",
 };
 
 export function createMockAgentBridge(): AgentBridge {
@@ -331,5 +309,11 @@ export function createMockAgentBridge(): AgentBridge {
         payload: message.params ?? message.result ?? message.error ?? {},
       }));
     },
+    startTerminalSession: () => Promise.reject(new Error("浏览器预览不启动本机终端。")),
+    writeTerminalInput: () => Promise.resolve(),
+    resizeTerminal: () => Promise.resolve(),
+    interruptTerminal: () => Promise.resolve(),
+    closeTerminal: () => Promise.resolve(),
+    onTerminalEvent: () => () => undefined,
   };
 }

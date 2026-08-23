@@ -22,7 +22,6 @@ export type AgentCapability =
   | "commands"
   | "mcp"
   | "pluginsLoad"
-  | "pluginMarketplace"
   | "goals"
   | "plans"
   | "subagents"
@@ -107,14 +106,6 @@ export type AgentOperation =
   | "getGoal"
   | "setGoal"
   | "clearGoal"
-  | "listPlugins"
-  | "readPlugin"
-  | "installPlugin"
-  | "uninstallPlugin"
-  | "updatePlugin"
-  | "addMarketplace"
-  | "updateMarketplace"
-  | "removeMarketplace"
   | "getCapabilities"
   | "closeSession";
 

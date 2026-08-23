@@ -6,8 +6,6 @@ const snapshot = (extra: Partial<import("../shared/protocol").DesktopPreferences
   lastWorkspace: "",
   favoriteWorkspaces: [],
   theme: "github-light" as const,
-  displayMode: "simple" as const,
-  bossKey: "",
   ...extra,
 });
 

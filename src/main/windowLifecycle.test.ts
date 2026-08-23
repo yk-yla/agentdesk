@@ -3,19 +3,11 @@ import { describe, it } from "node:test";
 import { isRendererReloadShortcut, isSafeExternalUrl, isSameRendererLocation, WindowLifecycle, type WindowLifecycleDependencies } from "./windowLifecycle";
 
 function createLifecycle(overrides: Partial<WindowLifecycleDependencies> = {}) {
-  const registered = new Set<string>();
   let quitRequests = 0;
   const dependencies: WindowLifecycleDependencies = {
     createWindow: () => { throw new Error("not used"); },
     createTray: () => { throw new Error("not used"); },
     buildMenu: () => ({}),
-    shortcuts: {
-      register: (accelerator) => { registered.add(accelerator); return true; },
-      unregister: (accelerator) => { registered.delete(accelerator); },
-      unregisterAll: () => { registered.clear(); },
-      isRegistered: (accelerator) => registered.has(accelerator),
-    },
-    writeBossKey: () => undefined,
     openExternal: async () => undefined,
     publish: () => undefined,
     appPath: () => "C:\\AgentDesk",
@@ -26,7 +18,7 @@ function createLifecycle(overrides: Partial<WindowLifecycleDependencies> = {}) {
     onSecondInstance: () => undefined,
     ...overrides,
   };
-  return { lifecycle: new WindowLifecycle(dependencies), registered, quitRequests: () => quitRequests };
+  return { lifecycle: new WindowLifecycle(dependencies), quitRequests: () => quitRequests };
 }
 
 function nextTask() {
@@ -117,28 +109,19 @@ describe("WindowLifecycle policies", () => {
   it("returns to a usable state when backend shutdown fails", async () => {
     const messages: unknown[] = [];
     const { lifecycle, quitRequests } = createLifecycle({ publish: (message) => messages.push(message) });
+    let disposed = 0;
     lifecycle.handleBeforeQuit(
       { preventDefault: () => undefined },
       async () => { throw new Error("close failed"); },
-      () => undefined,
+      () => { disposed += 1; },
     );
     await nextTask();
 
     assert.equal(lifecycle.isQuitting, false);
     assert.equal(lifecycle.allowQuit, false);
     assert.equal(quitRequests(), 0);
+    assert.equal(disposed, 0);
     assert.match(JSON.stringify(messages), /close failed/);
   });
 
-  it("keeps the previous boss key when persistence fails", async () => {
-    const { lifecycle, registered } = createLifecycle({
-      writeBossKey: (accelerator) => {
-        if (accelerator === "Alt+Q") throw new Error("write failed");
-      },
-    });
-    lifecycle.registerBossKey("F2");
-    await assert.rejects(() => lifecycle.changeBossKey("Alt+Q"), /write failed/);
-    assert.equal(registered.has("F2"), true);
-    assert.equal(registered.has("Alt+Q"), false);
-  });
 });

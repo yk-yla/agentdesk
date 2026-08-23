@@ -35,6 +35,30 @@ describe("update workspace state budgets", () => {
     assert.equal(restored?.sessions[claude.id]?.provider, "claude");
   });
 
+  it("restores terminal tabs as stopped without resuming their native session", () => {
+    const terminal = emptySession("terminal-session", "C:\\work", "gpt", "medium", "codex");
+    terminal.threadId = "codex-thread";
+    terminal.presentationMode = "terminal";
+    const state = createWorkspaceState({
+      workspace: terminal.cwd,
+      layout: { panes: [{ id: "pane-1", tabIds: [terminal.id], activeTabId: terminal.id }], activePaneId: "pane-1" },
+      sessions: { [terminal.id]: terminal },
+      drafts: new Map(),
+      attachments: {},
+      queuedMessages: {},
+      pendingSteers: {},
+      sidebarCollapsed: false,
+    });
+
+    const restored = parseWorkspaceState(state, terminal.cwd);
+    assert.equal(restored?.sessions[terminal.id].presentationMode, "terminal");
+    assert.equal(restored?.sessions[terminal.id].threadId, "codex-thread");
+    assert.equal(restored?.sessions[terminal.id].terminalSuspended, true);
+    assert.equal(restored?.sessions[terminal.id].status, "idle");
+    assert.equal(restored?.sessions[terminal.id].statusLabel, "终端已停止");
+    assert.deepEqual(restored?.threadSessionIds, []);
+  });
+
   it("restores a multi-workspace snapshot even when the launch workspace differs", () => {
     const left = emptySession("left", "C:\\left");
     const right = emptySession("right", "D:\\right", "sonnet", "medium", "claude");

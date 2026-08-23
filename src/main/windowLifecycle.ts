@@ -1,6 +1,5 @@
 import path from "node:path";
-import type { BossKeyStatus, DesktopWindowState, JsonRpcMessage } from "../shared/protocol";
-import { DEFAULT_BOSS_KEY, normalizeBossKeyAccelerator } from "../shared/bossKey";
+import type { DesktopWindowState, JsonRpcMessage } from "../shared/protocol";
 
 interface EventWithPreventDefault {
   preventDefault(): void;
@@ -49,19 +48,10 @@ interface DesktopTray {
   on(event: "click" | "double-click", listener: () => void): void;
 }
 
-interface ShortcutRegistry {
-  register(accelerator: string, callback: () => void): boolean;
-  unregister(accelerator: string): void;
-  unregisterAll(): void;
-  isRegistered(accelerator: string): boolean;
-}
-
 export interface WindowLifecycleDependencies {
   createWindow(options: Record<string, unknown>): DesktopWindow;
   createTray(iconPath: string): DesktopTray;
   buildMenu(template: Array<Record<string, unknown>>): unknown;
-  shortcuts: ShortcutRegistry;
-  writeBossKey(accelerator: string): void | Promise<void>;
   openExternal(url: string): Promise<unknown>;
   publish(message: JsonRpcMessage): void;
   appPath(): string;
@@ -107,10 +97,6 @@ export class WindowLifecycle {
   private tray: DesktopTray | null = null;
   private quitting = false;
   private quitAllowed = false;
-  private registeredBossKey = "";
-  private lastBossKeyPressAt = 0;
-  private bossKeyStatus: BossKeyStatus = { accelerator: DEFAULT_BOSS_KEY, registered: false, message: "老板键尚未注册。" };
-
   constructor(private readonly dependencies: WindowLifecycleDependencies) {}
 
   get isQuitting() {
@@ -257,46 +243,6 @@ export class WindowLifecycle {
     return this.currentState();
   }
 
-  bossKeyState() {
-    return { ...this.bossKeyStatus };
-  }
-
-  registerBossKey(value: unknown) {
-    const accelerator = normalizeBossKeyAccelerator(value) || DEFAULT_BOSS_KEY;
-    const registered = this.dependencies.shortcuts.register(accelerator, () => this.toggleFromBossKey());
-    this.registeredBossKey = registered ? accelerator : "";
-    this.bossKeyStatus = {
-      accelerator,
-      registered,
-      message: registered ? `老板键 ${accelerator} 已启用。` : `老板键 ${accelerator} 已被其他程序占用。`,
-    };
-    return this.bossKeyState();
-  }
-
-  async changeBossKey(value: unknown) {
-    const accelerator = normalizeBossKeyAccelerator(value);
-    if (!accelerator) throw new Error("老板键格式无效，请使用 F1-F24 单键或带 Ctrl、Alt、Shift、Win 的组合键。");
-    if (accelerator === this.registeredBossKey && this.dependencies.shortcuts.isRegistered(accelerator)) {
-      await this.dependencies.writeBossKey(accelerator);
-      this.bossKeyStatus = { accelerator, registered: true, message: `老板键 ${accelerator} 已启用。` };
-      return this.bossKeyState();
-    }
-    if (!this.dependencies.shortcuts.register(accelerator, () => this.toggleFromBossKey())) {
-      throw new Error(`快捷键 ${accelerator} 已被其他程序占用，原老板键保持不变。`);
-    }
-    const previous = this.registeredBossKey;
-    try {
-      await this.dependencies.writeBossKey(accelerator);
-    } catch (error) {
-      this.dependencies.shortcuts.unregister(accelerator);
-      throw error;
-    }
-    this.registeredBossKey = accelerator;
-    if (previous) this.dependencies.shortcuts.unregister(previous);
-    this.bossKeyStatus = { accelerator, registered: true, message: `老板键 ${accelerator} 已启用。` };
-    return this.bossKeyState();
-  }
-
   requestQuit() {
     this.quitting = true;
     this.dependencies.quitApp();
@@ -329,10 +275,13 @@ export class WindowLifecycle {
 
   handleBeforeQuit(event: EventWithPreventDefault, closeBackends: () => Promise<void>, dispose: () => void) {
     this.quitting = true;
-    dispose();
-    if (this.quitAllowed) return;
+    if (this.quitAllowed) {
+      dispose();
+      return;
+    }
     event.preventDefault();
     void closeBackends().then(() => {
+      dispose();
       this.quitAllowed = true;
       this.dependencies.quitApp();
     }).catch((error) => {
@@ -340,20 +289,6 @@ export class WindowLifecycle {
       this.quitAllowed = false;
       this.dependencies.publish({ method: "client/error", params: { message: error instanceof Error ? error.message : "关闭后台服务失败。" } });
     });
-  }
-
-  dispose() {
-    this.dependencies.shortcuts.unregisterAll();
-  }
-
-  private toggleFromBossKey() {
-    const now = this.dependencies.now?.() || Date.now();
-    if (now - this.lastBossKeyPressAt < 250) return;
-    this.lastBossKeyPressAt = now;
-    const window = this.window;
-    if (!window || window.isDestroyed()) return;
-    if (window.isVisible() && !window.isMinimized() && window.isFocused()) window.minimize();
-    else this.show();
   }
 
   private emitWindowState() {

@@ -3,7 +3,7 @@ import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { describe, it } from "node:test";
-import { inspectAndExtractClaudeZip, inspectClaudeExecutable, isOfficialClaudeSignature, MAX_CLAUDE_BINARY_BYTES, normalizePowerShellError, type ClaudeSignatureInspection } from "./claudeUpdater";
+import { claudeCodeExecutablePath, inspectAndExtractClaudeZip, inspectClaudeExecutable, isOfficialClaudeSignature, MAX_CLAUDE_BINARY_BYTES, normalizePowerShellError, type ClaudeSignatureInspection } from "./claudeUpdater";
 
 const official: ClaudeSignatureInspection = {
   status: "Valid",
@@ -14,6 +14,21 @@ const official: ClaudeSignatureInspection = {
 };
 
 describe("Claude updater signature policy", () => {
+  it("keeps an npm claude.cmd as the runtime entry without treating it as an update target", () => {
+    const directory = mkdtempSync(path.join(tmpdir(), "agentdesk-claude-entry-"));
+    const shim = path.join(directory, "claude.cmd");
+    writeFileSync(shim, "@echo off\r\n");
+    const previous = process.env.CLAUDE_CODE_EXECUTABLE;
+    process.env.CLAUDE_CODE_EXECUTABLE = shim;
+    try {
+      assert.equal(claudeCodeExecutablePath(), path.resolve(shim));
+    } finally {
+      if (previous === undefined) delete process.env.CLAUDE_CODE_EXECUTABLE;
+      else process.env.CLAUDE_CODE_EXECUTABLE = previous;
+      rmSync(directory, { recursive: true, force: true });
+    }
+  });
+
   it("accepts only the exact Anthropic publisher with a valid code-signing chain", () => {
     assert.equal(isOfficialClaudeSignature(official), true);
     assert.equal(isOfficialClaudeSignature({ ...official, signer: 'CN="Other Anthropic Tools", O="Other"' }), false);

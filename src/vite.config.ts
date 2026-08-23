@@ -17,6 +17,14 @@ export default defineConfig(({ mode }) => {
     build: {
       outDir: path.join(sourceDir, browserPreview ? "../build/preview" : "../build/renderer"),
       emptyOutDir: true,
+      rollupOptions: {
+        output: {
+          manualChunks: {
+            "react-vendor": ["react", "react-dom"],
+            "xterm": ["@xterm/xterm", "@xterm/addon-fit"],
+          },
+        },
+      },
     },
   };
 });

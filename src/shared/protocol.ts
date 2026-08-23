@@ -1,6 +1,10 @@
 import type { AgentEventEnvelope, AgentInteractionResponse, AgentOperation, AgentProvider, AgentRequestContext } from "./agentProtocol";
+import type { TerminalEvent, TerminalInputRequest, TerminalResizeRequest, TerminalSessionCommand, TerminalSessionInfo, TerminalSessionRequest } from "./terminalProtocol";
 
 export type JsonObject = Record<string, unknown>;
+
+export type PresentationMode = "workbench" | "terminal";
+export const DEFAULT_PRESENTATION_MODE: PresentationMode = "workbench";
 
 export type LogLevel = "debug" | "info" | "warn" | "error";
 
@@ -48,17 +52,9 @@ export function decodeCodexRpcError(value: unknown): CodexRpcErrorPayload | null
   }
 }
 
-export type DisplayMode = "simple" | "full";
-
 export const MIN_BASE_FONT_SIZE = 11;
-export const DEFAULT_BASE_FONT_SIZE = 12;
+export const DEFAULT_BASE_FONT_SIZE = 13;
 export const MAX_BASE_FONT_SIZE = 14;
-
-export interface BossKeyStatus {
-  accelerator: string;
-  registered: boolean;
-  message: string;
-}
 
 export interface ModelContextWindowCacheEntry {
   tokens: number;
@@ -113,11 +109,12 @@ export interface DesktopPreferences {
   favoriteSessions?: string[];
   favoriteSessionSummaries?: Record<string, FavoriteSessionSummary>;
   theme: ThemeId;
-  displayMode: DisplayMode;
-  bossKey: string;
   modelContextWindows?: Record<string, ModelContextWindowCacheEntry>;
   claudeModelCache?: ClaudeModelCache;
   lastReasoningEfforts?: Partial<Record<AgentProvider, string>>;
+  /** @deprecated 由 lastCodexPresentationMode 替代，读取时迁移。 */
+  lastPresentationModes?: Partial<Record<AgentProvider, PresentationMode>>;
+  lastCodexPresentationMode?: PresentationMode;
   /** 斜杠命令和 Skill 的最近使用时间，键为 command:name 或 skill:name。 */
   recentCommandUsage?: Record<string, number>;
   compactionCounts?: Record<string, CompactionRecord>;
@@ -210,11 +207,13 @@ export type ClaudeCodeUpdatePhase = "idle" | "checking" | "upToDate" | "availabl
 
 export interface ClaudeRuntimeStatus {
   phase: ClaudeCodeUpdatePhase;
-  binarySource: "managed" | "sdk";
+  binarySource: "managed" | "sdk" | "external";
+  installSource?: "npm" | "winget" | "managed" | "unknown";
   binaryVersion: string;
   sdkVersion: string;
   latestVersion?: string;
   checkedAt?: number;
+  nextCheckAt?: number;
   credentialsAvailable: boolean;
   credentialSource: "settings" | "process" | "native" | "unavailable";
   credentialMessage: string;
@@ -252,14 +251,10 @@ export interface CodexBridge {
   savePreferences(preferences: Partial<DesktopPreferences>): Promise<DesktopPreferences>;
   writeLog(entry: ClientLogEntry): Promise<void>;
   exportDiagnostics(): Promise<DiagnosticExport | null>;
-  getBossKeyStatus(): Promise<BossKeyStatus>;
-  setBossKey(accelerator: string): Promise<BossKeyStatus>;
   saveClipboardImage(dataUrl: string, suggestedName?: string): Promise<SavedImage>;
   copyImage(dataUrl: string): Promise<void>;
   saveTextFile(content: string, suggestedName?: string): Promise<SavedTextFile | null>;
   createHandoffPackage(input: { cwd: string; title: string; threadId: string; content: string }): Promise<HandoffPackage>;
-  chooseClaudeMarketplaceDirectory(defaultPath?: string): Promise<string | null>;
-  openWindowsTerminal(cwd: string): Promise<void>;
   readLocalImage(filePath: string): Promise<string | null>;
   openLocalPath(input: LocalPathOpenRequest): Promise<string>;
   openExternal(url: string): Promise<void>;
@@ -291,6 +286,12 @@ export interface AgentBridge extends Omit<CodexBridge, "request" | "respond" | "
   agentRequest(provider: AgentProvider, operation: AgentOperation, params?: JsonObject, context?: AgentRequestContext): Promise<unknown>;
   respondToInteraction(response: AgentInteractionResponse): Promise<void>;
   onAgentEvent(listener: (event: AgentEventEnvelope) => void): () => void;
+  startTerminalSession(request: TerminalSessionRequest): Promise<TerminalSessionInfo>;
+  writeTerminalInput(request: TerminalInputRequest): Promise<void>;
+  resizeTerminal(request: TerminalResizeRequest): Promise<void>;
+  interruptTerminal(request: TerminalSessionCommand): Promise<void>;
+  closeTerminal(request: TerminalSessionCommand): Promise<void>;
+  onTerminalEvent(listener: (event: TerminalEvent) => void): () => void;
   dev?: {
     holdClaudeWorkerRequests(): Promise<void>;
     injectClaudeWorkerFatal(): Promise<void>;

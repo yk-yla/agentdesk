@@ -1,4 +1,4 @@
-import { app, BrowserWindow, clipboard, dialog, globalShortcut, ipcMain, Menu, nativeImage, net, Notification, shell, Tray, type NotificationConstructorOptions } from "electron";
+import { app, BrowserWindow, clipboard, dialog, ipcMain, Menu, nativeImage, net, Notification, shell, Tray, type NotificationConstructorOptions } from "electron";
 import { autoUpdater } from "electron-updater";
 import { spawnSync } from "node:child_process";
 import { existsSync, lstatSync, mkdirSync, promises as fsPromises, readFileSync, statSync, writeFileSync } from "node:fs";
@@ -8,6 +8,7 @@ import { createServer, type Server } from "node:http";
 import path from "node:path";
 import { parse as parseToml } from "smol-toml";
 import type { CodexDefaults, DiagnosticExport, HandoffPackage, JsonRpcMessage, SavedImage, SavedTextFile } from "../shared/protocol";
+import type { TerminalInputRequest, TerminalResizeRequest, TerminalSessionCommand, TerminalSessionRequest } from "../shared/terminalProtocol";
 import { createBackendRegistry } from "./agent/backendRegistry";
 import { prepareAgentRequest } from "./agent/requestAdapterRegistry";
 import { writeTextFileAtomicAsync } from "./atomicFile";
@@ -19,10 +20,6 @@ import { CodexTitleGenerator } from "./providers/codex/codexTitleGenerator";
 import { CodexAppServer } from "./providers/codex/codexAppServer";
 import { CodexImagePersistence } from "./providers/codex/codexImagePersistence";
 import { ClaudeBackend } from "./providers/claude/ClaudeBackend";
-import type { ClaudeGatewayFixtureKind, ClaudeLifecycleFixtureKind } from "./providers/claude/claudeWorkerProtocol";
-import { prepareClaudeTurnParams } from "./providers/claude/claudeImageInput";
-import { ClaudeWorkerHost } from "./providers/claude/claudeWorkerHost";
-import { readClaudeCredentials } from "./providers/claude/claudeCredentials";
 import { managedClaudeExecutablePath } from "./providers/claude/claudeUpdater";
 import { resolveExecutableFromPath } from "./executablePath";
 import { runShutdownSteps, ShutdownCoordinator } from "./shutdownCoordinator";
@@ -35,13 +32,14 @@ import { isSafeExternalUrl, WindowLifecycle, type DesktopWindow } from "./window
 import { registerDesktopIpc } from "./ipc/registerDesktopIpc";
 import { FileLogger, logErrorDetails } from "./logger";
 import { buildDiagnosticBundle } from "./diagnostics";
-import { launchWindowsTerminal } from "./windowsTerminal";
 import { requestedProviderFromArgs, requestedWorkspaceFromArgs, startupWorkspace } from "./workspaceArgs";
 import { WorkspaceAuthorizationRegistry, type WorkspaceAuthorizationSource } from "./workspaceAuthorizationRegistry";
 import { WorkspaceGrantStore } from "./workspaceGrantStore";
 import { parseClipboardImageDataUrl } from "./clipboardImageData";
 import { isClipboardImageSizeAllowed } from "../shared/imagePolicy";
 import { WorkspaceSnapshotCoordinator } from "./workspaceSnapshotCoordinator";
+import { TerminalSessionManager } from "./terminalSessionManager";
+import { NativeSessionOwnershipRegistry } from "./agent/nativeSessionOwnershipRegistry";
 import { detectImageMediaType, MAX_LOCAL_IMAGE_BYTES } from "./imageContent";
 
 const MAX_AUTHORIZED_LOCAL_PATHS = 4_096;
@@ -50,6 +48,8 @@ const MAX_ATTACHMENT_FILES = 10_000;
 const MAX_ATTACHMENT_STORAGE_BYTES = 1024 * 1024 * 1024;
 const backendShutdownCoordinator = new ShutdownCoordinator(35_000);
 let workspacePath = resolveWorkspace(process.argv);
+type ClaudeGatewayFixtureKind = "unauthorized" | "rateLimited" | "serverError" | "truncatedSse" | "timeout" | "offline";
+type ClaudeLifecycleFixtureKind = "longBash" | "hook" | "mcp" | "userQuestion" | "stream" | "compact" | "incompleteTool";
 let claudeGatewayFixture: { kind: ClaudeGatewayFixtureKind; baseUrl: string; timeoutMs?: number } | null = null;
 let claudeGatewayFixtureServer: Server | null = null;
 let claudeLifecycleFixture: ClaudeLifecycleFixtureKind | null = null;
@@ -57,6 +57,7 @@ const attachmentCleanupTask = new CoalescingAsyncTask();
 const processSupervisor = new ProcessSupervisor();
 let codexCliUpdateManager: CodexCliUpdateManager;
 let claudeUpdateManager: ClaudeUpdateManager;
+const nativeSessionOwnership = new NativeSessionOwnershipRegistry();
 
 const EMPTY_CODEX_DEFAULTS: CodexDefaults = { model: "", effort: "" };
 
@@ -88,8 +89,6 @@ const windowLifecycle = new WindowLifecycle({
   createWindow: (options) => new BrowserWindow(options) as unknown as DesktopWindow,
   createTray: (iconPath) => new Tray(iconPath),
   buildMenu: (template) => Menu.buildFromTemplate(template as Electron.MenuItemConstructorOptions[]),
-  shortcuts: globalShortcut,
-  writeBossKey: (accelerator) => preferencesStore.write({ bossKey: accelerator }).then(() => undefined),
   openExternal: (url) => shell.openExternal(url),
   publish: (message) => emitToRenderer(message),
   appPath: () => app.getAppPath(),
@@ -137,15 +136,17 @@ function showRetainedDesktopNotification(options: NotificationConstructorOptions
   }
 }
 
+let attachmentsDirectory: string | null = null;
 function attachmentsPath() {
-  const directory = path.join(app.getPath("userData"), "attachments");
-  mkdirSync(directory, { recursive: true });
-  return directory;
+  if (!attachmentsDirectory) {
+    attachmentsDirectory = path.join(app.getPath("userData"), "attachments");
+    mkdirSync(attachmentsDirectory, { recursive: true });
+  }
+  return attachmentsDirectory;
 }
 
 const authorizedLocalPaths = new Set<string>();
 const authorizedClaudeImagePaths = new Set<string>();
-const authorizedClaudeMarketplacePaths = new Set<string>();
 const authorizedWorkspacePaths = new WorkspaceAuthorizationRegistry(MAX_AUTHORIZED_WORKSPACE_PATHS);
 const pendingWorkspaceAuthorizationRequests = new Map<string, Promise<string>>();
 let workspaceAuthorizationGrantQueue = Promise.resolve();
@@ -219,18 +220,6 @@ function registerAuthorizedImageReferences(value: unknown) {
   Object.values(record).forEach(registerAuthorizedImageReferences);
 }
 
-function registerAuthorizedClaudeMarketplacePath(directory: string) {
-  if (!existingDirectory(directory)) return;
-  const resolved = canonicalPath(directory);
-  authorizedClaudeMarketplacePaths.delete(resolved);
-  authorizedClaudeMarketplacePaths.add(resolved);
-  while (authorizedClaudeMarketplacePaths.size > MAX_AUTHORIZED_WORKSPACE_PATHS) {
-    const oldest = authorizedClaudeMarketplacePaths.values().next().value as string | undefined;
-    if (!oldest) break;
-    authorizedClaudeMarketplacePaths.delete(oldest);
-  }
-}
-
 function isAllowedLocalPath(filePath: string) {
   const resolved = canonicalPath(filePath);
   return isWithinDirectory(resolved, attachmentsPath())
@@ -249,6 +238,7 @@ async function closeAllBackendsForExit() {
         appLogger.log("warn", "app.workspace_snapshot.failed", logErrorDetails(error));
       }
       await runShutdownSteps([
+        { name: "内置终端", run: () => terminalSessionManager.closeAll() },
         { name: "Provider", run: () => backendManager.close() },
         { name: "已跟踪进程", run: () => processSupervisor.terminateAll() },
         { name: "Claude 网关夹具", run: () => closeClaudeGatewayFixture() },
@@ -358,14 +348,6 @@ async function setClaudeGatewayFixture(kind: ClaudeGatewayFixtureKind) {
   return { kind, baseUrl };
 }
 
-function readClaudeCredentialsForQuery() {
-  if (!claudeGatewayFixture && !claudeLifecycleFixture) return readClaudeCredentials();
-  if (claudeLifecycleFixture) return { source: "process" as const, baseUrl: "http://127.0.0.1", authToken: "agentdesk-lifecycle-fixture-token" };
-  const fixture = claudeGatewayFixture;
-  if (!fixture) throw new Error("Claude 网关夹具未启动。");
-  return { source: "process" as const, baseUrl: fixture.baseUrl, authToken: "agentdesk-c22-fixture-token" };
-}
-
 function dataUrlForImage(filePath: string): string | null {
   if (!existsSync(filePath)) return null;
   try {
@@ -446,12 +428,6 @@ function runLocalCommand(command: string, args: string[], cwd: string) {
   const output = typeof result.stdout === "string" ? result.stdout.trim() : "";
   const error = typeof result.stderr === "string" ? result.stderr.trim() : "";
   return { ok: result.status === 0, output: result.status === 0 ? output : (error || output || "命令执行失败") };
-}
-
-function openWindowsTerminal(cwd: string) {
-  if (process.platform !== "win32") throw new Error("Windows Terminal 仅支持 Windows。" );
-  const resolved = requireAuthorizedWorkspacePath(cwd);
-  launchWindowsTerminal(resolved);
 }
 
 function collectHandoffGitState(cwd: string) {
@@ -611,31 +587,33 @@ const codexAppServer = new CodexAppServer({
   },
 });
 
-function claudeWorkerPath() {
-  return app.isPackaged
-    ? path.join(process.resourcesPath, "app.asar.unpacked", "build", "electron", "main", "providers", "claude", "claudeWorker.mjs")
-    : path.join(__dirname, "providers", "claude", "claudeWorker.mjs");
-}
-
-const claudeWorkerHost = new ClaudeWorkerHost(claudeWorkerPath, {
-  reportCleanupFailure: (message) => appLogger.log("error", "claude.worker.cleanup_failed", { message }),
-});
 let claudeBackend: ClaudeBackend;
-const backendManager = createBackendRegistry([new CodexBackend(codexAppServer, codexTitleGenerator), (claudeBackend = new ClaudeBackend(claudeWorkerHost, undefined, readClaudeCredentialsForQuery, () => claudeGatewayFixture || claudeLifecycleFixture ? { kind: claudeGatewayFixture?.kind || "offline", ...(claudeGatewayFixture?.timeoutMs ? { timeoutMs: claudeGatewayFixture.timeoutMs } : {}), ...(claudeLifecycleFixture ? { lifecycle: claudeLifecycleFixture } : {}) } : undefined, undefined, (directory) => authorizedClaudeMarketplacePaths.has(canonicalPath(directory))))], appLogger, (cwd) => isAuthorizedWorkspacePath(cwd));
+const backendManager = createBackendRegistry([new CodexBackend(codexAppServer, codexTitleGenerator), (claudeBackend = new ClaudeBackend())], appLogger, (cwd) => isAuthorizedWorkspacePath(cwd), nativeSessionOwnership);
+const terminalSessionManager = new TerminalSessionManager({
+  isWorkspaceAuthorized: (cwd) => isAuthorizedWorkspacePath(cwd),
+  assertNativeSessionAuthorized: (provider, nativeSessionId, cwd) => backendManager.assertNativeSessionAuthorized(provider, nativeSessionId, cwd),
+  nativeOwnership: nativeSessionOwnership,
+  emit: (event) => windowLifecycle.send("terminal:event", event),
+  log: (level, event, details) => appLogger.log(level, event, details),
+});
 
-claudeUpdateManager = new ClaudeUpdateManager({
+  claudeUpdateManager = new ClaudeUpdateManager({
   appPath: () => app.getAppPath(),
   userDataPath: () => app.getPath("userData"),
   fetch: (url, init) => net.fetch(url, init),
-  shutdownQueries: () => claudeBackend.shutdownQueries(),
+    shutdownQueries: () => claudeBackend.shutdown(),
+    shutdownTerminals: () => terminalSessionManager.closeProvider("claude"),
+    setTerminalProviderBlocked: (_provider, blocked) => terminalSessionManager.setProviderUpdateBlocked("claude", blocked),
   emitStatus: (status) => windowLifecycle.send("claude:runtime-status-changed", status),
 });
 
-codexCliUpdateManager = new CodexCliUpdateManager({
+  codexCliUpdateManager = new CodexCliUpdateManager({
   processSupervisor,
   appServer: codexAppServer,
   userDataPath: () => app.getPath("userData"),
   isQuitting: () => windowLifecycle.isQuitting,
+    shutdownTerminals: () => terminalSessionManager.closeProvider("codex"),
+    setTerminalProviderBlocked: (_provider, blocked) => terminalSessionManager.setProviderUpdateBlocked("codex", blocked),
   emitStatus: (status) => windowLifecycle.send("agentdesk:cli-update-status-changed", status),
   notify: (title, body) => {
     showRetainedDesktopNotification({ title, body }, () => windowLifecycle.show());
@@ -687,10 +665,6 @@ if (hasLock) {
       workspaceSnapshot: {
         complete: (requestId, workspaceState) => workspaceSnapshotCoordinator.complete(requestId, workspaceState),
       },
-      bossKey: {
-        status: () => windowLifecycle.bossKeyState(),
-        change: (accelerator) => windowLifecycle.changeBossKey(accelerator),
-      },
       codexDefaults: () => readCodexDefaults(),
       files: {
         saveClipboardImage: (input) => {
@@ -713,18 +687,6 @@ if (hasLock) {
           const value = input as Record<string, unknown>;
           if (typeof value.cwd !== "string" || typeof value.title !== "string" || typeof value.threadId !== "string" || typeof value.content !== "string") throw new Error("交接参数无效。");
           return createHandoffPackage({ cwd: value.cwd, title: value.title, threadId: value.threadId, content: value.content });
-        },
-        chooseClaudeMarketplaceDirectory: async (defaultPath) => {
-          const initial = typeof defaultPath === "string" && existingDirectory(defaultPath) ? defaultPath : workspacePath;
-          const result = await dialog.showOpenDialog({ properties: ["openDirectory"], defaultPath: initial });
-          if (result.canceled || !result.filePaths[0]) return null;
-          const selected = canonicalPath(result.filePaths[0]);
-          registerAuthorizedClaudeMarketplacePath(selected);
-          return selected;
-        },
-        openTerminal: (cwd) => {
-          if (typeof cwd !== "string") throw new Error("工作目录无效。");
-          return openWindowsTerminal(cwd);
         },
         readLocalImage: (filePath) => {
           if (typeof filePath !== "string") return null;
@@ -783,16 +745,33 @@ if (hasLock) {
       },
       agent: {
         request: (request) => {
-          const params = prepareAgentRequest(request.provider, request.operation, request.params, (input) =>
-            prepareClaudeTurnParams(input, attachmentsPath(), authorizedClaudeImagePaths));
+          const params = request.provider === "claude"
+            ? request.params
+            : prepareAgentRequest(request.provider, request.operation, request.params, (input) => input);
           return backendManager.request(request.provider, request.operation, params, request.context);
         },
         respond: (response) => backendManager.respond(response.ref, response.result),
       },
+      terminal: {
+        start: async (request: TerminalSessionRequest) => {
+          if (request.nativeSessionId) {
+            await backendManager.prepareTerminalSession(request.provider, {
+              sessionId: request.sessionId,
+              canonicalCwd: canonicalPath(request.cwd),
+              nativeSessionId: request.nativeSessionId,
+            });
+          }
+          return terminalSessionManager.start(request);
+        },
+        write: (request: TerminalInputRequest) => terminalSessionManager.write(request),
+        resize: (request: TerminalResizeRequest) => terminalSessionManager.resize(request),
+        interrupt: (request: TerminalSessionCommand) => terminalSessionManager.interrupt(request),
+        close: (request: TerminalSessionCommand) => terminalSessionManager.close(request),
+      },
       ...(process.env.ELECTRON_RENDERER_URL ? {
         development: {
-          holdClaudeWorkerRequests: () => claudeWorkerHost.holdRequestsForTesting(),
-          injectClaudeWorkerFatal: () => claudeWorkerHost.injectFatalForTesting(),
+          holdClaudeWorkerRequests: () => Promise.resolve(),
+          injectClaudeWorkerFatal: () => Promise.resolve(),
           setClaudeGatewayFixture: (kind: unknown) => {
             if (kind === null) return closeClaudeGatewayFixture().then(() => ({ kind: null }));
             if (kind !== "unauthorized" && kind !== "rateLimited" && kind !== "serverError" && kind !== "truncatedSse" && kind !== "timeout" && kind !== "offline") throw new Error("Claude 网关验收类型无效。");
@@ -824,13 +803,16 @@ if (hasLock) {
       } : {}),
     });
     windowLifecycle.createWindow();
-    windowLifecycle.registerBossKey(startupPreferences.bossKey);
     windowLifecycle.createTray();
+    desktopUpdateManager.initialize();
     void codexCliUpdateManager.initialize();
   });
 }
 
-app.on("before-quit", (event) => windowLifecycle.handleBeforeQuit(event, closeAllBackendsForExit, () => codexCliUpdateManager.dispose()));
+app.on("before-quit", (event) => windowLifecycle.handleBeforeQuit(event, closeAllBackendsForExit, () => {
+  desktopUpdateManager.dispose();
+  codexCliUpdateManager.dispose();
+}));
 
 let rendererRecoveryInFlight = false;
 app.on("render-process-gone", (_event, webContents, details) => {
@@ -854,9 +836,5 @@ app.on("render-process-gone", (_event, webContents, details) => {
 
 app.on("child-process-gone", (_event, details) => {
   appLogger.log("error", "electron.child_process_gone", { details });
-});
-
-app.on("will-quit", () => {
-  windowLifecycle.dispose();
 });
 

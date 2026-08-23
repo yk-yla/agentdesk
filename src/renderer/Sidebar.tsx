@@ -1,6 +1,5 @@
-import { Clock3, Columns2, FolderOpen, Package, PanelLeftClose, PanelLeftOpen, Star } from "lucide-react";
+import { Clock3, Columns2, FolderOpen, PanelLeftClose, PanelLeftOpen, Star } from "lucide-react";
 import { memo, useState, type PointerEvent as ReactPointerEvent } from "react";
-import type { CapabilityState } from "../shared/agentProtocol";
 import HistorySidebar, { type HistorySidebarProps, type HistoryView } from "./HistorySidebar";
 import SettingsPopover, { type SettingsPopoverConfig } from "./SettingsPopover";
 import WorkspaceNavigation, { type WorkspaceNavigationProps } from "./WorkspaceNavigation";
@@ -14,10 +13,8 @@ export interface SidebarLayout {
 }
 
 export interface SidebarToolbar {
-  pluginMarketplaceState: CapabilityState;
   splitDisabled: boolean;
   onChooseWorkspace: () => void;
-  onOpenPlugins: () => void;
   onSplitPane: () => void;
 }
 
@@ -40,7 +37,6 @@ function SidebarBase({ layout, toolbar, workspace, history, settings }: SidebarP
   return <aside className={`sidebar ${layout.collapsed ? "collapsed" : ""}`}>
     <div className="sidebar-actions">
       <button className="icon-button" onClick={toolbar.onChooseWorkspace} title="选择目录" aria-label="选择目录"><FolderOpen size={16} /></button>
-      {toolbar.pluginMarketplaceState !== "unsupported" ? <button className="icon-button" disabled={toolbar.pluginMarketplaceState !== "supported"} onClick={toolbar.onOpenPlugins} title={toolbar.pluginMarketplaceState === "supported" ? "插件市场" : "当前 Provider 的插件市场暂不可用"} aria-label="插件市场"><Package size={15} /></button> : null}
       <button className="icon-button" disabled={toolbar.splitDisabled} onClick={toolbar.onSplitPane} title="分成两列" aria-label="分成两列"><Columns2 size={16} /></button>
       <SettingsPopover collapsed={layout.collapsed} {...settings} />
       <button className="icon-button sidebar-toggle" onClick={layout.onToggleCollapsed} title={layout.collapsed ? "展开左侧面板" : "收起左侧面板"} aria-label={layout.collapsed ? "展开左侧面板" : "收起左侧面板"} aria-expanded={!layout.collapsed}>{layout.collapsed ? <PanelLeftOpen size={16} /> : <PanelLeftClose size={16} />}</button>

@@ -68,18 +68,16 @@ async page => {
     assert(await sidebar.locator(".provider-new-group").count() === 0, "侧栏顶部仍显示 Codex、Claude 大按钮。" );
     assert(await currentWorkspace.locator(".provider-new-codex").count() === 1, "当前目录缺少 Codex 新建入口。" );
     assert(await currentWorkspace.locator(".provider-new-claude").count() === 1, "当前目录缺少 Claude Code 新建入口。" );
-    assert(await currentWorkspace.locator(".current-workspace-terminal").count() === 1, "当前目录缺少 WT 入口。" );
     const currentWorkspacePin = currentWorkspace.locator(".current-workspace-pin");
     if (await currentWorkspacePin.getAttribute("aria-pressed") !== "true") await currentWorkspacePin.click();
-    await sidebar.locator(".shortcut-row .shortcut-terminal").first().waitFor({ state: "visible", timeout: 10_000 });
-    assert(await page.locator(".composer-more-menu").getByText("在 WT 打开当前目录", { exact: true }).count() === 0, "会话更多菜单仍包含 WT 入口。" );
-    results.push("Codex、Claude 和 WT 入口位于当前目录，固定目录入口保持可用");
+    assert(await currentWorkspace.locator(".current-workspace-terminal").count() === 0, "当前目录仍显示已移除的 WT 入口。" );
+    assert(await sidebar.locator(".shortcut-row .shortcut-terminal").count() === 0, "固定目录仍显示已移除的 WT 入口。" );
+    results.push("Codex、Claude 和内置终端入口可用，外部 WT 入口已移除");
 
     const settingsButton = sidebar.locator("button.settings-button");
     await settingsButton.click();
     const settingsPopover = sidebar.locator(".settings-popover");
     await settingsPopover.waitFor({ state: "visible", timeout: 10_000 });
-    await settingsPopover.locator(".boss-key-settings").waitFor({ state: "visible", timeout: 10_000 });
     const themeSelect = settingsPopover.locator("label", { hasText: "主题" }).locator("select");
     const originalTheme = await page.evaluate(async () => (await window.agentDesk.getPreferences()).theme);
     const themes = [

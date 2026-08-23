@@ -153,6 +153,7 @@ export class SessionMessageController {
     if (telemetry && startsTurn) telemetry.begin(sessionId, session.provider, requestMethod, { mode: "submit" });
     try {
       if (localCommand === "/model") {
+        if (session.provider === "claude") throw new Error("Claude Code 的模型请在黑窗口中修改。思考等级也请在黑窗口中调整。");
         if (!commandArgs) throw new Error("请在 /model 后输入模型名称，或直接使用顶部的模型选择框。\n示例：/model claude-opus-4-6[1m]");
         if (!services.setSessionSetting) throw new Error("当前版本暂不支持通过命令切换模型。");
         await services.setSessionSetting(sessionId, "model", commandArgs);
