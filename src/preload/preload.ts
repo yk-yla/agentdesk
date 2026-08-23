@@ -37,6 +37,9 @@ const bridge: Omit<CodexBridge, "request" | "respond" | "onMessage"> = {
   readClipboardText() {
     return ipcRenderer.invoke("agentdesk:read-clipboard-text");
   },
+  writeClipboardText(text: string) {
+    return ipcRenderer.invoke("agentdesk:write-clipboard-text", text);
+  },
   copyImage(dataUrl: string) {
     return ipcRenderer.invoke("agentdesk:copy-image", dataUrl);
   },
@@ -170,6 +173,7 @@ const agentBridge: AgentBridge = {
   exportDiagnostics: bridge.exportDiagnostics,
   saveClipboardImage: bridge.saveClipboardImage,
   readClipboardText: bridge.readClipboardText,
+  writeClipboardText: bridge.writeClipboardText,
   copyImage: bridge.copyImage,
   saveTextFile: bridge.saveTextFile,
   createHandoffPackage: bridge.createHandoffPackage,

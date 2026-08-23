@@ -673,6 +673,10 @@ if (hasLock) {
           return saveClipboardImage(value.dataUrl, typeof value.suggestedName === "string" ? value.suggestedName : undefined);
         },
         readClipboardText: () => clipboard.readText(),
+        writeClipboardText: (text) => {
+          if (typeof text !== "string" || Buffer.byteLength(text, "utf8") > 10 * 1024 * 1024) throw new Error("复制文字过大。");
+          clipboard.writeText(text);
+        },
         copyImage: (dataUrl) => {
           if (typeof dataUrl !== "string") throw new Error("待复制图片无效。");
           copyImageToClipboard(dataUrl);

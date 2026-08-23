@@ -16,9 +16,10 @@ interface TerminalPaneProps {
   onResume: () => void;
   onError: (message: string) => void;
   onSettings: (settings: ClaudeTerminalSettings) => void;
+  onTerminalActivity: (working: boolean) => void;
 }
 
-export default function TerminalPane({ session, bridge, isActive, onModeChange, onResume, onError, onSettings }: TerminalPaneProps) {
+export default function TerminalPane({ session, bridge, isActive, onModeChange, onResume, onError, onSettings, onTerminalActivity }: TerminalPaneProps) {
   const hostRef = useRef<HTMLDivElement>(null);
   const terminalRef = useRef<Terminal | null>(null);
   const fitRef = useRef<FitAddon | null>(null);
@@ -35,18 +36,52 @@ export default function TerminalPane({ session, bridge, isActive, onModeChange, 
   const onModeChangeRef = useRef(onModeChange);
   const onResumeRef = useRef(onResume);
   const onSettingsRef = useRef(onSettings);
+  const onTerminalActivityRef = useRef(onTerminalActivity);
+  const terminalActivityTimerRef = useRef<number | null>(null);
+  const terminalCommandActiveRef = useRef(false);
   const settingsBufferRef = useRef("");
   const inputSettingsBufferRef = useRef("");
   onErrorRef.current = onError;
   onModeChangeRef.current = onModeChange;
   onResumeRef.current = onResume;
   onSettingsRef.current = onSettings;
+  onTerminalActivityRef.current = onTerminalActivity;
   const [info, setInfo] = useState<TerminalSessionInfo | null>(null);
   const [starting, setStarting] = useState(false);
+
+  const clearTerminalActivity = useCallback(() => {
+    if (terminalActivityTimerRef.current !== null) {
+      window.clearTimeout(terminalActivityTimerRef.current);
+      terminalActivityTimerRef.current = null;
+    }
+    terminalCommandActiveRef.current = false;
+    onTerminalActivityRef.current(false);
+  }, []);
+
+  const markTerminalActivity = useCallback(() => {
+    // PTY output also includes idle redraws caused by focus and resize. Only
+    // output after a submitted command is relevant to the Tab activity state.
+    if (!terminalCommandActiveRef.current) return;
+    onTerminalActivityRef.current(true);
+    if (terminalActivityTimerRef.current !== null) window.clearTimeout(terminalActivityTimerRef.current);
+    // PTY events do not carry Provider turn lifecycle, so use recent input or
+    // output as a bounded activity signal for the tab indicator.
+    terminalActivityTimerRef.current = window.setTimeout(() => {
+      terminalActivityTimerRef.current = null;
+      terminalCommandActiveRef.current = false;
+      onTerminalActivityRef.current(false);
+    }, 3_000);
+  }, []);
+
+  const markTerminalCommand = useCallback(() => {
+    terminalCommandActiveRef.current = true;
+    markTerminalActivity();
+  }, [markTerminalActivity]);
 
   const write = useCallback((data: string) => {
     const current = infoRef.current;
     if (!current || current.status === "exited") return;
+    if (data.includes("\r") || data.includes("\n")) markTerminalCommand();
     if (session.provider === "claude") {
       const previousInputBuffer = inputSettingsBufferRef.current;
       const parsed = parseClaudeTerminalInput(data, inputSettingsBufferRef.current);
@@ -57,7 +92,7 @@ export default function TerminalPane({ session, bridge, isActive, onModeChange, 
       if (parsed.settings.model) onSettingsRef.current(parsed.settings);
     }
     void bridge.writeTerminalInput({ sessionId: session.id, generation: current.generation, data }).catch((error) => onErrorRef.current(error instanceof Error ? error.message : "终端输入失败。"));
-  }, [bridge, session.id, session.provider]);
+  }, [bridge, markTerminalCommand, session.id, session.provider]);
 
   const resize = useCallback(() => {
     const terminal = terminalRef.current;
@@ -109,7 +144,24 @@ export default function TerminalPane({ session, bridge, isActive, onModeChange, 
       terminal.paste(text);
     };
     const handleCustomKey = (event: KeyboardEvent) => {
-      if (event.key.toLowerCase() !== "v" || (!event.ctrlKey && !event.metaKey) || event.altKey) return true;
+      const key = event.key.toLowerCase();
+      if ((event.ctrlKey || event.metaKey) && !event.altKey && key === "c") {
+        event.preventDefault();
+        event.stopPropagation();
+        // Ctrl+C is reserved for copying in the embedded terminal. With no
+        // selection it is intentionally a no-op, so it cannot interrupt or
+        // exit the Provider CLI session.
+        if (terminal.hasSelection()) {
+          void bridge.writeClipboardText(terminal.getSelection()).catch((error) => onErrorRef.current(error instanceof Error ? error.message : "复制终端文字失败。"));
+        }
+        return false;
+      }
+      if (key !== "v" || (!event.ctrlKey && !event.metaKey) || event.altKey) return true;
+      // The browser emits a native `paste` event after Ctrl/Cmd+V. The
+      // clipboard read below handles the paste explicitly, so cancel the
+      // native event to avoid sending the same text twice.
+      event.preventDefault();
+      event.stopPropagation();
       void bridge.readClipboardText().then((text) => {
         if (text && terminalRef.current === terminal) terminal.paste(text);
       }).catch(() => undefined);
@@ -144,6 +196,7 @@ export default function TerminalPane({ session, bridge, isActive, onModeChange, 
     return () => {
       cancelAnimationFrame(focusFrame);
       host.removeEventListener("paste", handlePaste, true);
+      clearTerminalActivity();
       scrollDisposable.dispose();
       resizeObserver.disconnect();
       dataDisposable.dispose();
@@ -156,7 +209,7 @@ export default function TerminalPane({ session, bridge, isActive, onModeChange, 
       terminalRef.current = null;
       fitRef.current = null;
     };
-  }, [bridge, resize, session.id, write]);
+  }, [bridge, clearTerminalActivity, resize, session.id, write]);
 
   useEffect(() => {
     if (!isActive) return undefined;
@@ -196,12 +249,14 @@ export default function TerminalPane({ session, bridge, isActive, onModeChange, 
       infoRef.current = event.info;
       setInfo(event.info);
       if (event.type === "ready") {
+        clearTerminalActivity();
         startingRef.current = false;
         startBaselineGenerationRef.current = null;
         setStarting(false);
       }
       requestAnimationFrame(resize);
     } else if (event.type === "output" && event.data && generationRef.current === event.generation) {
+      markTerminalActivity();
       if (session.provider === "claude") {
         const parsed = parseClaudeTerminalSettings(event.data, settingsBufferRef.current);
         settingsBufferRef.current = parsed.buffer;
@@ -217,6 +272,7 @@ export default function TerminalPane({ session, bridge, isActive, onModeChange, 
         viewportYRef.current = atBottom ? terminal.buffer.active.viewportY : viewportY;
       });
     } else if (event.type === "exited" && (generationRef.current === null || generationRef.current === event.generation)) {
+      clearTerminalActivity();
       infoRef.current = event.info || (infoRef.current ? { ...infoRef.current, status: "exited" } : null);
       setInfo(infoRef.current);
       startingRef.current = false;
@@ -229,13 +285,14 @@ export default function TerminalPane({ session, bridge, isActive, onModeChange, 
         onModeChangeRef.current("workbench");
       }
     } else if (event.type === "error") {
+      clearTerminalActivity();
       startingRef.current = false;
       startBaselineGenerationRef.current = null;
       setStarting(false);
       onErrorRef.current(event.message || "终端启动失败。");
       if (session.provider !== "claude") onModeChangeRef.current("workbench");
     }
-  }), [bridge, resize, session.id, session.provider]);
+  }), [bridge, clearTerminalActivity, markTerminalActivity, resize, session.id, session.provider]);
 
   useEffect(() => {
     mountedRef.current = true;
@@ -281,6 +338,7 @@ export default function TerminalPane({ session, bridge, isActive, onModeChange, 
       infoRef.current = next;
       setInfo(next);
     } catch (error) {
+      clearTerminalActivity();
       startAttemptedRef.current = false;
       startingRef.current = false;
       startBaselineGenerationRef.current = null;
@@ -288,7 +346,7 @@ export default function TerminalPane({ session, bridge, isActive, onModeChange, 
       onErrorRef.current(error instanceof Error ? error.message : "终端启动失败。");
       if (session.provider !== "claude") onModeChangeRef.current("workbench");
     }
-  }, [bridge, session.cwd, session.id, session.provider, session.threadId]);
+  }, [bridge, clearTerminalActivity, session.cwd, session.id, session.provider, session.threadId]);
 
   useEffect(() => {
     if (session.presentationMode !== "terminal" || session.terminalSuspended) return;

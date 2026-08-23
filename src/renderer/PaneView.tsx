@@ -61,6 +61,7 @@ export interface PaneViewProps {
   onModeChange: (sessionId: string, mode: "workbench" | "terminal") => void;
   onResumeTerminal: (sessionId: string) => void;
   onTerminalError: (sessionId: string, message: string) => void;
+  onTerminalActivity: (sessionId: string, working: boolean) => void;
   onTerminalSettings: (sessionId: string, settings: ClaudeTerminalSettings) => void;
 }
 
@@ -269,6 +270,7 @@ function PaneView(props: PaneViewProps) {
           onModeChange={(mode) => props.onModeChange(session.id, mode)}
           onResume={() => props.onResumeTerminal(session.id)}
           onError={(message) => props.onTerminalError(session.id, message)}
+          onTerminalActivity={(working) => props.onTerminalActivity(session.id, working)}
           onSettings={(settings) => props.onTerminalSettings(session.id, settings)}
         />
       </section>

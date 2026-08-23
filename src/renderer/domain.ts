@@ -168,6 +168,8 @@ export interface SessionState {
   provider: AgentProvider;
   presentationMode: "workbench" | "terminal";
   terminalSuspended?: boolean;
+  /** 内置终端的临时活动状态，不参与会话恢复。 */
+  terminalWorking?: boolean;
   /** 正在从 Provider 读取历史，避免把临时空状态画成新会话。 */
   historyLoading?: boolean;
   queryGeneration: number;

@@ -42,6 +42,7 @@ interface DesktopIpcServices {
   files: {
     saveClipboardImage(input: unknown): unknown;
     readClipboardText(): unknown;
+    writeClipboardText(text: unknown): unknown;
     copyImage(dataUrl: unknown): unknown;
     saveTextFile(input: unknown): unknown;
     exportDiagnostics(): unknown;
@@ -285,6 +286,7 @@ export function registerDesktopIpc(ipc: IpcRegistrar, services: DesktopIpcServic
   ipc.handle("agentdesk:get-codex-defaults", () => services.codexDefaults());
   ipc.handle("agentdesk:save-clipboard-image", (_event, input: unknown) => services.files.saveClipboardImage(input));
   ipc.handle("agentdesk:read-clipboard-text", () => services.files.readClipboardText());
+  ipc.handle("agentdesk:write-clipboard-text", (_event, text: unknown) => services.files.writeClipboardText(text));
   ipc.handle("agentdesk:copy-image", (_event, dataUrl: unknown) => services.files.copyImage(dataUrl));
   ipc.handle("agentdesk:save-text-file", (_event, input: unknown) => services.files.saveTextFile(input));
   ipc.handle("agentdesk:export-diagnostics", () => services.files.exportDiagnostics());

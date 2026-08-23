@@ -599,6 +599,10 @@ export default function App() {
   const clearSession = useCallback(async (sessionId: string) => {
     const session = sessionsRef.current[sessionId];
     if (!session) return;
+    if (session.presentationMode === "terminal") {
+      setError(sessionId, new Error("黑窗口会话不会通过清空操作退出，请直接关闭标签。"), "黑窗口不会通过清空操作退出");
+      return false;
+    }
     // /clear is a lifecycle operation: stop the active Query first, including
     // pending approvals, then replace the client session only after resources
     // have been released successfully.
@@ -608,7 +612,7 @@ export default function App() {
     prepareLayoutSessionRef.current(nextSessionId, session.provider, session.cwd);
     releaseSessionState(sessionId, "会话已清空。");
     return true;
-  }, [closeBackendSession, createSessionState, layoutController, releaseSessionState]);
+  }, [closeBackendSession, createSessionState, layoutController, releaseSessionState, setError]);
 
   const appendSystemMessage = useCallback((sessionId: string, text: string) => {
     updateSession(sessionId, (current) => ({
@@ -1533,6 +1537,10 @@ export default function App() {
       if (session) setError(sessionId, new Error("当前会话还没有保存到本机历史。"), "当前会话还没有保存到本机历史。");
       return;
     }
+    if (session.presentationMode === "terminal") {
+      setError(sessionId, new Error("请先关闭黑窗口标签，再删除这条会话。"), "请先关闭黑窗口标签，再删除会话");
+      return;
+    }
     if (sessionHasActiveWork(session)) {
       setError(sessionId, new Error("正在运行的会话不可删除，请先停止任务并处理待处理请求。"), "正在运行的会话不可删除");
       return;
@@ -1674,20 +1682,11 @@ export default function App() {
       }
     }
     if (existing?.presentationMode === "terminal" && selectedPresentationMode === "workbench") {
-      try {
-        await bridge.closeTerminal({ sessionId: existing.id });
-      } catch (error) {
-        updateSession(existing.id, (current) => ({ ...current, historyLoading: false }));
-        setError(existing.id, error, "关闭内置终端失败");
-        activateHistorySession(existing.id);
-        return existing.id;
-      }
-      updateSession(existing.id, (current) => ({ ...current, presentationMode: "workbench", terminalSuspended: false, historyLoading: Boolean(existing.threadId), errorText: "" }));
+      // Opening a history item is a read/navigation action. It must not close
+      // a live terminal just because the saved Codex presentation preference
+      // is the workbench. The explicit mode toggle owns terminal shutdown.
       activateHistorySession(existing.id);
-      if (!existing.threadId) {
-        updateSession(existing.id, (current) => ({ ...current, historyLoading: false }));
-        return existing.id;
-      }
+      return existing.id;
     }
     let registeredCwd: string;
     try {
@@ -1902,7 +1901,7 @@ export default function App() {
 
   const runHistoryAction = useCallback(async (entry: HistoryThread, action: HistoryAction, value?: string) => {
     let existing = Object.values(sessionsRef.current).find((session) => session.provider === entry.provider && session.threadId === entry.id && sameDirectory(session.cwd, entry.cwd));
-    const closedTerminal = existing?.presentationMode === "terminal" && action !== "favorite" ? existing : undefined;
+    const terminalSession = existing?.presentationMode === "terminal" ? existing : undefined;
     const reportError = (error: unknown, fallback: string) => {
       const currentLayout = layoutRef.current;
       const pane = currentLayout.panes.find((candidate) => candidate.id === currentLayout.activePaneId) ?? currentLayout.panes[0];
@@ -1916,16 +1915,14 @@ export default function App() {
       await openHistory(entry, "terminal");
       return;
     }
-    if (existing?.presentationMode === "terminal" && action !== "favorite") {
-      try {
-        await bridge.closeTerminal({ sessionId: existing.id });
-        // The rest of this handler deliberately uses the history-only request
-        // path below; a terminal tab has no active workbench Query context.
-        existing = undefined;
-      } catch (error) {
-        reportError(error, "关闭内置终端失败");
-        return;
-      }
+    if (terminalSession && action === "delete") {
+      reportError(new Error("请先关闭黑窗口标签，再删除这条会话。"), "请先关闭黑窗口标签，再删除会话");
+      return;
+    }
+    if (terminalSession && action !== "favorite" && action !== "export") {
+      // History-only actions can use the unscoped Provider request path. Do
+      // not close the live terminal just to perform rename/pin/fork/handoff.
+      existing = undefined;
     }
     if (existing) {
       if (action === "rename" && value) await renameSession(existing.id, value);
@@ -1985,7 +1982,7 @@ export default function App() {
           };
         }
         await savePreference(patch);
-        if (closedTerminal) updateSession(closedTerminal.id, (current) => ({ ...current, title: name, titleOrigin: "manual", updatedAt: Date.now() }));
+        if (terminalSession) updateSession(terminalSession.id, (current) => ({ ...current, title: name, titleOrigin: "manual", updatedAt: Date.now() }));
         setHistory((current) => sortHistory(current.map((candidate) => candidate.provider === entry.provider && candidate.id === entry.id ? { ...candidate, title: name, titleLower: name.toLowerCase() } : candidate)));
       } else if (action === "pin") {
         const nextPinned = !entry.isPinned;
@@ -2046,12 +2043,6 @@ export default function App() {
           ...(entry.provider === "codex" ? { codexCompactionCounts: legacyCodexCompactionCounts } : {}),
         });
         setHistory((current) => current.filter((candidate) => candidate.provider !== entry.provider || candidate.id !== entry.id));
-        if (closedTerminal) {
-          const replacementId = createSessionState(closedTerminal.cwd, { provider: closedTerminal.provider });
-          layoutController.replaceSession(closedTerminal.id, replacementId);
-          prepareLayoutSessionRef.current(replacementId, closedTerminal.provider, closedTerminal.cwd);
-          releaseSessionState(closedTerminal.id, "会话已删除。");
-        }
       }
     } catch (error) {
       reportError(normalizeAgentRequestError(entry.provider, action === "pin" ? "updateSessionMetadata" : action === "rename" ? "renameSession" : action === "delete" ? "deleteSession" : action === "fork" ? "forkSession" : "readSession", error), "历史会话操作失败");
@@ -2194,6 +2185,12 @@ export default function App() {
   const setTerminalError = useCallback((sessionId: string, message: string) => {
     setError(sessionId, new Error(message), "终端操作失败");
   }, [setError]);
+
+  const setTerminalActivity = useCallback((sessionId: string, working: boolean) => {
+    updateSession(sessionId, (current) => current.terminalWorking === working
+      ? current
+      : { ...current, ...(working ? { terminalWorking: true } : { terminalWorking: undefined }) });
+  }, [updateSession]);
 
   const applyTerminalSettings = useCallback((sessionId: string, settings: ClaudeTerminalSettings) => {
     if (!settings.model && !settings.effort) return;
@@ -2826,7 +2823,8 @@ export default function App() {
         onModeChange={setPresentationMode}
         onResumeTerminal={resumeTerminal}
         onTerminalError={setTerminalError}
-          onTerminalSettings={applyTerminalSettings}
+        onTerminalActivity={setTerminalActivity}
+        onTerminalSettings={applyTerminalSettings}
         />;
       })}
     </div>;
@@ -2923,7 +2921,7 @@ export default function App() {
                   onContextMenu={(event) => openTabContextMenu(event, pane.id, session.id)}
                   key={session.id}
                 >
-                  <ProviderIcon provider={session.provider} size={15} /><span className={`tab-status ${session.status}`} />
+                  <ProviderIcon provider={session.provider} size={15} /><span className={`tab-status ${session.status === "error" ? "error" : session.status === "working" || session.terminalWorking ? "working" : session.status}`} />
                   <span className="tab-label"><span className="tab-directory">{basename(session.cwd)}</span><span className="tab-separator">·</span><span className="tab-title">{session.title}</span></span>
                   {pane.tabIds.length > 1
                     ? <span className="tab-close" role="button" aria-label={`关闭 ${session.title}`} title={`关闭 ${session.title}`} onClick={(event) => { event.stopPropagation(); removeTab(pane.id, session.id); }}><X size={12} /></span>
