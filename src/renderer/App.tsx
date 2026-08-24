@@ -39,6 +39,7 @@ import ProviderIcon from "./ProviderIcon";
 import { closeSessionResources } from "./sessionLifecycle";
 import { installRendererDiagnostics, trackUiEvent } from "./rendererDiagnostics";
 import { initializeProviders, providerCanRestore, type ProviderStartupState } from "./providerInitialization";
+import { workspaceRestoreRetry } from "./workspaceRestorePolicy";
 import type { CommandUsage } from "./commandSuggestions";
 import { TurnTelemetry } from "./turnTelemetry";
 import { PreferenceSaveCoordinator } from "./preferenceSaveCoordinator";
@@ -57,6 +58,8 @@ const NO_SKILLS: SkillOption[] = [];
 const READ_ONLY_SESSION_OPERATIONS = new Set<AgentOperation>([
   "readSession", "resumeSession", "getGoal", "readRateLimits", "listMcpServers", "listSkills", "closeSession",
 ]);
+
+const CODEX_TERMINAL_HANDOFF_SETTLE_MS = 750;
 const INITIAL_UPDATE_STATUS: DesktopUpdateStatus = { phase: "idle", currentVersion: "", message: "等待检查更新。", repositoryUrl: "https://github.com/yk-yla/agentdesk" };
 const INITIAL_CLI_UPDATE_STATUS: CodexCliUpdateStatus = { phase: "idle", currentVersion: "", message: "正在读取 Codex CLI 版本。" };
 const INITIAL_CLAUDE_RUNTIME_STATUS: ClaudeRuntimeStatus = { phase: "idle", binarySource: "sdk", binaryVersion: "", sdkVersion: "", credentialsAvailable: false, credentialSource: "unavailable", credentialMessage: "正在读取 Claude 配置。", message: "等待检查更新。" };
@@ -2137,6 +2140,11 @@ export default function App() {
         setError(sessionId, error, "关闭内置终端失败");
         return;
       }
+      // Windows may keep the Codex rollout database locked briefly after the
+      // PTY has exited. Let that handle settle before resumeSession starts a
+      // new app-server process.
+      await new Promise<void>((resolve) => window.setTimeout(resolve, CODEX_TERMINAL_HANDOFF_SETTLE_MS));
+      if (!sessionsRef.current[sessionId]) return;
       updateSession(sessionId, (current) => ({ ...current, terminalSuspended: false, status: "idle", statusLabel: "就绪", errorText: "" }));
       if (entry) void openHistory(entry, "workbench", { activate: false });
       else void savePreference({ lastCodexPresentationMode: "workbench" });
@@ -2515,13 +2523,19 @@ export default function App() {
       }).catch((error) => {
         updateSession(sessionId, (current) => ({ ...current, historyLoading: false }));
         setError(sessionId, error, "恢复或读取上次会话失败");
-        const attempt = (workspaceRestoreAttemptsRef.current.get(sessionId) || 0) + 1;
-        workspaceRestoreAttemptsRef.current.set(sessionId, attempt);
-        if (attempt > 2 || workspaceRestoreRetryTimersRef.current.has(sessionId)) return;
+        const retry = workspaceRestoreRetry(workspaceRestoreAttemptsRef.current.get(sessionId) || 0);
+        workspaceRestoreAttemptsRef.current.set(sessionId, retry.attempt);
+        if (retry.delayMs === null || workspaceRestoreRetryTimersRef.current.has(sessionId)) {
+          // Keep a failed restore from being retriggered by unrelated state
+          // updates. The error remains visible and the user can reopen the
+          // history item explicitly after the Provider recovers.
+          workspaceRestoreIdsRef.current.delete(sessionId);
+          return;
+        }
         const timer = window.setTimeout(() => {
           workspaceRestoreRetryTimersRef.current.delete(sessionId);
           if (workspaceRestoreIdsRef.current.has(sessionId)) setWorkspaceRestoreRevision((current) => current + 1);
-        }, attempt * 750);
+        }, retry.delayMs);
         workspaceRestoreRetryTimersRef.current.set(sessionId, timer);
       }).finally(() => {
         workspaceRestoreInFlightIdsRef.current.delete(sessionId);

@@ -10,29 +10,48 @@ async page => {
   const activeModel = () => page.locator('.pane-panel select[aria-label="选择模型"]');
   const activeEffort = () => page.locator('.pane-panel select[aria-label="选择思考等级"]');
   const activeInput = () => page.locator('.pane-panel textarea[aria-label="消息输入"]');
-  const activeConversation = () => page.locator('.pane-panel .conversation');
+  const activeTerminal = () => page.locator(".pane-panel .terminal-pane");
   const newClaude = () => sidebar.locator("button.provider-new-claude").first();
   const newCodex = () => sidebar.locator("button.provider-new-codex").first();
-  const openProvider = async (provider, button) => {
-    const previousSessionId = await page.locator(".tab.active").getAttribute("data-session-id");
+  // Claude Code 只有黑窗口（内置终端）形态，Codex 才有图形界面，所以两者的
+  // “会话已就绪”判断不同：Claude 等 xterm 渲染，Codex 等消息输入框可用。
+  // 分栏时每个栏各有一个 .tab.active，所以按 Provider 标记挑，不能只取第一个。
+  const openSession = async (provider, button, presentation) => {
+    const previousIds = await page.evaluate((expectedProvider) => (
+      Array.from(document.querySelectorAll(`.tab.active:has(.provider-mark.${expectedProvider})`))
+        .map((tab) => tab.getAttribute("data-session-id"))
+    ), provider);
     await button().click({ force: true });
-    await page.waitForFunction(({ expectedProvider, previousId }) => {
-      const activeTab = document.querySelector(".tab.active");
-      const activeInput = document.querySelector('.pane-panel textarea[aria-label="消息输入"]');
-      return Boolean(
-        activeTab?.querySelector(`.provider-mark.${expectedProvider}`)
-        && activeTab.getAttribute("data-session-id")
-        && activeTab.getAttribute("data-session-id") !== previousId
-        && activeInput instanceof HTMLTextAreaElement
-        && !activeInput.disabled,
-      );
-    }, { expectedProvider: provider, previousId: previousSessionId }, { timeout: 10_000 });
+    await page.waitForFunction(({ expectedProvider, expectedPresentation, previousList }) => {
+      const activeTab = Array.from(document.querySelectorAll(".tab.active"))
+        .find((tab) => tab.querySelector(`.provider-mark.${expectedProvider}`)
+          && tab.getAttribute("data-session-id")
+          && !previousList.includes(tab.getAttribute("data-session-id")));
+      if (!activeTab) return false;
+      if (expectedPresentation === "terminal") {
+        return Boolean(document.querySelector(".pane-panel .terminal-pane .terminal-host-inner .xterm-rows"));
+      }
+      const composer = document.querySelector('.pane-panel textarea[aria-label="消息输入"]');
+      return composer instanceof HTMLTextAreaElement && !composer.disabled;
+    }, { expectedProvider: provider, expectedPresentation: presentation, previousList: previousIds }, { timeout: 30_000 });
+    return page.evaluate((expectedProvider) => (
+      Array.from(document.querySelectorAll(".tab.active"))
+        .find((tab) => tab.querySelector(`.provider-mark.${expectedProvider}`))
+        ?.getAttribute("data-session-id") || null
+    ), provider);
   };
-  const openClaude = async () => {
-    await openProvider("claude", newClaude);
-  };
-  const openCodex = async () => {
-    await openProvider("codex", newCodex);
+  const openClaudeTerminal = async () => openSession("claude", newClaude, "terminal");
+  // Codex 的模型和思考等级要等 app-server 初始化完才可用，启动耗时随机器和
+  // 上一轮进程退出情况波动，所以显式等它就绪，不能开完会话就断言。
+  const openCodexWorkbench = async () => {
+    const sessionId = await openSession("codex", newCodex, "workbench");
+    await page.waitForFunction(() => {
+      const model = document.querySelector('.pane-panel select[aria-label="选择模型"]');
+      const effort = document.querySelector('.pane-panel select[aria-label="选择思考等级"]');
+      return model instanceof HTMLSelectElement && !model.disabled && model.options.length > 0
+        && effort instanceof HTMLSelectElement && !effort.disabled && effort.options.length > 1;
+    }, null, { timeout: 60_000 });
+    return sessionId;
   };
 
   try {
@@ -126,35 +145,43 @@ async page => {
     assert(await sidebar.getByRole("button", { name: "搜索当前目录会话正文" }).count() === 1, "当前目录视图缺少目录内正文搜索入口。" );
     results.push("当前目录、收藏和全部最近视图可切换，搜索范围正确");
 
-    await openClaude();
+    // Claude Code 现在只跑黑窗口：新会话必须直接落在内置终端，并且不能显示
+    // 能力注册表里标记为 unsupported 的模型、思考等级和图形界面输入框。
+    await openClaudeTerminal();
+    assert(await activeTerminal().count() === 1, "Claude 新会话没有以黑窗口打开。" );
+    await page.waitForFunction(() => !document.querySelector(".pane-panel .terminal-status"), null, { timeout: 20_000 });
+    assert(await page.locator(".pane-panel .terminal-host-inner .xterm-rows").count() === 1, "Claude 黑窗口没有渲染终端内容。" );
+    assert(await activeModel().count() === 0, "Claude 黑窗口仍显示模型选择入口，与 models 能力不符。" );
+    assert(await activeEffort().count() === 0, "Claude 黑窗口仍显示思考等级入口，与 effort 能力不符。" );
+    assert(await activeInput().count() === 0, "Claude 黑窗口仍显示图形界面消息输入框。" );
+    assert(await page.locator(".pane-panel .terminal-error").count() === 0, "Claude 黑窗口启动后留下错误提示。" );
+    results.push("Claude 新会话直达黑窗口，终端就绪且不暴露未支持的图形界面能力");
+
+    // 图形界面能力只剩 Codex，模型、思考等级和输入框的验证都走 Codex。
+    await openCodexWorkbench();
     const model = activeModel();
-    await model.waitFor({ state: "visible", timeout: 10_000 });
-    const initialModels = await model.locator("option").evaluateAll((options) => options.map((option) => option.value));
-    assert(!(await model.isDisabled()), "Claude 新会话模型下拉框仍被禁用。" );
-    for (const required of ["default", "sonnet", "haiku"]) {
-      assert(initialModels.includes(required), `Claude 启动模型列表缺少 ${required}。`);
+    await model.waitFor({ state: "visible", timeout: 15_000 });
+    assert(!(await model.isDisabled()), "Codex 新会话模型下拉框仍被禁用。" );
+    const codexModels = await model.locator("option").evaluateAll((options) => options.map((option) => option.value));
+    assert(codexModels.length > 0, "Codex 启动模型列表为空。" );
+    assert(!codexModels.some((id) => ["default", "sonnet", "haiku", "opus"].includes(id)), `Codex 模型列表混入了 Claude 模型：${codexModels.join(", ")}`);
+    const currentCodexModel = await model.inputValue();
+    const secondCodexModel = codexModels.find((id) => id !== currentCodexModel);
+    if (secondCodexModel) {
+      await model.selectOption(secondCodexModel);
+      assert(await model.inputValue() === secondCodexModel, "Codex 模型选择没有更新。" );
     }
-    await model.selectOption("sonnet");
-    assert(await model.inputValue() === "sonnet", "Claude 模型选择没有更新到 sonnet。" );
-    results.push("Claude 首条消息前模型可选择");
+    results.push("Codex 首条消息前模型可选择且不混入 Claude 模型");
 
-    const claudeEffort = activeEffort();
-    await claudeEffort.selectOption("high");
-    await page.waitForFunction(async () => (await window.agentDesk.getPreferences()).lastReasoningEfforts?.claude === "high", null, { timeout: 10_000 });
-    await openClaude();
-    assert(await activeEffort().inputValue() === "high", "Claude 新会话没有沿用上次思考等级。" );
-
-    await openCodex();
-    const codexEfforts = await activeEffort().locator("option").evaluateAll((options) => options.map((option) => option.value));
-    const codexEffort = codexEfforts.includes("low") ? "low" : codexEfforts[0];
-    assert(Boolean(codexEffort), "Codex 没有可选思考等级。" );
-    await activeEffort().selectOption(codexEffort);
-    await page.waitForFunction(async (expected) => (await window.agentDesk.getPreferences()).lastReasoningEfforts?.codex === expected, codexEffort, { timeout: 10_000 });
-    await openCodex();
-    assert(await activeEffort().inputValue() === codexEffort, "Codex 新会话没有沿用上次思考等级。" );
-    await openClaude();
-    assert(await activeEffort().inputValue() === "high", "Codex 的选择覆盖了 Claude 思考等级。" );
-    results.push("Claude 和 Codex 分别记住上次思考等级");
+    const codexEffortOptions = await activeEffort().locator("option").evaluateAll((options) => options.map((option) => option.value));
+    assert(codexEffortOptions.length > 1, `Codex 思考等级选项不足：${codexEffortOptions.join(", ")}`);
+    const currentCodexEffort = await activeEffort().inputValue();
+    const targetCodexEffort = codexEffortOptions.find((value) => value !== currentCodexEffort) || currentCodexEffort;
+    await activeEffort().selectOption(targetCodexEffort);
+    await page.waitForFunction(async (expected) => (await window.agentDesk.getPreferences()).lastReasoningEfforts?.codex === expected, targetCodexEffort, { timeout: 10_000 });
+    await openCodexWorkbench();
+    assert(await activeEffort().inputValue() === targetCodexEffort, "Codex 新会话没有沿用上次思考等级。" );
+    results.push("Codex 记住上次思考等级");
 
     const composerPointerStyle = await activeInput().evaluate((element) => {
       const style = getComputedStyle(element);
@@ -163,171 +190,6 @@ async page => {
     assert(composerPointerStyle.cursor === "default", `输入框鼠标仍可能不可见：${composerPointerStyle.cursor}`);
     assert(composerPointerStyle.caretColor !== "rgba(0, 0, 0, 0)", "输入框文字插入光标是透明的。" );
     results.push("输入框鼠标和文字插入光标可见");
-
-    await page.evaluate(() => window.agentDesk.dev.setClaudeLifecycleFixture("longBash"));
-    await activeInput().fill(`AgentDesk fixture interrupt ${Date.now()}`);
-    await activeInput().press("Enter");
-    const stopButton = page.locator(".pane-panel .stop-button");
-    await stopButton.waitFor({ state: "visible", timeout: 15_000 });
-    await stopButton.click({ force: true });
-    await stopButton.waitFor({ state: "hidden", timeout: 15_000 });
-    assert(await page.locator(".pane-panel .error-banner").count() === 0, "Claude 夹具中断后留下错误状态。" );
-    results.push("Claude Worker 任务可中断并收敛");
-
-    await openClaude();
-    await page.evaluate(() => window.agentDesk.dev.setClaudeLifecycleFixture("compact"));
-    await activeInput().fill("AgentDesk fixture compact " + Date.now());
-    await activeInput().press("Enter");
-    const compactButton = page.locator(".pane-panel .compact-count");
-    await page.waitForFunction(() => {
-      const button = document.querySelector(".pane-panel .compact-count");
-      return button instanceof HTMLButtonElement && !button.disabled;
-    }, null, { timeout: 15_000 });
-    try {
-      await page.locator(".pane-panel .context-usage", { hasText: "3.2k/200k" }).waitFor({ state: "visible", timeout: 15_000 });
-    } catch (error) {
-      const state = await page.evaluate(() => ({
-        activeProvider: document.querySelector(".tab.active .provider-mark")?.className || "",
-        context: Array.from(document.querySelectorAll(".context-usage")).map((entry) => entry.textContent || ""),
-        compact: Array.from(document.querySelectorAll(".compact-count")).map((entry) => ({ text: entry.textContent || "", disabled: entry.disabled })),
-        error: document.querySelector(".pane-panel .error-banner")?.textContent || "",
-      }));
-      throw new Error("Claude 夹具上下文显示异常：" + JSON.stringify(state) + "；" + (error instanceof Error ? error.message : String(error)));
-    }
-    await compactButton.click({ force: true });
-    await page.locator(".pane-panel .compact-count", { hasText: "压缩 1" }).waitFor({ state: "visible", timeout: 15_000 });
-    await stopButton.waitFor({ state: "hidden", timeout: 15_000 });
-    await activeInput().fill("AgentDesk fixture post compact " + Date.now());
-    await activeInput().press("Enter");
-    await stopButton.waitFor({ state: "visible", timeout: 15_000 });
-    try {
-      await page.locator(".message-row.assistant", { hasText: "AgentDesk 流式夹具" }).first().waitFor({ state: "visible", timeout: 15_000 });
-    } catch (error) {
-      const state = await page.evaluate(() => ({
-        tabs: Array.from(document.querySelectorAll(".tab")).map((tab) => ({ active: tab.classList.contains("active"), text: tab.textContent || "" })),
-        provider: document.querySelector(".tab.active .provider-mark")?.className || "",
-        messages: Array.from(document.querySelectorAll(".message-row")).map((entry) => entry.textContent || ""),
-        error: document.querySelector(".pane-panel .error-banner")?.textContent || "",
-      }));
-      throw new Error("Claude 压缩后恢复回复异常：" + JSON.stringify(state) + "；" + (error instanceof Error ? error.message : String(error)));
-    }
-    await stopButton.click({ force: true });
-    await stopButton.waitFor({ state: "hidden", timeout: 15_000 });
-    const questionNavigationState = await activeConversation().evaluate((conversation) => {
-      const containerTop = conversation.getBoundingClientRect().top;
-      const maxTop = conversation.scrollHeight - conversation.clientHeight;
-      return {
-        maxTop,
-        tops: Array.from(conversation.querySelectorAll("[data-user-message-anchor]")).map((anchor) => Math.max(0, Math.min(
-          conversation.scrollTop + anchor.getBoundingClientRect().top - containerTop - 12,
-          maxTop,
-        ))),
-      };
-    });
-    const questionTops = questionNavigationState.tops;
-    assert(questionTops.length >= 2, "提问跳转夹具缺少两条用户消息。" );
-    await page.keyboard.press("Alt+PageUp");
-    const latestQuestionTop = await activeConversation().evaluate((conversation) => conversation.scrollTop);
-    assert(Math.abs(latestQuestionTop - questionTops.at(-1)) <= 3, "Alt+PageUp 没有跳到上一条提问。" );
-    await page.keyboard.press("Alt+PageUp");
-    const previousQuestionTop = await activeConversation().evaluate((conversation) => conversation.scrollTop);
-    assert(Math.abs(previousQuestionTop - questionTops.at(-2)) <= 3, "连续 Alt+PageUp 没有跳到更早提问。" );
-    await page.keyboard.press("Alt+PageDown");
-    const nextQuestionTop = await activeConversation().evaluate((conversation) => conversation.scrollTop);
-    assert(Math.abs(nextQuestionTop - questionTops.at(-1)) <= 3, "Alt+PageDown 没有跳到下一条提问。" );
-    results.push("Alt+PageUp 和 Alt+PageDown 可逐条跳转用户提问");
-    results.push("Claude 上下文用量可见，压缩后可恢复并继续回复");
-
-    await openClaude();
-    await page.evaluate(() => window.agentDesk.dev.setClaudeLifecycleFixture("userQuestion"));
-    await activeInput().fill("AgentDesk fixture user question " + Date.now());
-    await activeInput().press("Enter");
-    const question = page.getByRole("dialog", { name: "Claude 需要你的回答" });
-    await question.waitFor({ state: "visible", timeout: 15_000 });
-    await question.getByText("继续执行", { exact: true }).click({ force: true });
-    await question.getByRole("button", { name: "提交回答", exact: true }).click({ force: true });
-    await question.waitFor({ state: "hidden", timeout: 15_000 });
-    await stopButton.click({ force: true });
-    await stopButton.waitFor({ state: "hidden", timeout: 15_000 });
-    results.push("Claude 正常提问可显示、提交并继续");
-
-    await openClaude();
-    await page.evaluate(() => window.agentDesk.dev.setClaudeLifecycleFixture("stream"));
-    await activeInput().fill("AgentDesk fixture stream " + Date.now());
-    await activeInput().press("Enter");
-    const timestampedUserMessage = activeConversation().locator(".message-row.user").last();
-    await timestampedUserMessage.waitFor({ state: "visible", timeout: 15_000 });
-    const userTimestamp = timestampedUserMessage.locator(".message-timestamp");
-    const userCopyButton = timestampedUserMessage.locator(".message-copy-button");
-    assert(await userTimestamp.count() === 1, "用户消息缺少时间。" );
-    assert(/^\d{2}:\d{2}:\d{2}$/.test((await userTimestamp.textContent()) || ""), "用户消息时间格式不正确。" );
-    assert(Number(await userTimestamp.evaluate((element) => getComputedStyle(element).opacity)) === 1, "用户消息时间没有常显。" );
-    assert(Number(await userCopyButton.evaluate((element) => getComputedStyle(element).opacity)) === 0, "用户消息复制按钮默认可见。" );
-    await page.waitForFunction(() => {
-      const messages = Array.from(document.querySelectorAll(".pane-panel .message-row.assistant")).map((entry) => entry.textContent || "");
-      return messages.length === 2
-        && messages[0].includes("AgentDesk 流式夹具 第一条")
-        && messages[1].includes("AgentDesk 流式夹具 第二条")
-        && messages[1].includes("CLAUDE_LONG_TEXT_END");
-    }, null, { timeout: 15_000 });
-    const streamMessages = await page.locator(".pane-panel .message-row.assistant").allTextContents();
-    assert(streamMessages.length === 2, `Claude 同一消息的流式片段被错误拆分：${streamMessages.length}`);
-    assert(!streamMessages.some((message) => message.includes("[已截断]")), "Claude 长回复仍被 8 KB 上限截断。" );
-    const stableUserCopyButton = activeConversation().locator(".message-row.user").last().locator(".message-copy-button");
-    await stableUserCopyButton.focus();
-    await page.waitForFunction(() => {
-      const button = document.querySelector(".pane-panel .message-row.user .message-copy-button:focus");
-      return button instanceof HTMLButtonElement && Number(getComputedStyle(button).opacity) === 1;
-    }, null, { timeout: 10_000 });
-    const timestampedAssistantMessage = activeConversation().locator(".message-row.assistant").last();
-    const assistantTimestamp = timestampedAssistantMessage.locator(".message-timestamp");
-    const assistantCopyButton = timestampedAssistantMessage.locator(".message-copy-button");
-    assert(await assistantTimestamp.count() === 1, "AI 消息缺少时间。" );
-    assert(/^\d{2}:\d{2}:\d{2}$/.test((await assistantTimestamp.textContent()) || ""), "AI 消息时间格式不正确。" );
-    assert(Number(await assistantTimestamp.evaluate((element) => getComputedStyle(element).opacity)) === 1, "AI 消息时间没有常显。" );
-    assert(Number(await assistantCopyButton.evaluate((element) => getComputedStyle(element).opacity)) === 0, "AI 消息复制按钮默认可见。" );
-    await timestampedAssistantMessage.locator(".message-content").hover({ force: true });
-    await page.waitForFunction((element) => Number(getComputedStyle(element).opacity) === 1, await assistantCopyButton.elementHandle(), { timeout: 10_000 });
-    const alignment = await timestampedAssistantMessage.evaluate((message) => {
-      const bubble = message.querySelector(".message-text")?.getBoundingClientRect();
-      const copy = message.querySelector(".message-copy-button")?.getBoundingClientRect();
-      return bubble && copy ? Math.abs(bubble.right - copy.right) : Number.POSITIVE_INFINITY;
-    });
-    assert(alignment <= 1, `复制按钮没有与消息气泡右边缘对齐：${alignment}px`);
-    await page.evaluate(() => {
-      Object.defineProperty(navigator, "clipboard", {
-        configurable: true,
-        value: { writeText: async (value) => { window.__agentDeskCopiedMessage = value; } },
-      });
-    });
-    const assistantText = await timestampedAssistantMessage.locator(".message-text").innerText();
-    await assistantCopyButton.click({ force: true });
-    await page.waitForFunction((element) => element?.getAttribute("aria-label") === "已复制", await assistantCopyButton.elementHandle(), { timeout: 10_000 });
-    assert(await page.evaluate(() => window.__agentDeskCopiedMessage) === assistantText, "复制按钮没有写入消息正文。" );
-    await stopButton.click({ force: true });
-    await stopButton.waitFor({ state: "hidden", timeout: 15_000 });
-    assert(await page.locator(".pane-panel .error-banner").count() === 0, "Claude 流式夹具中断后留下错误状态。" );
-    results.push("Claude 流式片段完整，消息时间常显且复制图标对齐可用");
-
-    await openClaude();
-    await page.evaluate(() => window.agentDesk.dev.setClaudeLifecycleFixture("incompleteTool"));
-    await activeInput().fill("AgentDesk fixture incomplete Write " + Date.now());
-    await activeInput().press("Enter");
-    const incompleteWriteError = page.locator(".pane-panel .error-banner");
-    await incompleteWriteError.waitFor({ state: "visible", timeout: 15_000 });
-    assert((await incompleteWriteError.textContent() || "").includes("Write") && (await incompleteWriteError.textContent() || "").includes("文件未写入"), "未完成 Write 调用没有显示明确错误。" );
-    await page.evaluate(() => window.agentDesk.dev.setClaudeLifecycleFixture(null));
-    results.push("未完成 Write 调用不会假成功，并明确提示文件未写入");
-
-    await page.waitForFunction(async () => {
-      const cache = (await window.agentDesk.getPreferences()).claudeModelCache;
-      return cache?.schema === 2 && cache.models.some((entry) => entry.id === "sonnet");
-    }, null, { timeout: 15_000 });
-    const cachedModels = await page.evaluate(async () => (await window.agentDesk.getPreferences()).claudeModelCache);
-    assert(cachedModels?.claudeVersion && cachedModels.updatedAt > 0, "Claude 模型缓存缺少版本或更新时间。" );
-    assert(!cachedModels.models.some((entry) => entry.id.startsWith("gpt-") || entry.id.startsWith("codex-")), "Claude 模型缓存混入了 Codex 模型。" );
-    assert(!/token|credential|apiKey/i.test(JSON.stringify(cachedModels)), "Claude 模型缓存包含非公开凭据字段。" );
-    results.push("Claude SDK 模型列表已安全写入版本化缓存");
 
     const historyEntry = sidebar.locator(".thread-item").first();
     await historyEntry.waitFor({ state: "visible", timeout: 15_000 });
@@ -339,60 +201,22 @@ async page => {
     await historyMenu.waitFor({ state: "hidden", timeout: 10_000 });
     results.push("历史会话右键菜单可用");
 
-    await openClaude();
-    await page.evaluate(() => window.agentDesk.dev.setClaudeLifecycleFixture("longBash"));
-    await activeInput().fill(`AgentDesk fixture provider isolation ${Date.now()}`);
-    await activeInput().press("Enter");
-    await stopButton.waitFor({ state: "visible", timeout: 15_000 });
-    const failingClaudeTab = page.locator(".tab:has(.provider-mark.claude)").last();
-
-    await openCodex();
-    const codexModel = activeModel();
-    await codexModel.waitFor({ state: "visible", timeout: 10_000 });
-    assert(!(await codexModel.isDisabled()), "Codex 会话在 Claude 运行时不可用。" );
-
-    await page.evaluate(() => window.agentDesk.dev.injectClaudeWorkerFatal());
-    await page.waitForFunction(() => Array.from(document.querySelectorAll(".tab")).some((tab) => tab.querySelector(".provider-mark.claude") && tab.querySelector(".tab-status.error")), null, { timeout: 15_000 });
-    assert(await page.locator(".tab.active .provider-mark.codex").count() === 1, "Claude Worker 退出错误地切换或关闭了 Codex 会话。" );
-    assert(await page.locator(".pane-panel .error-banner").count() === 0, "Claude Worker 退出污染了 Codex 活动会话。" );
-    results.push("Claude Worker 退出不污染 Codex 会话");
-
-    await failingClaudeTab.click({ force: true });
-    const claudeError = page.locator(".pane-panel .error-banner");
-    await claudeError.waitFor({ state: "visible", timeout: 10_000 });
-    results.push("Claude Worker 退出错误只显示在所属会话");
-
-    await openClaude();
-    await page.evaluate(() => window.agentDesk.dev.setClaudeLifecycleFixture("longBash"));
-    await activeInput().fill(`AgentDesk fixture running tab close ${Date.now()}`);
-    await activeInput().press("Enter");
-    await stopButton.waitFor({ state: "visible", timeout: 15_000 });
-    const runningClaudeTab = page.locator(".tab.active:has(.provider-mark.claude)");
-    const runningClaudeTabHandle = await runningClaudeTab.elementHandle();
-    assert(Boolean(runningClaudeTabHandle), "找不到运行中的 Claude Tab。" );
-    await page.evaluate(() => { window.confirm = () => true; });
-    await runningClaudeTab.locator(".tab-close").click({ force: true });
-    try {
-      await page.waitForFunction((tab) => !tab?.isConnected, runningClaudeTabHandle, { timeout: 30_000 });
-    } catch (error) {
-      const state = await page.evaluate(() => ({
-        claudeTabs: Array.from(document.querySelectorAll(".tab:has(.provider-mark.claude)")).map((tab) => ({
-          active: tab.classList.contains("active"),
-          status: tab.querySelector(".tab-status")?.className || "",
-          text: tab.textContent || "",
-        })),
-        activeProvider: document.querySelector(".tab.active .provider-mark")?.className || "",
-        activeStopButton: Boolean(document.querySelector(".pane-panel .stop-button")),
-        activeError: document.querySelector(".pane-panel .error-banner")?.textContent || "",
-      }));
-      throw new Error(`运行中 Claude Tab 关闭超时：${JSON.stringify(state)}；${error instanceof Error ? error.message : String(error)}`);
-    }
-    assert(await page.locator(".tab.active .provider-mark.codex").count() === 1, "关闭运行中 Claude Tab 后没有回到可用的 Codex 会话。" );
-    results.push("运行中 Claude Tab 关闭后 Query 和进程树已释放");
+    // Provider 隔离：关掉 Claude 黑窗口标签，不能切走、禁用或污染当前 Codex 会话。
+    const claudeSessionId = await openClaudeTerminal();
+    const codexSessionId = await openCodexWorkbench();
+    assert(claudeSessionId && codexSessionId && claudeSessionId !== codexSessionId, "隔离验证没有拿到两个独立会话。" );
+    await page.locator(`.tab[data-session-id="${claudeSessionId}"] .tab-close`).click({ force: true });
+    await page.waitForFunction((sessionId) => !document.querySelector(`.tab[data-session-id="${sessionId}"]`), claudeSessionId, { timeout: 20_000 });
+    const codexStillActive = await page.evaluate((sessionId) => Boolean(
+      document.querySelector(`.tab.active[data-session-id="${sessionId}"]`),
+    ), codexSessionId);
+    assert(codexStillActive, "关闭 Claude 黑窗口标签后 Codex 会话不再是活动标签。" );
+    assert(await page.locator(".pane-panel .error-banner").count() === 0, "关闭 Claude 黑窗口污染了 Codex 活动会话。" );
+    assert(!(await activeInput().isDisabled()), "关闭 Claude 黑窗口后 Codex 输入框不可用。" );
+    results.push("关闭 Claude 黑窗口标签即时生效且不影响 Codex 会话");
 
     return { ok: true, results };
   } finally {
-    await page.evaluate(() => window.agentDesk?.dev?.setClaudeLifecycleFixture(null)).catch(() => undefined);
     page.off("dialog", acceptDialog);
   }
 }

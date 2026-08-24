@@ -251,10 +251,13 @@ body.resizing-sidebar, body.resizing-sidebar * { cursor: col-resize !important; 
 .presentation-toggle:hover:not(:disabled) { color: var(--text); background: var(--surface-hover); }
 .terminal-pane > .terminal-presentation-toggle { top: 8px; right: 9px; color: #aeb5bf; background: #181b1fcc; border-color: #2b3036; }
 .terminal-pane > .terminal-presentation-toggle:hover:not(:disabled) { color: #f0f2f5; background: #2b3036; }
-.terminal-host { min-width: 0; min-height: 0; flex: 1; padding: 8px 8px 4px; overflow: hidden; background: #101214; }
-.terminal-host .xterm { height: 100%; }
+.terminal-host { min-width: 0; min-height: 0; flex: 1; display: flex; padding: 4px 0 4px 4px; overflow: hidden; background: #101214; }
+.terminal-host-inner { min-width: 0; min-height: 0; flex: 1; position: relative; overflow: hidden; }
+.terminal-host-inner .xterm { width: 100%; height: 100%; }
+.terminal-host-inner .xterm .composition-view { max-width: calc(100% - 4px); padding: 0 2px; overflow: hidden; color: #f0f2f5; background: #1d2126; border-bottom: 2px solid #69c985; box-sizing: border-box; pointer-events: none; text-overflow: ellipsis; }
+.terminal-host-inner .xterm .xterm-viewport { background: #101214; }
 .terminal-host .xterm-viewport { scrollbar-width: auto; overflow-y: scroll; }
-.terminal-host .xterm-viewport::-webkit-scrollbar { width: 10px; }
+.terminal-host .xterm-viewport::-webkit-scrollbar { width: 8px; }
 .terminal-host .xterm-viewport::-webkit-scrollbar-track { background: #1b1f24; }
 .terminal-host .xterm-viewport::-webkit-scrollbar-thumb { background: #66717f; border-radius: 5px; }
 .terminal-host .xterm-viewport::-webkit-scrollbar-thumb:hover { background: #8d99a8; }

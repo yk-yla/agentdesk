@@ -7,6 +7,37 @@ import type { AgentBridge } from "../shared/protocol";
 import type { TerminalEvent, TerminalSessionInfo } from "../shared/terminalProtocol";
 import type { SessionState } from "./domain";
 import { parseClaudeTerminalInput, parseClaudeTerminalSettings, type ClaudeTerminalSettings } from "./terminalSettings";
+import { applyImeAnchorPlacement, resolveImeAnchorFromTerminal, resolveImeAnchorPlacement } from "./terminalImeAnchor";
+
+const TERMINAL_FONT_FAMILY = "'Cascadia Mono', Consolas, 'Microsoft YaHei UI', monospace";
+const TERMINAL_THEME = {
+  background: "#101214",
+  foreground: "#e7e9ec",
+  cursor: "#e7e9ec",
+  cursorAccent: "#101214",
+  selectionBackground: "#3a4658",
+  selectionForeground: "#f7fafc",
+  selectionInactiveBackground: "#303947",
+  scrollbarSliderBackground: "#66717fcc",
+  scrollbarSliderHoverBackground: "#8d99a8ee",
+  scrollbarSliderActiveBackground: "#aeb9c6f5",
+  black: "#0c0c0c",
+  red: "#c50f1f",
+  green: "#13a10e",
+  yellow: "#c19c00",
+  blue: "#0037da",
+  magenta: "#881798",
+  cyan: "#3a96dd",
+  white: "#cccccc",
+  brightBlack: "#767676",
+  brightRed: "#e74856",
+  brightGreen: "#16c60c",
+  brightYellow: "#f9f1a5",
+  brightBlue: "#3b78ff",
+  brightMagenta: "#b4009e",
+  brightCyan: "#61d6d6",
+  brightWhite: "#f2f2f2",
+};
 
 interface TerminalPaneProps {
   session: SessionState;
@@ -38,6 +69,9 @@ export default function TerminalPane({ session, bridge, isActive, onModeChange, 
   const onSettingsRef = useRef(onSettings);
   const onTerminalActivityRef = useRef(onTerminalActivity);
   const terminalActivityTimerRef = useRef<number | null>(null);
+  const resizeFrameRef = useRef<number | null>(null);
+  const ptyResizeTimerRef = useRef<number | null>(null);
+  const ptyDimensionsRef = useRef<{ cols: number; rows: number } | null>(null);
   const terminalCommandActiveRef = useRef(false);
   const settingsBufferRef = useRef("");
   const inputSettingsBufferRef = useRef("");
@@ -59,18 +93,16 @@ export default function TerminalPane({ session, bridge, isActive, onModeChange, 
   }, []);
 
   const markTerminalActivity = useCallback(() => {
-    // PTY output also includes idle redraws caused by focus and resize. Only
-    // output after a submitted command is relevant to the Tab activity state.
-    if (!terminalCommandActiveRef.current) return;
+    // Any PTY output reactivates the tab working indicator. The timer turns
+    // it off after a quiet period with no further output.
+    terminalCommandActiveRef.current = true;
     onTerminalActivityRef.current(true);
     if (terminalActivityTimerRef.current !== null) window.clearTimeout(terminalActivityTimerRef.current);
-    // PTY events do not carry Provider turn lifecycle, so use recent input or
-    // output as a bounded activity signal for the tab indicator.
     terminalActivityTimerRef.current = window.setTimeout(() => {
       terminalActivityTimerRef.current = null;
       terminalCommandActiveRef.current = false;
       onTerminalActivityRef.current(false);
-    }, 3_000);
+    }, 8_000);
   }, []);
 
   const markTerminalCommand = useCallback(() => {
@@ -95,25 +127,43 @@ export default function TerminalPane({ session, bridge, isActive, onModeChange, 
   }, [bridge, markTerminalCommand, session.id, session.provider]);
 
   const resize = useCallback(() => {
-    const terminal = terminalRef.current;
-    const fit = fitRef.current;
-    if (!terminal || !fit) return;
-    const activeBuffer = terminal.buffer.active;
-    const viewportY = activeBuffer.viewportY;
-    const atBottom = viewportY >= activeBuffer.baseY;
-    try {
-      fit.fit();
-      if (!atBottom) {
-        terminal.scrollToLine(viewportY);
-        viewportYRef.current = viewportY;
-      }
-      const current = infoRef.current;
-      if (current && current.status !== "exited") {
-        void bridge.resizeTerminal({ sessionId: session.id, generation: current.generation, cols: terminal.cols, rows: terminal.rows }).catch(() => undefined);
-      }
-    } catch {
-      // The container may be hidden while its pane is being switched.
+    if (resizeFrameRef.current === null) {
+      resizeFrameRef.current = window.requestAnimationFrame(() => {
+        resizeFrameRef.current = null;
+        const terminal = terminalRef.current;
+        const fit = fitRef.current;
+        if (!terminal || !fit) return;
+        const activeBuffer = terminal.buffer.active;
+        const viewportY = activeBuffer.viewportY;
+        const atBottom = viewportY >= activeBuffer.baseY;
+        try {
+          fit.fit();
+          if (!atBottom) {
+            terminal.scrollToLine(viewportY);
+            viewportYRef.current = viewportY;
+          }
+        } catch {
+          // The container may be hidden while its pane is being switched.
+        }
+      });
     }
+    if (ptyResizeTimerRef.current !== null) window.clearTimeout(ptyResizeTimerRef.current);
+    ptyResizeTimerRef.current = window.setTimeout(() => {
+      ptyResizeTimerRef.current = null;
+      const terminal = terminalRef.current;
+      if (!terminal) return;
+      try {
+        const current = infoRef.current;
+        const dimensions = { cols: terminal.cols, rows: terminal.rows };
+        const previousDimensions = ptyDimensionsRef.current;
+        if (current && current.status !== "exited" && (previousDimensions?.cols !== dimensions.cols || previousDimensions.rows !== dimensions.rows)) {
+          ptyDimensionsRef.current = dimensions;
+          void bridge.resizeTerminal({ sessionId: session.id, generation: current.generation, ...dimensions }).catch(() => undefined);
+        }
+      } catch {
+        // The PTY may have exited during a pending layout update.
+      }
+    }, 260);
   }, [bridge, session.id]);
 
   useLayoutEffect(() => {
@@ -123,59 +173,174 @@ export default function TerminalPane({ session, bridge, isActive, onModeChange, 
       allowProposedApi: true,
       convertEol: false,
       cursorBlink: true,
-      fontFamily: "Consolas, 'Cascadia Mono', monospace",
+      cursorStyle: "bar",
+      cursorWidth: 2,
+      fontFamily: TERMINAL_FONT_FAMILY,
       fontSize: 17,
       scrollback: 5_000,
       overviewRuler: { width: 0 },
+      rightClickSelectsWord: true,
       scrollOnUserInput: true,
-      theme: {
-        background: "#101214",
-        foreground: "#e7e9ec",
-        cursor: "#e7e9ec",
-        selectionBackground: "#3a4658",
-        scrollbarSliderBackground: "#66717fcc",
-        scrollbarSliderHoverBackground: "#8d99a8ee",
-        scrollbarSliderActiveBackground: "#aeb9c6f5",
-      },
+      theme: TERMINAL_THEME,
     });
     const fit = new FitAddon();
     terminal.loadAddon(fit);
     terminal.open(host);
     terminalRef.current = terminal;
     fitRef.current = fit;
+    // Intercept DECSCUSR (CSI Ps SP q) to keep the cursor as a thin bar
+    // regardless of what the CLI requests. This prevents Claude/Codex from
+    // switching to a fat block cursor.
+    const decscusrDisposable = terminal.parser.registerCsiHandler(
+      { intermediates: " ", final: "q" },
+      () => true,
+    );
+    // A new xterm instance always belongs to a new PTY lifecycle. Do not
+    // suppress its first resize just because the previous instance had the
+    // same dimensions.
+    ptyDimensionsRef.current = null;
+    let compositionTimer: number | null = null;
+    let compositionAnchor: { column: number; row: number } | null = null;
+    // Observe DECSET/DECRST 25 (show/hide cursor). Returning false lets xterm
+    // apply the sequence as usual; this only records the state, because xterm
+    // exposes no public API for it and the rendered cursor element depends on
+    // render timing and focus.
+    let appCursorHidden = false;
+    const cursorVisibilityDisposables = [
+      terminal.parser.registerCsiHandler({ prefix: "?", final: "h" }, (params) => {
+        if (params.includes(25)) appCursorHidden = false;
+        return false;
+      }),
+      terminal.parser.registerCsiHandler({ prefix: "?", final: "l" }, (params) => {
+        if (params.includes(25)) appCursorHidden = true;
+        return false;
+      }),
+    ];
+    const resolveAnchor = () => {
+      const active = terminal.buffer.active;
+      return resolveImeAnchorFromTerminal({
+        columns: terminal.cols,
+        rows: terminal.rows,
+        cursorColumn: active.cursorX,
+        cursorRow: active.cursorY,
+        baseRow: active.baseY,
+        viewportRow: active.viewportY,
+        // Ink TUIs (Claude Code) hide the cursor and draw their own caret,
+        // leaving the real cursor at the end of the row they repainted last.
+        cursorHidden: appCursorHidden,
+        getLine: (absoluteRow) => active.getLine(absoluteRow),
+      });
+    };
+    const applyCompositionPlacement = () => {
+      const composition = terminal.element?.querySelector<HTMLElement>(".composition-view");
+      if (!composition || !composition.classList.contains("active")) {
+        compositionAnchor = null;
+        return;
+      }
+      // Freeze the anchor for one composition. Re-resolving on every redraw
+      // would move the pinyin whenever the CLI repaints another row.
+      if (!compositionAnchor) {
+        const anchor = resolveAnchor();
+        compositionAnchor = { column: anchor.column, row: anchor.row };
+      }
+      // The xterm element reserves space for its scrollbar. Use the screen
+      // bounds, otherwise the last columns are treated as usable even though
+      // they already sit inside the scrollbar/blank area.
+      const screen = terminal.element?.querySelector<HTMLElement>(".xterm-screen");
+      const bounds = (screen || host).getBoundingClientRect();
+      const cellWidth = terminal.cols > 0 ? bounds.width / terminal.cols : 0;
+      const cellHeight = terminal.rows > 0 ? bounds.height / terminal.rows : 0;
+      const textarea = terminal.textarea;
+      const placement = resolveImeAnchorPlacement({
+        cellLeft: compositionAnchor.column * cellWidth,
+        cellTop: compositionAnchor.row * cellHeight,
+        compositionWidth: Math.max(composition.scrollWidth, composition.getBoundingClientRect().width),
+        compositionTextLength: composition.textContent?.length ?? 0,
+        cellWidth,
+        screenWidth: bounds.width,
+        screenHeight: bounds.height,
+        cellHeight,
+        textareaWidth: textarea ? Number.parseFloat(textarea.style.width) || 1 : 1,
+      });
+      applyImeAnchorPlacement(placement, composition.style, textarea?.style ?? null);
+    };
+    // xterm registers its own onRender -> updateCompositionElements during
+    // construction, so every redraw synchronously moves the composition back to
+    // the real cursor cell, and it repeats that once more via setTimeout(0).
+    // Correct synchronously and again after that timeout. A
+    // requestAnimationFrame here gets throttled while the window is hidden,
+    // which lets xterm's position win.
+    const placeComposition = () => {
+      applyCompositionPlacement();
+      // Always reschedule instead of skipping when one is pending: xterm may
+      // have queued a later setTimeout in this same event, and skipping would
+      // let it move the composition back to the real cursor cell.
+      if (compositionTimer !== null) window.clearTimeout(compositionTimer);
+      compositionTimer = window.setTimeout(() => {
+        compositionTimer = null;
+        applyCompositionPlacement();
+      }, 0);
+    };
+    const renderDisposable = terminal.onRender(placeComposition);
+    const compositionEvents = ["compositionstart", "compositionupdate", "compositionend", "input"] as const;
+    for (const eventName of compositionEvents) terminal.textarea?.addEventListener(eventName, placeComposition);
+    const handleCopy = (event: ClipboardEvent) => {
+      if (!terminal.hasSelection()) return;
+      const text = terminal.getSelection();
+      event.preventDefault();
+      event.stopPropagation();
+      if (event.clipboardData) event.clipboardData.setData("text/plain", text);
+      void bridge.writeClipboardText(text).catch((error) => onErrorRef.current(error instanceof Error ? error.message : "复制终端文字失败。"));
+    };
     const handlePaste = (event: ClipboardEvent) => {
-      const text = event.clipboardData?.getData("text/plain") || "";
-      if (!text) return;
       event.preventDefault();
       event.stopPropagation();
       event.stopImmediatePropagation();
-      terminal.paste(text);
+      const text = event.clipboardData?.getData("text/plain") || "";
+      if (text) {
+        terminal.paste(text);
+        return;
+      }
+      // Electron can occasionally omit clipboardData for a native paste. Use
+      // the controlled bridge only as a fallback, so one paste event still
+      // produces one terminal write.
+      void bridge.readClipboardText().then((clipboardText) => {
+        if (clipboardText && terminalRef.current === terminal) terminal.paste(clipboardText);
+      }).catch(() => undefined);
     };
     const handleCustomKey = (event: KeyboardEvent) => {
       const key = event.key.toLowerCase();
-      if ((event.ctrlKey || event.metaKey) && !event.altKey && key === "c") {
-        event.preventDefault();
-        event.stopPropagation();
-        // Ctrl+C is reserved for copying in the embedded terminal. With no
-        // selection it is intentionally a no-op, so it cannot interrupt or
-        // exit the Provider CLI session.
+      const commandModifier = event.ctrlKey || event.metaKey;
+      if (commandModifier && !event.altKey && (key === "c" || key === "insert")) {
         if (terminal.hasSelection()) {
+          event.preventDefault();
+          event.stopPropagation();
           void bridge.writeClipboardText(terminal.getSelection()).catch((error) => onErrorRef.current(error instanceof Error ? error.message : "复制终端文字失败。"));
+          return false;
         }
+        // Without a selection Ctrl+C keeps normal terminal semantics and
+        // reaches the PTY as an interrupt signal.
+        return true;
+      }
+      if ((key === "v" && commandModifier || key === "insert" && event.shiftKey) && !event.altKey) {
+        // Let the browser emit one native paste event. Returning false keeps
+        // the shortcut out of the PTY while handlePaste performs one write.
         return false;
       }
-      if (key !== "v" || (!event.ctrlKey && !event.metaKey) || event.altKey) return true;
-      // The browser emits a native `paste` event after Ctrl/Cmd+V. The
-      // clipboard read below handles the paste explicitly, so cancel the
-      // native event to avoid sending the same text twice.
-      event.preventDefault();
-      event.stopPropagation();
-      void bridge.readClipboardText().then((text) => {
-        if (text && terminalRef.current === terminal) terminal.paste(text);
-      }).catch(() => undefined);
-      return false;
+      if (key === "enter" && commandModifier && !event.altKey) {
+        // A terminal cannot encode Ctrl+Enter: xterm sends the same CR as a
+        // plain Enter, so the CLI cannot tell them apart and would submit.
+        // Translate it into the ESC+CR that Claude/Codex already accept as
+        // "insert a newline", which keeps plain Enter as submit.
+        event.preventDefault();
+        event.stopPropagation();
+        write("\x1b\r");
+        return false;
+      }
+      return true;
     };
     // Capture text paste before the CLI can interpret Ctrl+V as image input.
+    host.addEventListener("copy", handleCopy, true);
     host.addEventListener("paste", handlePaste, true);
     terminal.attachCustomKeyEventHandler(handleCustomKey);
     // Codex/Claude TUIs may enable mouse-reporting mode, which makes xterm
@@ -184,6 +349,7 @@ export default function TerminalPane({ session, bridge, isActive, onModeChange, 
     // always move above the current screen.
     terminal.attachCustomWheelEventHandler((event) => {
       if (event.deltaY === 0) return true;
+      if (terminal.modes.mouseTrackingMode !== "none" && !event.shiftKey) return true;
       const magnitude = event.deltaMode === WheelEvent.DOM_DELTA_LINE
         ? Math.abs(event.deltaY)
         : Math.max(1, Math.round(Math.abs(event.deltaY) / 20));
@@ -203,11 +369,22 @@ export default function TerminalPane({ session, bridge, isActive, onModeChange, 
     requestAnimationFrame(resize);
     return () => {
       cancelAnimationFrame(focusFrame);
+      if (ptyResizeTimerRef.current !== null) {
+        window.clearTimeout(ptyResizeTimerRef.current);
+        ptyResizeTimerRef.current = null;
+      }
+      if (resizeFrameRef.current !== null) window.cancelAnimationFrame(resizeFrameRef.current);
+      if (compositionTimer !== null) window.clearTimeout(compositionTimer);
+      renderDisposable.dispose();
+      for (const eventName of compositionEvents) terminal.textarea?.removeEventListener(eventName, placeComposition);
+      host.removeEventListener("copy", handleCopy, true);
       host.removeEventListener("paste", handlePaste, true);
       clearTerminalActivity();
       scrollDisposable.dispose();
       resizeObserver.disconnect();
       dataDisposable.dispose();
+      decscusrDisposable.dispose();
+      for (const disposable of cursorVisibilityDisposables) disposable.dispose();
       const current = infoRef.current;
       if (current && current.status !== "exited") {
         closeRequestedRef.current = true;
@@ -255,6 +432,7 @@ export default function TerminalPane({ session, bridge, isActive, onModeChange, 
       if (knownGeneration !== null && event.info.generation < knownGeneration) return;
       generationRef.current = event.info.generation;
       infoRef.current = event.info;
+      if (!knownGeneration || event.info.generation !== knownGeneration) ptyDimensionsRef.current = null;
       setInfo(event.info);
       if (event.type === "ready") {
         clearTerminalActivity();
@@ -371,7 +549,9 @@ export default function TerminalPane({ session, bridge, isActive, onModeChange, 
         title={session.terminalSuspended ? "正在准备终端" : "切换到图形界面"}
         aria-label="切换到图形界面"
       ><ArrowLeftRight size={16} /></button>}
-      <div ref={hostRef} className="terminal-host" onClick={() => terminalRef.current?.focus()} />
+      <div className="terminal-host">
+        <div ref={hostRef} className="terminal-host-inner" onClick={() => terminalRef.current?.focus()} />
+      </div>
       {session.terminalSuspended || starting ? <div className="terminal-status" role="status">正在启动终端…</div> : null}
       {session.errorText ? <div className="terminal-error" role="alert">{session.errorText}</div> : null}
     </section>
