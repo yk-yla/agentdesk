@@ -34,6 +34,10 @@ yarn-error.log*
 pnpm-debug.log*
 *.dmp
 
+# AI assistant local config
+.claude/
+.codex/
+
 # IDE and operating-system files
 .vscode/
 .idea/
