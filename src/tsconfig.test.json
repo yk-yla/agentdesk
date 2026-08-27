@@ -18,6 +18,8 @@
     "main/atomicFile.test.ts",
     "main/clipboardImageData.ts",
     "main/clipboardImageData.test.ts",
+    "main/codexHome.ts",
+    "main/codexHome.test.ts",
     "main/executablePath.ts",
     "main/executablePath.test.ts",
     "main/logger.ts",

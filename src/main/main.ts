@@ -37,6 +37,7 @@ import { buildDiagnosticBundle } from "./diagnostics";
 import { requestedProviderFromArgs, requestedWorkspaceFromArgs, startupWorkspace } from "./workspaceArgs";
 import { WorkspaceAuthorizationRegistry, type WorkspaceAuthorizationSource } from "./workspaceAuthorizationRegistry";
 import { WorkspaceGrantStore } from "./workspaceGrantStore";
+import { ensureCodexHomeLinks } from "./codexHome";
 import { parseClipboardImageDataUrl } from "./clipboardImageData";
 import { isClipboardImageSizeAllowed } from "../shared/imagePolicy";
 import { WorkspaceSnapshotCoordinator } from "./workspaceSnapshotCoordinator";
@@ -46,9 +47,10 @@ import { detectImageMediaType, MAX_LOCAL_IMAGE_BYTES } from "./imageContent";
 
 const MAX_AUTHORIZED_LOCAL_PATHS = 4_096;
 const MAX_AUTHORIZED_WORKSPACE_PATHS = 64;
-// AgentDesk must not inherit the bridge's Codex state directory.
+const globalCodexHome = path.join(homedir(), ".codex");
 const agentDeskCodexHome = path.join(homedir(), ".codex-agentdesk");
-mkdirSync(agentDeskCodexHome, { recursive: true });
+const codexHomeLinkResults = ensureCodexHomeLinks(globalCodexHome, agentDeskCodexHome);
+const codexHomeLinkFailure = codexHomeLinkResults.find((result) => result.status === "occupied" || result.status === "error");
 process.env.CODEX_HOME = agentDeskCodexHome;
 const MAX_ATTACHMENT_FILES = 10_000;
 const MAX_ATTACHMENT_STORAGE_BYTES = 1024 * 1024 * 1024;
@@ -99,6 +101,15 @@ function readCodexDefaults(): CodexDefaults {
 const preferencesStore = new PreferencesStore(() => path.join(app.getPath("userData"), "preferences.json"));
 const workspaceGrantStore = new WorkspaceGrantStore(() => path.join(app.getPath("userData"), "workspace-grants.json"), MAX_AUTHORIZED_WORKSPACE_PATHS);
 const appLogger = new FileLogger(() => path.join(app.getPath("userData"), "logs"));
+for (const result of codexHomeLinkResults) {
+  if (result.status === "occupied" || result.status === "error") {
+    appLogger.log("warn", "codex.home_link_unavailable", {
+      fileName: result.fileName,
+      status: result.status,
+      error: result.error,
+    });
+  }
+}
 const desktopNotificationRetention = new DesktopNotificationRetention<Notification>();
 
 process.on("uncaughtExceptionMonitor", (error) => appLogger.log("error", "process.uncaught_exception", logErrorDetails(error)));
@@ -753,7 +764,12 @@ function preserveLegacyUserDataDirectory() {
 
 preserveLegacyUserDataDirectory();
 
-const codexCommand = () => process.env.CODEX_DESKTOP_CLI?.trim() || (process.platform === "win32" ? "codex.cmd" : "codex");
+const codexCommand = () => {
+  if (codexHomeLinkFailure) {
+    throw new Error(`无法建立 AgentDesk Codex 配置软链接：${codexHomeLinkFailure.fileName}（${codexHomeLinkFailure.error || codexHomeLinkFailure.status}）`);
+  }
+  return process.env.CODEX_DESKTOP_CLI?.trim() || (process.platform === "win32" ? "codex.cmd" : "codex");
+};
 const codexTitleGenerator = new CodexTitleGenerator({
   command: codexCommand,
   terminateTree: (child) => processSupervisor.terminate(child),
@@ -788,23 +804,8 @@ const codexAppServer = new CodexAppServer({
   },
 });
 
-// The bridge owns the default Codex home. Keep AgentDesk's writable state
-// isolated, but read legacy history through a separate app-server instance.
-const legacyCodexAppServer = new CodexAppServer({
-  command: codexCommand,
-  cwd: () => workspacePath,
-  appVersion: () => app.getVersion(),
-  isRequestBlocked: () => codexCliUpdateManager?.active || false,
-  isQuitting: () => windowLifecycle.isQuitting,
-  isExitNotificationSuppressed: () => true,
-  terminateTree: (child) => processSupervisor.terminate(child),
-  env: { CODEX_HOME: path.join(homedir(), ".codex") },
-  inspectMessage: () => undefined,
-  logger: appLogger,
-});
-
 let claudeBackend: ClaudeBackend;
-const backendManager = createBackendRegistry([new CodexBackend(codexAppServer, codexTitleGenerator, legacyCodexAppServer), (claudeBackend = new ClaudeBackend())], appLogger, (cwd) => isAuthorizedWorkspacePath(cwd), nativeSessionOwnership);
+const backendManager = createBackendRegistry([new CodexBackend(codexAppServer, codexTitleGenerator), (claudeBackend = new ClaudeBackend())], appLogger, (cwd) => isAuthorizedWorkspacePath(cwd), nativeSessionOwnership);
 const terminalSessionManager = new TerminalSessionManager({
   isWorkspaceAuthorized: (cwd) => isAuthorizedWorkspacePath(cwd),
   assertNativeSessionAuthorized: (provider, nativeSessionId, cwd) => backendManager.assertNativeSessionAuthorized(provider, nativeSessionId, cwd),

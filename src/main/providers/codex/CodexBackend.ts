@@ -36,9 +36,6 @@ const CAPABILITIES: AgentCapabilities = {
 };
 
 const THREAD_CONFIGURATION_OPERATIONS = new Set<AgentOperation>(["startSession", "resumeSession", "forkSession"]);
-const LEGACY_HISTORY_OPERATIONS = new Set<AgentOperation>([
-  "readSession", "resumeSession", "forkSession", "renameSession", "deleteSession", "updateSessionMetadata",
-]);
 
 function forcedExecutionParams(operation: AgentOperation, params: JsonObject): JsonObject {
   if (THREAD_CONFIGURATION_OPERATIONS.has(operation)) {
@@ -68,12 +65,10 @@ export interface CodexBackendRuntime {
 export class CodexBackend implements AgentBackend {
   readonly provider = "codex" as const;
   private readonly activeSessions = new Map<string, string>();
-  private readonly legacyHistorySessionIds = new Set<string>();
 
   constructor(
     private readonly runtime: CodexBackendRuntime,
     private readonly titleGenerator?: CodexTitleGenerator,
-    private readonly legacyHistoryRuntime?: CodexBackendRuntime,
   ) {}
 
   async request(operation: AgentOperation, params: JsonObject, context: AgentRequestContext) {
@@ -83,12 +78,8 @@ export class CodexBackend implements AgentBackend {
     const method = METHODS[operation];
     if (!method) throw new Error(`Codex 不支持该操作：${operation}`);
     const providerParams = providerRequestParams(operation, params);
-    if ((operation === "listSessions" || operation === "searchSessions") && this.legacyHistoryRuntime) {
-      return this.requestMergedHistory(method, providerParams, context, operation);
-    }
-    const selectedRuntime = this.runtimeFor(operation, providerParams, context);
     try {
-      const result = await selectedRuntime.request(method, providerParams, context, operation);
+      const result = await this.runtime.request(method, providerParams, context, operation);
       if ((operation === "startSession" || operation === "resumeSession") && context.sessionId) {
         const payload = result && typeof result === "object" && !Array.isArray(result)
           ? result as { thread?: unknown; threadId?: unknown }
@@ -131,7 +122,7 @@ export class CodexBackend implements AgentBackend {
   async closeSession(context: AgentRequestContext) {
     if (context.sessionId) this.titleGenerator?.cancel(context.sessionId);
     if (context.nativeSessionId) {
-      await this.runtimeFor("closeSession", {}, context).request("thread/unsubscribe", { threadId: context.nativeSessionId }, context, "closeSession");
+      await this.runtime.request("thread/unsubscribe", { threadId: context.nativeSessionId }, context, "closeSession");
     }
     if (context.sessionId) this.activeSessions.delete(context.sessionId);
   }
@@ -142,7 +133,7 @@ export class CodexBackend implements AgentBackend {
   }
 
   async close() {
-    await Promise.all([this.titleGenerator?.close() || Promise.resolve(), this.runtime.close(), this.legacyHistoryRuntime?.close() || Promise.resolve()]);
+    await Promise.all([this.titleGenerator?.close() || Promise.resolve(), this.runtime.close()]);
     this.activeSessions.clear();
   }
 
@@ -175,48 +166,4 @@ export class CodexBackend implements AgentBackend {
     return { title: generated, source: "generated" };
   }
 
-  private runtimeFor(operation: AgentOperation, params: JsonObject, context: AgentRequestContext) {
-    if (!this.legacyHistoryRuntime || !LEGACY_HISTORY_OPERATIONS.has(operation)) return this.runtime;
-    const nativeSessionId = typeof params.threadId === "string" ? params.threadId : context.nativeSessionId;
-    return nativeSessionId && this.legacyHistorySessionIds.has(nativeSessionId) ? this.legacyHistoryRuntime : this.runtime;
-  }
-
-  private async requestMergedHistory(method: string, params: JsonObject, context: AgentRequestContext, operation: AgentOperation) {
-    if (!this.legacyHistoryRuntime) return this.runtime.request(method, params, context, operation);
-    const results = await Promise.allSettled([
-      this.runtime.request(method, params, context, operation),
-      this.legacyHistoryRuntime.request(method, params, context, operation),
-    ]);
-    const successful = results.flatMap((result) => result.status === "fulfilled" ? [result.value] : []);
-    if (!successful.length) {
-      const failed = results.find((result) => result.status === "rejected");
-      throw failed && failed.status === "rejected" ? failed.reason : new Error("Codex 历史读取失败。");
-    }
-    const entries = new Map<string, Record<string, unknown>>();
-    for (const value of successful) {
-      const data = value && typeof value === "object" && !Array.isArray(value) && Array.isArray((value as Record<string, unknown>).data)
-        ? (value as Record<string, unknown>).data as unknown[] : [];
-      for (const item of data) {
-        if (!item || typeof item !== "object" || Array.isArray(item)) continue;
-        const record = item as Record<string, unknown>;
-        const id = typeof record.id === "string" ? record.id : typeof record.sessionId === "string" ? record.sessionId : "";
-        if (id) entries.set(id, record);
-      }
-    }
-    const limit = Math.min(Math.max(Number(params.limit) || 100, 1), 100);
-    const data = [...entries.values()]
-      .sort((left, right) => Number(right.updatedAt || right.recencyAt || 0) - Number(left.updatedAt || left.recencyAt || 0))
-      .slice(0, limit);
-    const legacyResult = results[1];
-    if (legacyResult.status === "fulfilled" && legacyResult.value && typeof legacyResult.value === "object" && !Array.isArray(legacyResult.value)) {
-      const legacyData = Array.isArray((legacyResult.value as Record<string, unknown>).data) ? (legacyResult.value as Record<string, unknown>).data as unknown[] : [];
-      for (const item of legacyData) {
-        if (!item || typeof item !== "object" || Array.isArray(item)) continue;
-        const record = item as Record<string, unknown>;
-        const id = typeof record.id === "string" ? record.id : typeof record.sessionId === "string" ? record.sessionId : "";
-        if (id) this.legacyHistorySessionIds.add(id);
-      }
-    }
-    return { data, nextCursor: null };
-  }
 }
