@@ -82,6 +82,38 @@ describe("Claude activity settlement", () => {
     assert.equal(hydrated.messages[1].timestamp, Date.parse("2026-08-12T01:02:03.000Z"));
   });
 
+  it("prepends older Claude history pages without dropping already loaded messages", () => {
+    const source = emptySession("session", "C:\\workspace", "", "", "claude");
+    source.messages = Array.from({ length: 200 }, (_, index) => ({
+      id: `message-${index + 200}`,
+      role: "assistant" as const,
+      text: `message ${index + 200}`,
+      images: [],
+    }));
+    source.historyMessageOffset = 200;
+    source.historyMessageTotal = 400;
+    source.historyHasMoreBefore = true;
+    const hydrated = hydrateClaudeSession(source, {
+      id: "native-session",
+      messageOffset: 0,
+      messageTotal: 400,
+      messageHasMoreBefore: false,
+      messageHasMoreAfter: true,
+      messages: Array.from({ length: 200 }, (_, index) => ({
+        type: "assistant",
+        uuid: `uuid-${index}`,
+        message: { id: `message-${index}`, role: "assistant", content: [{ type: "text", text: `message ${index}` }] },
+      })),
+    }, { historyPage: { prepend: true } });
+
+    assert.equal(hydrated.messages.length, 400);
+    assert.equal(hydrated.messages[0]?.text, "message 0");
+    assert.equal(hydrated.messages.at(-1)?.text, "message 399");
+    assert.equal(hydrated.historyMessageOffset, 0);
+    assert.equal(hydrated.historyHasMoreBefore, false);
+    assert.equal(hydrated.historyHasMoreAfter, true);
+  });
+
   it("keeps distinct Claude messages during streaming and history hydration", () => {
     const source = emptySession("session", "C:\\workspace", "", "", "claude");
     source.status = "working";

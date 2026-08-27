@@ -65,6 +65,7 @@ export interface HydrateAgentSessionOptions {
   preserveLifecycle?: boolean;
   persistedCompactionCount?: number;
   persistedCompactionEventIds?: string[];
+  historyPage?: { prepend?: boolean };
 }
 
 const adapters: Record<AgentProvider, RendererProviderAdapter | undefined> = {

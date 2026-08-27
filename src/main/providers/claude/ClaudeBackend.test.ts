@@ -1,8 +1,24 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
-import { ClaudeBackend } from "./ClaudeBackend";
+import { ClaudeBackend, paginateClaudeHistoryMessages } from "./ClaudeBackend";
 
 describe("ClaudeBackend (terminal-only)", () => {
+  it("pages the full history from the newest page back to the first", () => {
+    const messages = Array.from({ length: 431 }, (_, index) => ({ index }));
+    const latest = paginateClaudeHistoryMessages(messages, undefined, 200);
+    assert.deepEqual(latest.messages.map((entry) => entry.index), Array.from({ length: 200 }, (_, index) => index + 231));
+    assert.deepEqual(latest, { messages: latest.messages, offset: 231, total: 431, hasMoreBefore: true, hasMoreAfter: false });
+    const middle = paginateClaudeHistoryMessages(messages, 31, 200);
+    assert.equal(middle.offset, 31);
+    assert.equal(middle.messages.length, 200);
+    assert.equal(middle.hasMoreBefore, true);
+    assert.equal(middle.hasMoreAfter, true);
+    const first = paginateClaudeHistoryMessages(messages, 0, 200);
+    assert.equal(first.messages.length, 200);
+    assert.equal(first.hasMoreBefore, false);
+    assert.equal(first.hasMoreAfter, true);
+  });
+
   it("returns simplified capabilities without query support", async () => {
     const backend = new ClaudeBackend();
     const capabilities = await backend.getCapabilities();

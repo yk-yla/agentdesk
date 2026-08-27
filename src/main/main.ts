@@ -1,18 +1,20 @@
 import { app, BrowserWindow, clipboard, dialog, ipcMain, Menu, nativeImage, net, Notification, shell, Tray, type NotificationConstructorOptions } from "electron";
 import { autoUpdater } from "electron-updater";
-import { spawnSync } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 import { existsSync, lstatSync, mkdirSync, promises as fsPromises, readFileSync, statSync, writeFileSync } from "node:fs";
 import { randomUUID } from "node:crypto";
 import { homedir } from "node:os";
 import { createServer, type Server } from "node:http";
 import path from "node:path";
 import { parse as parseToml } from "smol-toml";
-import type { CodexDefaults, DiagnosticExport, HandoffPackage, JsonRpcMessage, SavedImage, SavedTextFile } from "../shared/protocol";
+import type { CodexDefaults, DiagnosticExport, ExternalTerminalSettings, ExternalTerminalStatus, HandoffPackage, JsonRpcMessage, SavedImage, SavedTextFile } from "../shared/protocol";
+import { externalTerminalLabel } from "../shared/externalTerminalPresets";
 import type { TerminalInputRequest, TerminalResizeRequest, TerminalSessionCommand, TerminalSessionRequest } from "../shared/terminalProtocol";
 import { createBackendRegistry } from "./agent/backendRegistry";
 import { prepareAgentRequest } from "./agent/requestAdapterRegistry";
 import { writeTextFileAtomicAsync } from "./atomicFile";
 import { DesktopNotificationRetention, normalizeDesktopNotification } from "./desktopNotification";
+import { createExternalTerminalLaunchPlan } from "./externalTerminalLauncher";
 import { CoalescingAsyncTask } from "./asyncOperation";
 import { canonicalPath, isWithinDirectory, resolveLocalPathOpenRequest } from "./localPathPolicy";
 import { CodexBackend } from "./providers/codex/CodexBackend";
@@ -23,7 +25,7 @@ import { ClaudeBackend } from "./providers/claude/ClaudeBackend";
 import { managedClaudeExecutablePath } from "./providers/claude/claudeUpdater";
 import { resolveExecutableFromPath } from "./executablePath";
 import { runShutdownSteps, ShutdownCoordinator } from "./shutdownCoordinator";
-import { PreferencesStore } from "./preferencesStore";
+import { normalizeExternalTerminal, PreferencesStore } from "./preferencesStore";
 import { ProcessSupervisor } from "./processSupervisor";
 import { DesktopUpdateManager } from "./desktopUpdateManager";
 import { CodexCliUpdateManager } from "./codexCliUpdateManager";
@@ -44,6 +46,10 @@ import { detectImageMediaType, MAX_LOCAL_IMAGE_BYTES } from "./imageContent";
 
 const MAX_AUTHORIZED_LOCAL_PATHS = 4_096;
 const MAX_AUTHORIZED_WORKSPACE_PATHS = 64;
+// AgentDesk must not inherit the bridge's Codex state directory.
+const agentDeskCodexHome = path.join(homedir(), ".codex-agentdesk");
+mkdirSync(agentDeskCodexHome, { recursive: true });
+process.env.CODEX_HOME = agentDeskCodexHome;
 const MAX_ATTACHMENT_FILES = 10_000;
 const MAX_ATTACHMENT_STORAGE_BYTES = 1024 * 1024 * 1024;
 const backendShutdownCoordinator = new ShutdownCoordinator(35_000);
@@ -58,6 +64,18 @@ const processSupervisor = new ProcessSupervisor();
 let codexCliUpdateManager: CodexCliUpdateManager;
 let claudeUpdateManager: ClaudeUpdateManager;
 const nativeSessionOwnership = new NativeSessionOwnershipRegistry();
+const launchedExternalClaudeSessions = new Map<string, number>();
+interface ExternalTerminalExecutableCache {
+  schema: 1;
+  requestedExecutable: string;
+  executable: string;
+  available: boolean;
+  updatedAt: number;
+}
+
+let externalTerminalExecutableCache: ExternalTerminalExecutableCache | null = null;
+let externalTerminalCacheWriteQueue: Promise<void> = Promise.resolve();
+let externalTerminalPreferenceSaveQueue: Promise<void> = Promise.resolve();
 
 const EMPTY_CODEX_DEFAULTS: CodexDefaults = { model: "", effort: "" };
 
@@ -104,6 +122,20 @@ const workspaceSnapshotCoordinator = new WorkspaceSnapshotCoordinator({
   requestFromRenderer: (requestId) => windowLifecycle.send("agentdesk:workspace-snapshot-requested", requestId),
   save: (workspaceState) => preferencesStore.write({ workspaceState }),
 });
+
+function savePreferences(patch: Parameters<PreferencesStore["write"]>[0]) {
+  if (!Object.prototype.hasOwnProperty.call(patch, "externalTerminal")) return preferencesStore.write(patch);
+  const operation = externalTerminalPreferenceSaveQueue.then(async () => {
+    const externalTerminal = normalizeExternalTerminal(patch.externalTerminal);
+    const cache = detectExternalTerminalExecutable(externalTerminal);
+    if (!cache.available) throw new Error(`找不到 ${externalTerminalLabel(externalTerminal)}（${externalTerminal.executable}）。请确认它已安装，且已加入系统 PATH。`);
+    const next = await preferencesStore.write({ ...patch, externalTerminal });
+    await persistExternalTerminalExecutableCache(cache);
+    return next;
+  });
+  externalTerminalPreferenceSaveQueue = operation.then(() => undefined, () => undefined);
+  return operation;
+}
 
 function showRetainedDesktopNotification(options: NotificationConstructorOptions, onClick?: () => void) {
   if (!Notification.isSupported()) return false;
@@ -175,6 +207,175 @@ function requireAuthorizedWorkspacePath(directory: string) {
   if (!existingDirectory(resolved)) throw new Error("工作区不存在。");
   if (!isAuthorizedWorkspacePath(resolved)) throw new Error("该工作区未获得授权。");
   return resolved;
+}
+
+function expandExternalTerminalArgs(template: string, values: { cwd: string; sessionId: string; resume: boolean }) {
+  const replaced = template
+    .replaceAll("{cwd}", values.cwd.replaceAll("\\", "\\\\").replaceAll('"', '\\"'))
+    .replaceAll("{sessionId}", values.sessionId)
+    .replaceAll("{provider}", "claude");
+  if (/[{}]/u.test(replaced)) throw new Error("外部终端参数模板包含未识别的变量。");
+  const args: string[] = [];
+  const pattern = /"((?:\\.|[^"\\])*)"|([^\s]+)/gu;
+  for (const match of replaced.matchAll(pattern)) {
+    const value = match[1] ?? match[2] ?? "";
+    args.push(value.replaceAll('\\"', '"').replaceAll("\\\\", "\\"));
+  }
+  if (!values.resume) return args;
+  return args.map((value) => value.includes("--session-id") ? value.replaceAll("--session-id", "--resume") : value);
+}
+
+function externalTerminalEnvironment() {
+  const env: NodeJS.ProcessEnv = { ...process.env };
+  // AgentDesk may itself run with NO_COLOR/TERM=dumb (for example when it is
+  // launched by a headless bridge). Do not pass those host settings to the
+  // interactive Claude terminal, otherwise Claude disables its coloured UI.
+  delete env.NO_COLOR;
+  env.TERM = "xterm-256color";
+  env.COLORTERM = "truecolor";
+  env.TERM_PROGRAM = "AgentDesk";
+  env.CLICOLOR = "1";
+  env.CLICOLOR_FORCE = "1";
+  env.FORCE_COLOR = "1";
+  return env;
+}
+
+function validateExternalTerminalInput(input: unknown) {
+  if (!input || typeof input !== "object" || Array.isArray(input)) throw new Error("外部终端参数无效。");
+  const record = input as Record<string, unknown>;
+  const cwd = requireAuthorizedWorkspacePath(typeof record.cwd === "string" ? record.cwd : "");
+  const sessionId = typeof record.sessionId === "string" ? record.sessionId : "";
+  const resume = record.resume === true;
+  if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(sessionId)) throw new Error("Claude 会话 ID 无效。");
+  return { cwd, sessionId, resume };
+}
+
+function getExternalTerminalStatus(input: unknown): ExternalTerminalStatus {
+  validateExternalTerminalInput(input);
+  // 保留旧 IPC 接口，但不再扫描系统进程判断会话是否已运行。
+  return { state: "unknown", source: "unavailable" };
+}
+
+function configuredExternalTerminalExecutable(value: string) {
+  const requested = value.trim();
+  if (!requested) return "";
+  // 查找必须以真实可执行文件为准，保存时才能及时提示配置不可用。
+  return resolveExecutableFromPath(requested);
+}
+
+function externalTerminalExecutableCachePath() {
+  return path.join(app.getPath("userData"), "external-terminal-cache.json");
+}
+
+function detectExternalTerminalExecutable(settings: ExternalTerminalSettings): ExternalTerminalExecutableCache {
+  const requestedExecutable = settings.executable.trim();
+  const executable = configuredExternalTerminalExecutable(requestedExecutable);
+  return {
+    schema: 1,
+    requestedExecutable,
+    executable,
+    available: Boolean(executable),
+    updatedAt: Date.now(),
+  };
+}
+
+async function persistExternalTerminalExecutableCache(cache: ExternalTerminalExecutableCache) {
+  externalTerminalExecutableCache = cache;
+  externalTerminalCacheWriteQueue = externalTerminalCacheWriteQueue.then(async () => {
+    try {
+      const filePath = externalTerminalExecutableCachePath();
+      mkdirSync(path.dirname(filePath), { recursive: true });
+      await writeTextFileAtomicAsync(filePath, JSON.stringify(cache, null, 2));
+    } catch (error) {
+      appLogger.log("warn", "external_terminal.cache_write_failed", { error: logErrorDetails(error) });
+    }
+  });
+  await externalTerminalCacheWriteQueue;
+}
+
+function readExternalTerminalExecutableCache() {
+  if (externalTerminalExecutableCache) return externalTerminalExecutableCache;
+  try {
+    const parsed = JSON.parse(readFileSync(externalTerminalExecutableCachePath(), "utf8")) as Partial<ExternalTerminalExecutableCache>;
+    if (parsed.schema === 1
+      && typeof parsed.requestedExecutable === "string"
+      && typeof parsed.executable === "string"
+      && typeof parsed.available === "boolean"
+      && typeof parsed.updatedAt === "number") {
+      externalTerminalExecutableCache = {
+        schema: 1,
+        requestedExecutable: parsed.requestedExecutable,
+        executable: parsed.executable,
+        available: parsed.available,
+        updatedAt: parsed.updatedAt,
+      };
+      return externalTerminalExecutableCache;
+    }
+  } catch {
+    // 首次启动或缓存损坏时由后台检测重建。
+  }
+  return null;
+}
+
+async function refreshExternalTerminalExecutableCache(settings = preferencesStore.read().externalTerminal) {
+  const cache = detectExternalTerminalExecutable(normalizeExternalTerminal(settings));
+  await persistExternalTerminalExecutableCache(cache);
+  return cache;
+}
+
+function openConfiguredExternalTerminal(input: unknown): Promise<ExternalTerminalStatus> {
+  const { cwd, sessionId, resume } = validateExternalTerminalInput(input);
+  const settings = preferencesStore.read().externalTerminal;
+  const requestedExecutable = settings?.executable?.trim() || "";
+  const cache = readExternalTerminalExecutableCache();
+  if (!cache || cache.requestedExecutable !== requestedExecutable) throw new Error("终端配置正在检测，请稍后再试。");
+  if (!cache.available || !cache.executable) throw new Error("找不到外部终端程序，请在设置中填写可执行文件路径。");
+  const executable = cache.executable;
+  if (!settings?.argsTemplate.includes("{sessionId}")) throw new Error("外部终端参数模板必须包含 {sessionId}，否则无法绑定到当前 Claude 会话。");
+  appLogger.log("info", "external_terminal.open_requested", { executable: requestedExecutable, cwd, resume, sessionIdPresent: true });
+  const args = expandExternalTerminalArgs(settings?.argsTemplate || "", { cwd, sessionId, resume });
+  if (!args.length) throw new Error("外部终端参数模板不能为空。");
+  const launchPlan = createExternalTerminalLaunchPlan(settings, executable, args, cwd);
+  return new Promise((resolve, reject) => {
+    const visibleConsole = launchPlan.mode === "visible-console";
+    const child = spawn(launchPlan.executable, launchPlan.args, {
+      cwd,
+      detached: !visibleConsole,
+      stdio: visibleConsole ? ["ignore", "ignore", "pipe"] : "ignore",
+      windowsHide: visibleConsole,
+      env: externalTerminalEnvironment(),
+    });
+    let settled = false;
+    let launcherError = "";
+    const finish = (error?: Error) => {
+      if (settled) return;
+      settled = true;
+      if (error) {
+        appLogger.log("error", "external_terminal.open_failed", { executable: requestedExecutable, cwd, error: logErrorDetails(error) });
+        reject(error);
+        return;
+      }
+      launchedExternalClaudeSessions.set(sessionId, Date.now());
+      appLogger.log("info", "external_terminal.started", { executable: requestedExecutable, cwd, launchMode: launchPlan.mode });
+      resolve({ state: "open", source: "agentdesk" });
+    };
+    if (visibleConsole) {
+      child.stderr?.setEncoding("utf8");
+      child.stderr?.on("data", (chunk: string) => {
+        if (launcherError.length < 4_096) launcherError += chunk;
+      });
+    }
+    child.once("error", (error) => {
+      finish(error);
+    });
+    child.once("spawn", () => {
+      if (!visibleConsole) {
+        child.unref();
+        finish();
+      }
+    });
+    if (visibleConsole) child.once("close", (code) => finish(code === 0 ? undefined : new Error(launcherError.trim() || `外部终端启动程序退出，代码 ${code ?? "未知"}。`)));
+  });
 }
 
 function registerAuthorizedLocalPath(filePath: string) {
@@ -587,8 +788,23 @@ const codexAppServer = new CodexAppServer({
   },
 });
 
+// The bridge owns the default Codex home. Keep AgentDesk's writable state
+// isolated, but read legacy history through a separate app-server instance.
+const legacyCodexAppServer = new CodexAppServer({
+  command: codexCommand,
+  cwd: () => workspacePath,
+  appVersion: () => app.getVersion(),
+  isRequestBlocked: () => codexCliUpdateManager?.active || false,
+  isQuitting: () => windowLifecycle.isQuitting,
+  isExitNotificationSuppressed: () => true,
+  terminateTree: (child) => processSupervisor.terminate(child),
+  env: { CODEX_HOME: path.join(homedir(), ".codex") },
+  inspectMessage: () => undefined,
+  logger: appLogger,
+});
+
 let claudeBackend: ClaudeBackend;
-const backendManager = createBackendRegistry([new CodexBackend(codexAppServer, codexTitleGenerator), (claudeBackend = new ClaudeBackend())], appLogger, (cwd) => isAuthorizedWorkspacePath(cwd), nativeSessionOwnership);
+const backendManager = createBackendRegistry([new CodexBackend(codexAppServer, codexTitleGenerator, legacyCodexAppServer), (claudeBackend = new ClaudeBackend())], appLogger, (cwd) => isAuthorizedWorkspacePath(cwd), nativeSessionOwnership);
 const terminalSessionManager = new TerminalSessionManager({
   isWorkspaceAuthorized: (cwd) => isAuthorizedWorkspacePath(cwd),
   assertNativeSessionAuthorized: (provider, nativeSessionId, cwd) => backendManager.assertNativeSessionAuthorized(provider, nativeSessionId, cwd),
@@ -638,6 +854,8 @@ if (hasLock) {
     appLogger.log("info", "app.started", { version: app.getVersion(), packaged: app.isPackaged, argv: process.argv });
     const explicitWorkspace = requestedWorkspace(process.argv);
     const startupPreferences = preferencesStore.read();
+    // 终端查找只在启动时执行一次，结果写入用户数据缓存；点击按钮不再现场搜索。
+    void refreshExternalTerminalExecutableCache(startupPreferences.externalTerminal);
     authorizedWorkspacePaths.clear();
     workspaceGrantStore.read().reverse().forEach((directory) => registerAuthorizedWorkspacePath(directory));
     const savedWorkspace = existingDirectory(startupPreferences.lastWorkspace);
@@ -661,7 +879,10 @@ if (hasLock) {
         },
         register: registerWorkspace,
       },
-      preferences: preferencesStore,
+      preferences: {
+        read: () => preferencesStore.read(),
+        write: savePreferences,
+      },
       workspaceSnapshot: {
         complete: (requestId, workspaceState) => workspaceSnapshotCoordinator.complete(requestId, workspaceState),
       },
@@ -717,6 +938,8 @@ if (hasLock) {
           if (typeof url !== "string" || !isSafeExternalUrl(url)) throw new Error("只允许打开 HTTP 或 HTTPS 链接。");
           return shell.openExternal(url);
         },
+        openExternalTerminal: (input) => openConfiguredExternalTerminal(input),
+        getExternalTerminalStatus: (input) => getExternalTerminalStatus(input),
       },
       showNotification: (input) => {
         const normalized = normalizeDesktopNotification(input);

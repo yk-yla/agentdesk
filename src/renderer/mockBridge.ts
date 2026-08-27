@@ -226,6 +226,8 @@ export function createMockBridge(): CodexBridge {
     readLocalImage: () => Promise.resolve(null),
     openLocalPath: () => Promise.resolve(""),
     openExternal: () => Promise.resolve(),
+    openExternalTerminal: () => Promise.resolve({ state: "open", source: "agentdesk" as const }),
+    getExternalTerminalStatus: () => Promise.resolve({ state: "notOpen", source: "none" as const }),
     showNotification: () => Promise.resolve(true),
     getWindowState: () => Promise.resolve({ maximized: mockWindowMaximized }),
     minimizeWindow: () => Promise.resolve(),

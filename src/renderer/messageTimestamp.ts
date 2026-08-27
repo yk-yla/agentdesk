@@ -25,6 +25,17 @@ export function formatMessageTimestamp(timestamp: number) {
   return formatTime(value, true);
 }
 
+/** 详情面板事件时间：今天只显示时分秒，其他日期显示日期和时分秒。 */
+export function formatEventTimestamp(timestamp: number | undefined, now = Date.now()) {
+  if (!isValidTimestamp(timestamp)) return "";
+  const value = new Date(timestamp);
+  const today = new Date(now);
+  const time = formatTime(value, true);
+  return isSameLocalDate(value, today)
+    ? time
+    : `${value.getFullYear()}-${twoDigits(value.getMonth() + 1)}-${twoDigits(value.getDate())} ${time}`;
+}
+
 export type MessageTimeDivider = { kind: "date" | "time"; label: string };
 
 export function getMessageTimeDivider(timestamp: number | undefined, previousTimestamp: number | undefined, now = Date.now()): MessageTimeDivider | null {

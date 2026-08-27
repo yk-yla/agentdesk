@@ -4,6 +4,7 @@ export interface RawEvent {
   id: string;
   label: string;
   payload: unknown;
+  createdAt: number;
 }
 
 const NOTIFY_INTERVAL_MS = 250;
@@ -35,7 +36,7 @@ function scheduleNotify() {
 
 /** 原始事件按会话上限保存在 React 状态之外，避免每条事件复制并重渲染整个会话。 */
 export function appendRawEvent(sessionId: string, label: string, payload: unknown) {
-  const entry: RawEvent = { id: `raw-${(sequence += 1)}`, label: label || "event", payload };
+  const entry: RawEvent = { id: `raw-${(sequence += 1)}`, label: label || "event", payload, createdAt: Date.now() };
   const bucket = buckets.get(sessionId);
   if (bucket) {
     bucket.live.push(entry);
@@ -45,6 +46,7 @@ export function appendRawEvent(sessionId: string, label: string, payload: unknow
         id: `raw-trimmed-${(sequence += 1)}`,
         label: "client/events-trimmed",
         payload: { removed, message: "较早的原始事件已按内存上限清理。" },
+        createdAt: Date.now(),
       });
       bucket.snapshotVersion = -1;
     }

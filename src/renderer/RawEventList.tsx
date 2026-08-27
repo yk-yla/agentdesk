@@ -1,5 +1,6 @@
 import { memo, useMemo, useState } from "react";
 import { rawEventText, useRawEvents } from "./rawEventStore";
+import { formatEventTimestamp } from "./messageTimestamp";
 
 const PAGE_SIZE = 100;
 
@@ -33,7 +34,7 @@ function RawEventListBase({ sessionId, variant }: Props) {
 
   return <>
     {variant === "inline" ? moreButton : null}
-    {shown.map((event) => <div className={className} key={event.id}><strong>{event.label}</strong><code>{rawEventText(event)}</code></div>)}
+    {shown.map((event) => <div className={className} key={event.id}><strong><span>{event.label}</span><time dateTime={new Date(event.createdAt).toISOString()}>{formatEventTimestamp(event.createdAt)}</time></strong><code>{rawEventText(event)}</code></div>)}
     {variant === "detail" ? moreButton : null}
   </>;
 }

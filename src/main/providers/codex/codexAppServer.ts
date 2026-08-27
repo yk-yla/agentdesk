@@ -61,6 +61,7 @@ export interface CodexAppServerOptions {
   isExitNotificationSuppressed(): boolean;
   terminateTree(child: ChildProcessWithoutNullStreams): Promise<void>;
   inspectMessage(message: JsonRpcMessage, requestMethod?: string): JsonRpcMessage | void;
+  env?: NodeJS.ProcessEnv;
   logger?: AppLogger;
 }
 
@@ -136,7 +137,7 @@ export class CodexAppServer implements CodexBackendRuntime {
       const spec = spawnSpec(command);
       child = spawn(spec.command, spec.args, {
         cwd: this.options.cwd(),
-        env: { ...process.env },
+        env: { ...process.env, ...(this.options.env || {}) },
         windowsHide: true,
         windowsVerbatimArguments: spec.windowsVerbatimArguments,
         shell: false,

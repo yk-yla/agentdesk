@@ -1,4 +1,4 @@
-import { Check, Copy, TriangleAlert } from "lucide-react";
+import { Check, Copy, TriangleAlert, X } from "lucide-react";
 import { memo, useEffect, useMemo, useState, type ReactNode } from "react";
 import ReactMarkdown, { type Components } from "react-markdown";
 import remarkGfm from "remark-gfm";
@@ -51,6 +51,8 @@ function isHttpSource(value: string) {
 function AttachmentImage({ image, readLocalImage, openExternal, onOpen }: { image: ImageAttachment; readLocalImage: Props["readLocalImage"]; openExternal: Props["openExternal"]; onOpen?: (source: string) => void }) {
   const [source, setSource] = useState(image.dataUrl);
   const [loading, setLoading] = useState(!image.dataUrl && Boolean(image.path) && !image.error);
+  const [dismissed, setDismissed] = useState(false);
+  useEffect(() => { setDismissed(false); }, [image.dataUrl, image.error, image.path]);
   useEffect(() => {
     let active = true;
     if (image.dataUrl) {
@@ -75,11 +77,13 @@ function AttachmentImage({ image, readLocalImage, openExternal, onOpen }: { imag
     return <a className="image-placeholder" href={source} onClick={(event) => { event.preventDefault(); void openExternal(source); }}>远程图片：{image.name}</a>;
   }
   if (loading) return <span className="image-placeholder">正在加载图片...</span>;
+  if (dismissed) return null;
   return source
     ? <img className="message-image" src={source} alt={image.name} onClick={() => onOpen?.(source)} title="点击放大" />
     : <span className={"image-placeholder" + (image.error ? " image-placeholder-error" : "")} role={image.error ? "alert" : undefined}>
       {image.error ? <TriangleAlert size={14} aria-hidden="true" /> : null}
       <span>{image.error ? "图片无法显示：" + image.error : "图片无法显示：原文件不存在或已被清理。" + image.name}</span>
+      <button type="button" className="bare-button image-error-dismiss" onClick={() => setDismissed(true)} title="关闭错误提示" aria-label="关闭错误提示"><X size={13} /></button>
     </span>;
 }
 
@@ -147,7 +151,7 @@ function MarkdownMessageBase({ text, images = NO_IMAGES, streaming = false, read
       {text ? (streaming
         ? <div className="streaming-plain-text">{text}</div>
         : <ReactMarkdown remarkPlugins={REMARK_PLUGINS} components={components} urlTransform={(value) => value}>{text}</ReactMarkdown>) : null}
-      {linkError ? <div className="markdown-link-error" role="alert">{linkError}</div> : null}
+      {linkError ? <div className="markdown-link-error" role="alert"><span>{linkError}</span><button type="button" className="bare-button" onClick={() => setLinkError(null)} title="关闭错误提示" aria-label="关闭错误提示"><X size={13} /></button></div> : null}
       {previewSource ? <ImageLightbox source={previewSource} label="图片预览" copyImage={copyImage} onClose={() => setPreviewSource(null)} /> : null}
     </div>
   );

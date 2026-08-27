@@ -75,11 +75,13 @@ describe("history helpers", () => {
       theme: "github-light",
       sessionAliases: { "claude:same": "Claude alias" },
       favoriteSessions: ["codex:same"],
+      pinnedSessions: ["claude:same"],
     });
 
     assert.equal(decorated.length, 2);
     assert.equal(decorated.find((entry) => entry.provider === "claude")?.title, "Claude alias");
     assert.equal(decorated.find((entry) => entry.provider === "codex")?.isFavorite, true);
+    assert.equal(decorated.find((entry) => entry.provider === "claude")?.isPinned, true);
   });
 
   it("restores cross-directory favorites from saved summaries", () => {

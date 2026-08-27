@@ -26,11 +26,18 @@ export function sortHistoryByRecency(entries: HistoryThread[], liveActivity: Rec
 
 export function applyLocalSessionMetadata(entries: HistoryThread[], preferences: DesktopPreferences) {
   const aliases = preferences.sessionAliases || {};
+  const pinned = new Set(preferences.pinnedSessions || []);
   const favorites = new Set(preferences.favoriteSessions || []);
   return entries.map((entry) => {
     const key = `${entry.provider}:${entry.id}`;
     const title = aliases[key]?.trim() || aliases[entry.id]?.trim() || entry.title;
-    return { ...entry, title, titleLower: title.toLowerCase(), isFavorite: favorites.has(key) || favorites.has(entry.id) };
+    return {
+      ...entry,
+      title,
+      titleLower: title.toLowerCase(),
+      isPinned: pinned.has(key) || pinned.has(entry.id),
+      isFavorite: favorites.has(key) || favorites.has(entry.id),
+    };
   });
 }
 

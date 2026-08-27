@@ -51,6 +51,7 @@ export interface Message {
 export interface Activity {
   id: string;
   kind: ActivityKind;
+  timestamp?: number;
   title: string;
   detail: string;
   status: ActivityStatus;
@@ -172,6 +173,14 @@ export interface SessionState {
   terminalWorking?: boolean;
   /** 正在从 Provider 读取历史，避免把临时空状态画成新会话。 */
   historyLoading?: boolean;
+  /** 正在向更早位置翻页读取历史。 */
+  historyLoadingEarlier?: boolean;
+  /** Claude 历史当前页在 Provider 原始记录中的起点。 */
+  historyMessageOffset?: number;
+  /** Claude 历史在 Provider 中的完整消息数，不代表当前内存中的数量。 */
+  historyMessageTotal?: number;
+  historyHasMoreBefore?: boolean;
+  historyHasMoreAfter?: boolean;
   queryGeneration: number;
   capabilities: AgentCapabilities;
   threadId: string | null;

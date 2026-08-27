@@ -25,6 +25,7 @@ describe("desktop IPC validation", () => {
       claudeModelCache: { schema: 2, claudeVersion: "1.2.3", updatedAt, models: [{ id: "sonnet", displayName: "Sonnet", efforts: [], defaultEffort: "", supportsImage: true }] },
       lastReasoningEfforts: { codex: " xhigh ", claude: "high", unknown: "medium" },
       recentCommandUsage: { "skill:latest": 30, "command:older": 20, invalid: 99 },
+      pinnedSessions: ["codex:thread-1", 2, "", "claude:thread-2"],
       codexCompactionCounts: { "codex:thread-1": { count: 12, eventIds: ["compact-1", 2], updatedAt: 100 } },
       compactionCounts: { "claude:thread-2": { count: 8, eventIds: ["claude-compact-1", 2], updatedAt: 200 } },
       workspaceState: [],
@@ -36,6 +37,7 @@ describe("desktop IPC validation", () => {
       claudeModelCache: { schema: 2, claudeVersion: "1.2.3", updatedAt, models: [{ id: "sonnet", displayName: "Sonnet", description: "", efforts: [], defaultEffort: "", supportsImage: true }] },
       lastReasoningEfforts: { codex: "xhigh", claude: "high" },
       recentCommandUsage: { "skill:latest": 30, "command:older": 20 },
+      pinnedSessions: ["codex:thread-1", "claude:thread-2"],
       codexCompactionCounts: { "codex:thread-1": { count: 12, eventIds: ["compact-1"], updatedAt: 100 } },
       compactionCounts: { "claude:thread-2": { count: 8, eventIds: ["claude-compact-1"], updatedAt: 200 } },
     });

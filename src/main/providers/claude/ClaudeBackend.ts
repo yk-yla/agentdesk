@@ -22,6 +22,36 @@ const CAPABILITIES: AgentCapabilities = {
   goals: "unsupported", plans: "unsupported", subagents: "unsupported", contextUsage: "unsupported",
 };
 
+// The SDK applies offset from the beginning of the transcript.  We keep the
+// page size bounded for responsiveness, but never cap the total history.
+export const DEFAULT_CLAUDE_HISTORY_PAGE_SIZE = 200;
+const MAX_CLAUDE_HISTORY_PAGE_SIZE = 500;
+
+export interface ClaudeHistoryPage<T> {
+  messages: T[];
+  offset: number;
+  total: number;
+  hasMoreBefore: boolean;
+  hasMoreAfter: boolean;
+}
+
+export function paginateClaudeHistoryMessages<T>(messages: T[], requestedOffset?: number, requestedLimit = DEFAULT_CLAUDE_HISTORY_PAGE_SIZE): ClaudeHistoryPage<T> {
+  const limit = Math.min(Math.max(Math.floor(requestedLimit) || DEFAULT_CLAUDE_HISTORY_PAGE_SIZE, 1), MAX_CLAUDE_HISTORY_PAGE_SIZE);
+  const total = messages.length;
+  const latestOffset = Math.max(0, total - limit);
+  const offset = typeof requestedOffset === "number" && Number.isSafeInteger(requestedOffset)
+    ? Math.min(Math.max(0, requestedOffset), total)
+    : latestOffset;
+  const page = messages.slice(offset, offset + limit);
+  return {
+    messages: page,
+    offset,
+    total,
+    hasMoreBefore: offset > 0,
+    hasMoreAfter: offset + page.length < total,
+  };
+}
+
 interface ClaudeSession {
   clientSessionId: string;
   nativeSessionId: string;
@@ -182,9 +212,24 @@ export class ClaudeBackend implements AgentBackend {
     const { cwd, nativeSessionId } = this.sessionIdentity(params, context);
     await this.assertKnownNativeSession(cwd, nativeSessionId);
     const info = await getSessionInfo(nativeSessionId, { dir: cwd });
-    const messages = await getSessionMessages(nativeSessionId, { dir: cwd, limit: 200, offset: 0 });
+    const allMessages = await getSessionMessages(nativeSessionId, { dir: cwd });
+    const page = paginateClaudeHistoryMessages(
+      Array.isArray(allMessages) ? allMessages : [],
+      typeof params.messageOffset === "number" ? params.messageOffset : undefined,
+      typeof params.messageLimit === "number" ? params.messageLimit : DEFAULT_CLAUDE_HISTORY_PAGE_SIZE,
+    );
     const model = info && typeof info === "object" && "model" in info && typeof info.model === "string" ? info.model : "";
-    return { thread: { ...(info || {}), id: nativeSessionId, cwd, ...(model ? { model } : {}), messages: Array.isArray(messages) ? messages : [] } };
+    return { thread: {
+      ...(info || {}),
+      id: nativeSessionId,
+      cwd,
+      ...(model ? { model } : {}),
+      messages: page.messages,
+      messageOffset: page.offset,
+      messageTotal: page.total,
+      messageHasMoreBefore: page.hasMoreBefore,
+      messageHasMoreAfter: page.hasMoreAfter,
+    } };
   }
 
   private async generateSessionTitle(params: JsonObject, context: AgentRequestContext) {

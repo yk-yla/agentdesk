@@ -1,4 +1,4 @@
-import { ArrowLeftRight, CircleDot, CornerDownRight, ListChecks, MoreHorizontal, PanelRight, Play, RefreshCw, Square, Target, X } from "lucide-react";
+import { CircleDot, CornerDownRight, ListChecks, MoreHorizontal, PanelRight, Play, RefreshCw, Square, Target, Terminal, X } from "lucide-react";
 import { lazy, memo, Suspense, useCallback, useEffect, useLayoutEffect, useMemo, useRef, type DragEvent } from "react";
 import type { AgentBridge, JsonObject } from "../shared/protocol";
 import Composer from "./Composer";
@@ -48,6 +48,9 @@ export interface PaneViewProps {
   onStopGoal: (sessionId: string) => void;
   onClearError: (sessionId: string) => void;
   onRetryReadOnly: (sessionId: string) => void;
+  onRefresh: (sessionId: string) => void;
+  onLoadEarlier: (sessionId: string) => void;
+  onOpenExternalTerminal: (sessionId: string) => void;
   onRespondApproval: (sessionId: string, result: JsonObject) => void;
   onInterrupt: (sessionId: string) => void;
   getDraft: (sessionId: string) => string;
@@ -63,6 +66,7 @@ export interface PaneViewProps {
   onTerminalError: (sessionId: string, message: string) => void;
   onTerminalActivity: (sessionId: string, working: boolean) => void;
   onTerminalSettings: (sessionId: string, settings: ClaudeTerminalSettings) => void;
+  onIsSessionRetained: (sessionId: string) => boolean;
 }
 
 /**
@@ -235,7 +239,9 @@ function PaneView(props: PaneViewProps) {
     </select> : null}
     {session.capabilities.contextUsage !== "unsupported" ? <span className="context-usage" title={temporarilyUnavailable("contextUsage") ? "发送首条消息后查询上下文用量" : "最近一次上下文用量"}>{formatCount(session.tokenUsage.used)}/{session.tokenUsage.total ? formatCount(session.tokenUsage.total) : "?"}</span> : null}
     {session.capabilities.compact !== "unsupported" ? <button className="compact-count" disabled={!supports("compact") || session.readOnly} onClick={() => props.onCompact(session.id)} title={temporarilyUnavailable("compact") ? "发送首条消息后可压缩上下文" : "手动压缩上下文"}>压缩 {session.compactionCount}</button> : null}
-    <button className={`detail-toggle ${session.detailsOpen ? "selected" : ""}`} onClick={() => props.onToggleDetails(session.id)} title="查看详情"><PanelRight size={15} /><span>详情</span></button>
+    {session.provider === "claude"
+      ? <button className="detail-toggle" disabled={session.statusLabel === "正在打开外部终端"} onClick={() => props.onOpenExternalTerminal(session.id)} title="在外部终端中打开"><Terminal size={15} /><span>在终端打开</span></button>
+      : <button className={`detail-toggle ${session.detailsOpen ? "selected" : ""}`} onClick={() => props.onToggleDetails(session.id)} title="查看详情"><PanelRight size={15} /><span>详情</span></button>}
     <details ref={composerMoreRef} className="composer-more">
       <summary title="更多会话操作" aria-label="更多会话操作"><MoreHorizontal size={16} /></summary>
       <div className="composer-more-menu">
@@ -243,7 +249,7 @@ function PaneView(props: PaneViewProps) {
         <button type="button" disabled={session.readOnly} className={session.collaborationMode === "default" ? "selected" : ""} onClick={(event) => { props.onSetCollaborationMode(session.id, "default"); event.currentTarget.closest("details")?.removeAttribute("open"); }}><Play size={14} /><span>执行模式</span></button>
         {supports("plans") ? <button type="button" disabled={session.readOnly} className={session.collaborationMode === "plan" ? "selected" : ""} onClick={(event) => { props.onSetCollaborationMode(session.id, "plan"); event.currentTarget.closest("details")?.removeAttribute("open"); }}><ListChecks size={14} /><span>计划模式</span></button> : null}
         {session.capabilities.compact !== "unsupported" ? <button type="button" disabled={!supports("compact") || session.readOnly} onClick={(event) => { props.onCompact(session.id); event.currentTarget.closest("details")?.removeAttribute("open"); }}><RefreshCw size={14} /><span>压缩上下文 ({session.compactionCount})</span></button> : null}
-        <button type="button" className={session.detailsOpen ? "selected" : ""} onClick={(event) => { props.onToggleDetails(session.id); event.currentTarget.closest("details")?.removeAttribute("open"); }}><PanelRight size={14} /><span>详情</span></button>
+        {session.provider !== "claude" ? <button type="button" className={session.detailsOpen ? "selected" : ""} onClick={(event) => { props.onToggleDetails(session.id); event.currentTarget.closest("details")?.removeAttribute("open"); }}><PanelRight size={14} /><span>详情</span></button> : null}
         {supports("goals") ? <button type="button" className={session.detailsOpen && session.detailView === "goal" ? "selected" : ""} onClick={(event) => { if (!session.detailsOpen) props.onToggleDetails(session.id); props.onSetDetailView(session.id, "goal"); event.currentTarget.closest("details")?.removeAttribute("open"); }}><Target size={14} /><span>目标</span></button> : null}
       </div>
     </details>
@@ -251,7 +257,7 @@ function PaneView(props: PaneViewProps) {
     claudeModelLabel, efforts, model?.displayName, models, props.onCompact, props.onSetCollaborationMode, props.onSetDetailView,
     props.onSetSessionSetting, props.onToggleDetails, session.collaborationMode,
     session.compactionCount, session.detailView, session.detailsOpen, session.effort, session.id, session.model, session.provider, session.readOnly,
-    session.resolvedModel,
+    session.resolvedModel, session.statusLabel,
     session.tokenUsage.total, session.tokenUsage.used,
   ]);
 
@@ -270,8 +276,10 @@ function PaneView(props: PaneViewProps) {
           onModeChange={(mode) => props.onModeChange(session.id, mode)}
           onResume={() => props.onResumeTerminal(session.id)}
           onError={(message) => props.onTerminalError(session.id, message)}
+          onClearError={() => props.onClearError(session.id)}
           onTerminalActivity={(working) => props.onTerminalActivity(session.id, working)}
           onSettings={(settings) => props.onTerminalSettings(session.id, settings)}
+          isSessionRetained={() => props.onIsSessionRetained(session.id)}
         />
       </section>
     );
@@ -311,6 +319,9 @@ function PaneView(props: PaneViewProps) {
           bridge={bridge}
           cwd={session.cwd}
           provider={session.provider}
+          canLoadEarlier={session.provider === "claude" && session.historyHasMoreBefore === true}
+          loadingEarlier={session.historyLoadingEarlier === true}
+          onLoadEarlier={session.provider === "claude" ? () => props.onLoadEarlier(session.id) : undefined}
         />
         {session.historyLoading ? <div className="history-loading-overlay" role="status" aria-busy="true">
           <RefreshCw className="history-loading-icon spin" size={16} />
@@ -318,17 +329,9 @@ function PaneView(props: PaneViewProps) {
         </div> : null}
       </div>
 
-      {session.provider !== "claude" && <button
-        className="presentation-toggle workbench-presentation-toggle"
-        onClick={() => props.onModeChange(session.id, "terminal")}
-        title="切换到黑窗口"
-        aria-label="切换到黑窗口"
-        disabled={session.status === "error" && !session.threadId}
-      ><ArrowLeftRight size={16} /></button>}
-
       <div className="composer-area">
-        {session.readOnly ? <div className="read-only-banner" role="status"><CircleDot size={15} /><span>该会话正被其他程序使用，当前为只读模式。</span><button type="button" onClick={() => props.onToggleDetails(session.id)}>{session.detailsOpen ? "关闭详情" : "查看详情"}</button><button type="button" onClick={() => props.onRetryReadOnly(session.id)}>重新尝试编辑</button></div> : null}
-        {!session.readOnly && session.errorText ? <div className="error-banner" role="alert"><CircleDot size={15} /><span>{session.errorText}</span><button className="bare-button" onClick={() => props.onClearError(session.id)} title="关闭" aria-label="关闭错误提示"><X size={14} /></button></div> : null}
+        {session.readOnly ? <div className="read-only-banner" role="status"><CircleDot size={15} /><span>{session.provider === "claude" ? <>Claude Code 会话由外部终端控制，当前为只读模式。{session.statusLabel !== "就绪" ? `（${session.statusLabel}）` : ""}</> : "该会话正被其他程序使用，当前为只读模式。"}</span>{session.provider === "claude" ? <><button type="button" disabled={session.statusLabel === "正在打开外部终端"} onClick={() => props.onOpenExternalTerminal(session.id)} title="在外部终端中打开"><Terminal size={13} />在终端中打开</button><button type="button" onClick={() => props.onRefresh(session.id)} disabled={session.historyLoading} title="重新读取外部终端中的最新消息"><RefreshCw size={13} />刷新</button></> : <><button type="button" onClick={() => props.onToggleDetails(session.id)}>{session.detailsOpen ? "关闭详情" : "查看详情"}</button><button type="button" onClick={() => props.onRetryReadOnly(session.id)}>重新尝试编辑</button></>}</div> : null}
+        {session.errorText ? <div className="error-banner" role="alert"><CircleDot size={15} /><span>{session.errorText}</span><button className="bare-button" onClick={() => props.onClearError(session.id)} title="关闭" aria-label="关闭错误提示"><X size={14} /></button></div> : null}
         {session.pendingApprovals[0] && !session.readOnly ? <div className="server-request-wrap"><ServerRequestPanel key={`${session.pendingApprovals[0].requestId}:${session.pendingApprovals[0].interactionId || ""}:${session.pendingApprovals[0].queryGeneration || 0}`} request={session.pendingApprovals[0]} bridge={bridge} onRespond={(result) => props.onRespondApproval(session.id, result)} />{session.pendingApprovals.length > 1 ? <span className="server-request-count">另有 {session.pendingApprovals.length - 1} 个请求等待处理</span> : null}</div> : null}
         {session.goal ? <GoalExecutionStrip
           goal={session.goal}
@@ -366,7 +369,7 @@ function PaneView(props: PaneViewProps) {
         /> : null}
       </div>
 
-      {session.detailsOpen ? (
+      {session.provider !== "claude" && session.detailsOpen ? (
         <Suspense fallback={<aside className="details-panel pane-details lazy-panel-loading" aria-busy="true">正在打开详情</aside>}>
           <DetailsPanel
             key={session.id}

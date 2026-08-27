@@ -1,4 +1,5 @@
 import type { AgentEventEnvelope, AgentInteractionResponse, AgentOperation, AgentProvider, AgentRequestContext } from "./agentProtocol";
+import type { ExternalTerminalKind } from "./externalTerminalPresets";
 import type { TerminalEvent, TerminalInputRequest, TerminalResizeRequest, TerminalSessionCommand, TerminalSessionInfo, TerminalSessionRequest } from "./terminalProtocol";
 
 export type JsonObject = Record<string, unknown>;
@@ -106,6 +107,8 @@ export interface DesktopPreferences {
   sidebarWidth?: number;
   baseFontSize?: number;
   sessionAliases?: Record<string, string>;
+  /** 本地置顶会话，键为 provider:id；不写入 Provider 会话元数据。 */
+  pinnedSessions?: string[];
   favoriteSessions?: string[];
   favoriteSessionSummaries?: Record<string, FavoriteSessionSummary>;
   theme: ThemeId;
@@ -121,6 +124,19 @@ export interface DesktopPreferences {
   /** @deprecated 旧版本 Codex 专用字段，读取时会合并到 compactionCounts。 */
   codexCompactionCounts?: Record<string, CodexCompactionRecord>;
   workspaceState?: JsonObject;
+  externalTerminal?: ExternalTerminalSettings;
+}
+
+export interface ExternalTerminalSettings {
+  kind: ExternalTerminalKind;
+  executable: string;
+  argsTemplate: string;
+}
+
+export type ExternalTerminalStatusState = "open" | "notOpen" | "unknown";
+export interface ExternalTerminalStatus {
+  state: ExternalTerminalStatusState;
+  source: "process" | "agentdesk" | "none" | "unavailable";
 }
 
 export interface CodexDefaults {
@@ -260,6 +276,8 @@ export interface CodexBridge {
   readLocalImage(filePath: string): Promise<string | null>;
   openLocalPath(input: LocalPathOpenRequest): Promise<string>;
   openExternal(url: string): Promise<void>;
+  openExternalTerminal(input: { cwd: string; sessionId: string; resume?: boolean }): Promise<ExternalTerminalStatus>;
+  getExternalTerminalStatus(input: { cwd: string; sessionId: string }): Promise<ExternalTerminalStatus>;
   showNotification(notification: DesktopNotification): Promise<boolean>;
   getWindowState(): Promise<DesktopWindowState>;
   minimizeWindow(): Promise<void>;

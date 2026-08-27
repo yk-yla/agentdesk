@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
-import { ArrowLeftRight } from "lucide-react";
+import { ArrowLeftRight, CircleDot, X } from "lucide-react";
 import { FitAddon } from "@xterm/addon-fit";
 import { Terminal } from "@xterm/xterm";
 import "@xterm/xterm/css/xterm.css";
@@ -46,11 +46,16 @@ interface TerminalPaneProps {
   onModeChange: (mode: "workbench" | "terminal") => void;
   onResume: () => void;
   onError: (message: string) => void;
+  onClearError: () => void;
   onSettings: (settings: ClaudeTerminalSettings) => void;
   onTerminalActivity: (working: boolean) => void;
+  // Queried at unmount: true means this session still lives in the layout (it
+  // is being moved to another pane), so its PTY must survive the remount.
+  // False means the tab was actually closed and the PTY should be released.
+  isSessionRetained: () => boolean;
 }
 
-export default function TerminalPane({ session, bridge, isActive, onModeChange, onResume, onError, onSettings, onTerminalActivity }: TerminalPaneProps) {
+export default function TerminalPane({ session, bridge, isActive, onModeChange, onResume, onError, onClearError, onSettings, onTerminalActivity, isSessionRetained }: TerminalPaneProps) {
   const hostRef = useRef<HTMLDivElement>(null);
   const terminalRef = useRef<Terminal | null>(null);
   const fitRef = useRef<FitAddon | null>(null);
@@ -68,6 +73,7 @@ export default function TerminalPane({ session, bridge, isActive, onModeChange, 
   const onResumeRef = useRef(onResume);
   const onSettingsRef = useRef(onSettings);
   const onTerminalActivityRef = useRef(onTerminalActivity);
+  const isSessionRetainedRef = useRef(isSessionRetained);
   const terminalActivityTimerRef = useRef<number | null>(null);
   const resizeFrameRef = useRef<number | null>(null);
   const ptyResizeTimerRef = useRef<number | null>(null);
@@ -80,6 +86,7 @@ export default function TerminalPane({ session, bridge, isActive, onModeChange, 
   onResumeRef.current = onResume;
   onSettingsRef.current = onSettings;
   onTerminalActivityRef.current = onTerminalActivity;
+  isSessionRetainedRef.current = isSessionRetained;
   const [info, setInfo] = useState<TerminalSessionInfo | null>(null);
   const [starting, setStarting] = useState(false);
 
@@ -366,14 +373,22 @@ export default function TerminalPane({ session, bridge, isActive, onModeChange, 
     const dataDisposable = terminal.onData(write);
     const resizeObserver = new ResizeObserver(resize);
     resizeObserver.observe(host);
-    requestAnimationFrame(resize);
+    const initialResizeFrame = requestAnimationFrame(resize);
     return () => {
       cancelAnimationFrame(focusFrame);
+      cancelAnimationFrame(initialResizeFrame);
       if (ptyResizeTimerRef.current !== null) {
         window.clearTimeout(ptyResizeTimerRef.current);
         ptyResizeTimerRef.current = null;
       }
-      if (resizeFrameRef.current !== null) window.cancelAnimationFrame(resizeFrameRef.current);
+      // Cancel the pending fit frame AND clear the handle. Leaving a non-null
+      // (already-cancelled) handle here jams resize(): its `=== null` guard would
+      // never pass again, so fit.fit() would never run. StrictMode's dev-only
+      // mount/cleanup/mount cycle otherwise leaves the terminal stuck at 80x24.
+      if (resizeFrameRef.current !== null) {
+        window.cancelAnimationFrame(resizeFrameRef.current);
+        resizeFrameRef.current = null;
+      }
       if (compositionTimer !== null) window.clearTimeout(compositionTimer);
       renderDisposable.dispose();
       for (const eventName of compositionEvents) terminal.textarea?.removeEventListener(eventName, placeComposition);
@@ -386,7 +401,11 @@ export default function TerminalPane({ session, bridge, isActive, onModeChange, 
       decscusrDisposable.dispose();
       for (const disposable of cursorVisibilityDisposables) disposable.dispose();
       const current = infoRef.current;
-      if (current && current.status !== "exited") {
+      // Skip the close when the session is only being moved to another pane
+      // (still present in the layout). Tearing down and rebuilding this pane on
+      // a cross-pane drag would otherwise kill a live PTY the new mount is about
+      // to reattach to.
+      if (current && current.status !== "exited" && !isSessionRetainedRef.current()) {
         closeRequestedRef.current = true;
         void bridge.closeTerminal({ sessionId: session.id, generation: current.generation }).catch(() => undefined);
       }
@@ -485,7 +504,10 @@ export default function TerminalPane({ session, bridge, isActive, onModeChange, 
     return () => {
       mountedRef.current = false;
       queueMicrotask(() => {
-        if (!mountedRef.current && startingRef.current) {
+        // Same move-vs-close distinction as the layout-effect cleanup: a session
+        // still in the layout is being moved, so its in-flight start must not be
+        // torn down.
+        if (!mountedRef.current && startingRef.current && !isSessionRetainedRef.current()) {
           closeRequestedRef.current = true;
           void bridge.closeTerminal({ sessionId: session.id }).catch(() => undefined);
         }
@@ -553,7 +575,7 @@ export default function TerminalPane({ session, bridge, isActive, onModeChange, 
         <div ref={hostRef} className="terminal-host-inner" onClick={() => terminalRef.current?.focus()} />
       </div>
       {session.terminalSuspended || starting ? <div className="terminal-status" role="status">正在启动终端…</div> : null}
-      {session.errorText ? <div className="terminal-error" role="alert">{session.errorText}</div> : null}
+      {session.errorText ? <div className="terminal-error" role="alert"><CircleDot size={15} /><span>{session.errorText}</span><button type="button" className="bare-button" onClick={onClearError} title="关闭" aria-label="关闭错误提示"><X size={14} /></button></div> : null}
     </section>
   );
 }

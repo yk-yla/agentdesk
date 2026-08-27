@@ -5,7 +5,7 @@ import type { AppLogger } from "../logger";
 import { logErrorDetails } from "../logger";
 import { randomUUID } from "node:crypto";
 import { normalizeFavoriteSessionSummaries } from "../../shared/favoriteSessions";
-import { normalizeBaseFontSize, normalizeClaudeModelCache, normalizeCompactionCounts, normalizeCodexCompactionCounts, normalizeLastPresentationModes, normalizeLastReasoningEfforts, normalizeModelContextWindows, normalizeRecentCommandUsage, normalizeSidebarWidth, normalizeTheme } from "../preferencesStore";
+import { normalizeBaseFontSize, normalizeClaudeModelCache, normalizeCompactionCounts, normalizeCodexCompactionCounts, normalizeExternalTerminal, normalizeLastPresentationModes, normalizeLastReasoningEfforts, normalizeModelContextWindows, normalizeRecentCommandUsage, normalizeSidebarWidth, normalizeTheme } from "../preferencesStore";
 
 const AGENT_PROVIDERS = new Set<AgentProvider>(["codex", "claude"]);
 const AGENT_OPERATIONS = new Set<AgentOperation>([
@@ -50,6 +50,8 @@ interface DesktopIpcServices {
     readLocalImage(filePath: unknown): unknown;
     openLocalPath(filePath: unknown): unknown;
     openExternal(url: unknown): unknown;
+    openExternalTerminal(input: unknown): unknown;
+    getExternalTerminalStatus(input: unknown): unknown;
   };
   showNotification(input: unknown): unknown;
   window: {
@@ -119,6 +121,7 @@ export function sanitizePreferencesPatch(value: unknown): Partial<DesktopPrefere
     ...(objectRecord(patch.sessionAliases)
       ? { sessionAliases: Object.fromEntries(Object.entries(patch.sessionAliases as Record<string, unknown>).filter((entry): entry is [string, string] => typeof entry[1] === "string" && entry[1].trim().length > 0).slice(0, 2_000)) }
       : {}),
+    ...(Array.isArray(patch.pinnedSessions) ? { pinnedSessions: patch.pinnedSessions.filter((item): item is string => typeof item === "string" && item.trim().length > 0).slice(0, 2_000) } : {}),
     ...(Array.isArray(patch.favoriteSessions) ? { favoriteSessions: patch.favoriteSessions.filter((item): item is string => typeof item === "string").slice(0, 2_000) } : {}),
     ...(objectRecord(patch.favoriteSessionSummaries) ? { favoriteSessionSummaries: normalizeFavoriteSessionSummaries(patch.favoriteSessionSummaries) } : {}),
     ...(objectRecord(patch.modelContextWindows) ? { modelContextWindows: normalizeModelContextWindows(patch.modelContextWindows) } : {}),
@@ -133,6 +136,7 @@ export function sanitizePreferencesPatch(value: unknown): Partial<DesktopPrefere
     ...(objectRecord(patch.compactionCounts) ? { compactionCounts: normalizeCompactionCounts(patch.compactionCounts) } : {}),
     ...(objectRecord(patch.codexCompactionCounts) ? { codexCompactionCounts: normalizeCodexCompactionCounts(patch.codexCompactionCounts) } : {}),
     ...(objectRecord(patch.workspaceState) ? { workspaceState: patch.workspaceState as JsonObject } : {}),
+    ...(objectRecord(patch.externalTerminal) ? { externalTerminal: normalizeExternalTerminal(patch.externalTerminal) } : {}),
   };
 }
 
@@ -294,6 +298,8 @@ export function registerDesktopIpc(ipc: IpcRegistrar, services: DesktopIpcServic
   ipc.handle("agentdesk:read-local-image", (_event, filePath: unknown) => services.files.readLocalImage(filePath));
   ipc.handle("agentdesk:open-local-path", (_event, filePath: unknown) => services.files.openLocalPath(filePath));
   ipc.handle("agentdesk:open-external", (_event, url: unknown) => services.files.openExternal(url));
+  ipc.handle("agentdesk:open-external-terminal", (_event, input: unknown) => services.files.openExternalTerminal(input));
+  ipc.handle("agentdesk:external-terminal-status", (_event, input: unknown) => services.files.getExternalTerminalStatus(input));
   ipc.handle("agentdesk:show-notification", (_event, input: unknown) => services.showNotification(input));
   ipc.handle("agentdesk:window-state", () => services.window.state());
   ipc.handle("agentdesk:window-minimize", () => services.window.minimize());

@@ -1,8 +1,13 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
-import { formatMessageTimestamp, getMessageTimeDivider, timestampFromUnknown } from "./messageTimestamp";
+import { formatEventTimestamp, formatMessageTimestamp, getMessageTimeDivider, timestampFromUnknown } from "./messageTimestamp";
 
 describe("message timestamps", () => {
+  it("formats detail event timestamps with date only outside today", () => {
+    const now = new Date(2026, 7, 26, 15, 4, 5).getTime();
+    assert.equal(formatEventTimestamp(new Date(2026, 7, 26, 9, 8, 7).getTime(), now), "09:08:07");
+    assert.equal(formatEventTimestamp(new Date(2026, 7, 25, 9, 8, 7).getTime(), now), "2026-08-25 09:08:07");
+  });
   it("formats the time shown above the message bubble", () => {
     const sentAt = new Date(2026, 7, 12, 9, 5, 7).getTime();
     assert.equal(formatMessageTimestamp(sentAt), "09:05:07");

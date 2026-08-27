@@ -1,4 +1,4 @@
-import { Check, FolderOpen, Copy } from "lucide-react";
+import { Check, FolderOpen, Copy, RefreshCw, X } from "lucide-react";
 import { Fragment, lazy, memo, Suspense, useMemo, useState } from "react";
 import type { AgentBridge } from "../shared/protocol";
 import type { AgentProvider } from "../shared/agentProtocol";
@@ -12,12 +12,19 @@ const MESSAGE_WINDOW = 200;
 const ACTIVITY_WINDOW = 100;
 const EMPTY_IMAGES: Message["images"] = [];
 
+function activityDismissKey(activity: Activity) {
+  return `${activity.id}:${activity.status}:${activity.timestamp || 0}`;
+}
+
 interface Props {
   messages: Message[];
   visibleActivities: Activity[];
   bridge: AgentBridge;
   cwd: string;
   provider: AgentProvider;
+  canLoadEarlier?: boolean;
+  loadingEarlier?: boolean;
+  onLoadEarlier?: () => void;
 }
 
 interface MessageItemProps {
@@ -89,16 +96,21 @@ const MemoMessageItem = memo(MessageItem);
  * 只渲染最近一段消息，历史更早的部分按需展开。
  * 长会话首次挂载不再一次性解析全部 Markdown。
  */
-function MessageStackBase({ messages, visibleActivities, bridge, cwd, provider }: Props) {
+function MessageStackBase({ messages, visibleActivities, bridge, cwd, provider, canLoadEarlier = false, loadingEarlier = false, onLoadEarlier }: Props) {
   const [visibleCount, setVisibleCount] = useState(MESSAGE_WINDOW);
   const [visibleActivityCount, setVisibleActivityCount] = useState(ACTIVITY_WINDOW);
+  const [dismissedActivityKeys, setDismissedActivityKeys] = useState<Set<string>>(() => new Set());
   const shown = useMemo(
     () => (messages.length > visibleCount ? messages.slice(messages.length - visibleCount) : messages),
     [messages, visibleCount],
   );
+  const activeActivities = useMemo(
+    () => visibleActivities.filter((activity) => !dismissedActivityKeys.has(activityDismissKey(activity))),
+    [dismissedActivityKeys, visibleActivities],
+  );
   const shownActivities = useMemo(
-    () => (visibleActivities.length > visibleActivityCount ? visibleActivities.slice(visibleActivities.length - visibleActivityCount) : visibleActivities),
-    [visibleActivities, visibleActivityCount],
+    () => (activeActivities.length > visibleActivityCount ? activeActivities.slice(activeActivities.length - visibleActivityCount) : activeActivities),
+    [activeActivities, visibleActivityCount],
   );
 
   if (!messages.length && !visibleActivities.length) {
@@ -122,10 +134,11 @@ function MessageStackBase({ messages, visibleActivities, bridge, cwd, provider }
   }
 
   const hidden = messages.length - shown.length;
-  const hiddenActivities = visibleActivities.length - shownActivities.length;
+  const hiddenActivities = activeActivities.length - shownActivities.length;
   return (
     <div className="message-stack">
-      {hidden > 0 ? <button className="history-more" data-load-earlier-messages onClick={() => setVisibleCount((count) => count + MESSAGE_WINDOW)}>加载更早消息 · 剩余 {hidden}</button> : null}
+      {hidden > 0 ? <button className="history-more" data-load-earlier-messages onClick={() => setVisibleCount((count) => count + MESSAGE_WINDOW)}>加载已读取的更早消息 · 剩余 {hidden}</button>
+        : canLoadEarlier && onLoadEarlier ? <button className="history-more" data-load-earlier-messages disabled={loadingEarlier} onClick={onLoadEarlier}>{loadingEarlier ? <RefreshCw className="spin" size={13} /> : null}{loadingEarlier ? "正在读取更早消息" : "加载更早消息"}</button> : null}
       {shown.map((message, index) => {
         const divider = getMessageTimeDivider(message.timestamp, shown[index - 1]?.timestamp);
         return (
@@ -139,10 +152,15 @@ function MessageStackBase({ messages, visibleActivities, bridge, cwd, provider }
       {shownActivities.map((activity, index) => (
         <article className={`visible-activity ${activity.status}`} key={`visible-${activity.id}:${index}`}>
           <ActivityIcon kind={activity.kind} status={activity.status} />
-          <div>
+          <div className="visible-activity-content">
             <strong>{activity.title}</strong>
             <span>{activity.detail}</span>
           </div>
+          <button type="button" className="bare-button visible-activity-dismiss" onClick={() => setDismissedActivityKeys((current) => {
+            const next = new Set(current);
+            next.add(activityDismissKey(activity));
+            return next;
+          })} title="关闭错误提示" aria-label="关闭错误提示"><X size={14} /></button>
         </article>
       ))}
     </div>

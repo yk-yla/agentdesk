@@ -1,6 +1,7 @@
 import { Settings2 } from "lucide-react";
 import { lazy, Suspense, useEffect, useRef, useState } from "react";
 import { type ClaudeRuntimeStatus, type CodexCliUpdateStatus, type DesktopPreferences, type DesktopUpdateStatus, type ThemeId, type DiagnosticExport } from "../shared/protocol";
+import { DEFAULT_EXTERNAL_TERMINAL_KIND, externalTerminalSettingsForPreset } from "../shared/externalTerminalPresets";
 import { trackUiEvent } from "./rendererDiagnostics";
 
 const SettingsAdvanced = lazy(() => import("./SettingsAdvanced"));
@@ -13,6 +14,7 @@ const THEME_OPTIONS: Array<{ id: ThemeId; label: string; swatch: string }> = [
 
 export interface SettingsPopoverViewModel {
   theme: ThemeId;
+  externalTerminal?: DesktopPreferences["externalTerminal"];
   updateStatus: DesktopUpdateStatus;
   cliUpdateStatus: CodexCliUpdateStatus;
   claudeStatus: ClaudeRuntimeStatus;
@@ -89,7 +91,7 @@ export default function SettingsPopover({ collapsed, viewModel, actions }: Props
         <label className="settings-field">主题<div className="settings-select-row"><span className="theme-swatch" style={{ background: THEME_OPTIONS.find((option) => option.id === viewModel.theme)?.swatch || "#7d8794" }} /><select value={viewModel.theme} onChange={(event) => { const theme = event.target.value as ThemeId; savePreference({ theme }, "settings.theme_changed", { theme }); }}>{THEME_OPTIONS.map((option) => <option value={option.id} key={option.id}>{option.label}</option>)}</select></div></label>
       </div>
       <Suspense fallback={<div className="settings-lazy-loading" aria-busy="true">正在加载高级设置</div>}>
-        <SettingsAdvanced update={{ status: viewModel.updateStatus, cliStatus: viewModel.cliUpdateStatus, claudeStatus: viewModel.claudeStatus, onCheck: actions.onCheckForUpdates, onCheckCli: actions.onCheckCodexCliUpdates, onUpdateCli: actions.onUpdateCodexCli, onCheckClaude: actions.onCheckClaude, onUpdateClaude: actions.onUpdateClaude, onDownload: actions.onDownloadUpdate, onInstall: actions.onInstallUpdate, onOpenRepository: actions.onOpenUpdateRepository, onExportDiagnostics: actions.onExportDiagnostics }} />
+        <SettingsAdvanced terminal={{ value: viewModel.externalTerminal || externalTerminalSettingsForPreset(DEFAULT_EXTERNAL_TERMINAL_KIND), onSave: actions.onSavePreference }} update={{ status: viewModel.updateStatus, cliStatus: viewModel.cliUpdateStatus, claudeStatus: viewModel.claudeStatus, onCheck: actions.onCheckForUpdates, onCheckCli: actions.onCheckCodexCliUpdates, onUpdateCli: actions.onUpdateCodexCli, onCheckClaude: actions.onCheckClaude, onUpdateClaude: actions.onUpdateClaude, onDownload: actions.onDownloadUpdate, onInstall: actions.onInstallUpdate, onOpenRepository: actions.onOpenUpdateRepository, onExportDiagnostics: actions.onExportDiagnostics }} />
       </Suspense>
     </div> : null}
   </>;

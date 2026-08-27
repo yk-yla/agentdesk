@@ -8,6 +8,7 @@ import GoalPanel from "./GoalPanel";
 import PlanPanel from "./PlanPanel";
 import RawEventList from "./RawEventList";
 import SubagentPanel from "./SubagentPanel";
+import { formatEventTimestamp } from "./messageTimestamp";
 
 const ACTIVITY_PAGE = 200;
 
@@ -18,6 +19,10 @@ const STATUS_LABEL: Record<Activity["status"], string> = {
   interrupted: "已中断",
   completed: "完成",
 };
+
+function activityDismissKey(activity: Activity) {
+  return `${activity.id}:${activity.status}:${activity.timestamp || 0}`;
+}
 
 interface Props {
   sessionId: string;
@@ -39,11 +44,13 @@ interface Props {
 
 function DetailsPanelBase({ sessionId, title, activities, goal, plan, subagents, compactionCount, capabilities, detailView, working, readOnly, onClose, onSelectView, onStartGoal, onStopGoal }: Props) {
   const [visibleCount, setVisibleCount] = useState(ACTIVITY_PAGE);
+  const [dismissedActivityKeys, setDismissedActivityKeys] = useState<Set<string>>(() => new Set());
+  const visibleActivities = useMemo(() => activities.filter((activity) => !dismissedActivityKeys.has(activityDismissKey(activity))), [activities, dismissedActivityKeys]);
   const shownActivities = useMemo(
-    () => (activities.length > visibleCount ? activities.slice(activities.length - visibleCount) : activities),
-    [activities, visibleCount],
+    () => (visibleActivities.length > visibleCount ? visibleActivities.slice(visibleActivities.length - visibleCount) : visibleActivities),
+    [visibleActivities, visibleCount],
   );
-  const hiddenCount = activities.length - shownActivities.length;
+  const hiddenCount = visibleActivities.length - shownActivities.length;
 
   return (
     <aside className="details-panel pane-details">
@@ -63,16 +70,17 @@ function DetailsPanelBase({ sessionId, title, activities, goal, plan, subagents,
           : detailView === "plan" ? <PlanPanel plan={plan} />
           : detailView === "agents" ? <SubagentPanel subagents={subagents} />
           : detailView === "activity"
-          ? (activities.length
+          ? (visibleActivities.length
             ? <>
               {hiddenCount > 0 ? <button className="history-more" onClick={() => setVisibleCount((count) => count + ACTIVITY_PAGE)}>加载更早活动 · 剩余 {hiddenCount}</button> : null}
               {shownActivities.map((activity, index) => <div className={`activity-item ${activity.status}`} key={`${activity.id}:${index}`}>
                 <div className="activity-icon"><ActivityIcon kind={activity.kind} status={activity.status} /></div>
                 <div className="activity-body">
-                  <div className="activity-title"><span>{activity.title}</span><span className="activity-status">{STATUS_LABEL[activity.status]}</span></div>
+                  <div className="activity-title"><span>{activity.title}</span><span className="activity-meta">{formatEventTimestamp(activity.timestamp) ? <time dateTime={new Date(activity.timestamp!).toISOString()}>{formatEventTimestamp(activity.timestamp)}</time> : null}<span className="activity-status">{STATUS_LABEL[activity.status]}</span></span></div>
                   <code>{activity.detail}</code>
                   <ActivityOutput output={activity.output || ""} variant="detail" />
                 </div>
+                {activity.status === "failed" || activity.status === "declined" || activity.status === "interrupted" ? <button type="button" className="bare-button activity-dismiss" onClick={() => setDismissedActivityKeys((current) => { const next = new Set(current); next.add(activityDismissKey(activity)); return next; })} title="关闭错误提示" aria-label="关闭错误提示"><X size={13} /></button> : null}
               </div>)}
             </>
             : <div className="details-empty">暂无活动</div>)

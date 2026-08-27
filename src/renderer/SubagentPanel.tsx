@@ -1,5 +1,5 @@
 import { Bot, Check, CircleDot, LoaderCircle, X } from "lucide-react";
-import { memo } from "react";
+import { memo, useState } from "react";
 import type { SubagentState } from "./domain";
 
 interface Props {
@@ -11,16 +11,19 @@ const STATUS: Record<SubagentState["status"], string> = {
 };
 
 function SubagentPanel({ subagents }: Props) {
-  if (!subagents.length) return <div className="details-empty"><span>当前会话还没有子 Agent</span></div>;
+  const [dismissedThreadIds, setDismissedThreadIds] = useState<Set<string>>(() => new Set());
+  const visibleSubagents = subagents.filter((agent) => !dismissedThreadIds.has(agent.threadId));
+  if (!visibleSubagents.length) return <div className="details-empty"><span>当前会话还没有子 Agent</span></div>;
   return (
     <div className="subagent-panel">
-      {subagents.map((agent) => (
+      {visibleSubagents.map((agent) => (
         <article className={`subagent-card ${agent.status}`} key={agent.threadId}>
           <div className="subagent-card-heading"><span className="subagent-icon"><Bot size={14} /></span><strong>{agent.nickname || "子 Agent"}</strong><span className="subagent-status">{agent.status === "running" ? <LoaderCircle size={11} className="spin" /> : agent.status === "completed" ? <Check size={11} /> : agent.status === "errored" || agent.status === "interrupted" ? <X size={11} /> : <CircleDot size={11} />}{STATUS[agent.status]}</span></div>
           {agent.role ? <div className="subagent-meta">{agent.role}</div> : null}
           {agent.prompt ? <div className="subagent-prompt">{agent.prompt}</div> : null}
           {agent.message ? <pre className="subagent-message">{agent.message}</pre> : null}
           <div className="subagent-meta">{agent.model || "默认模型"}{agent.effort ? ` · ${agent.effort}` : ""}</div>
+          {agent.status === "errored" ? <button type="button" className="bare-button subagent-dismiss" onClick={() => setDismissedThreadIds((current) => { const next = new Set(current); next.add(agent.threadId); return next; })} title="关闭错误提示" aria-label="关闭错误提示"><X size={13} /></button> : null}
         </article>
       ))}
     </div>

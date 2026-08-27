@@ -62,6 +62,34 @@ describe("CodexBackend", () => {
     assert.deepEqual(providerParams, { limit: 50 });
   });
 
+  it("routes legacy history reads to the default Codex home even with a client session context", async () => {
+    const calls: string[] = [];
+    const primary = runtime({
+      request: async (method) => {
+        calls.push(`primary:${method}`);
+        return method === "thread/list" ? { data: [] } : { thread: { id: "new-thread", cwd: "D:\\work" } };
+      },
+    });
+    const legacy = runtime({
+      request: async (method) => {
+        calls.push(`legacy:${method}`);
+        return method === "thread/list"
+          ? { data: [{ id: "legacy-thread", cwd: "D:\\work", updatedAt: 2 }] }
+          : { thread: { id: "legacy-thread", cwd: "D:\\work", turns: [] } };
+      },
+    });
+    const backend = new CodexBackend(primary, undefined, legacy);
+
+    await backend.request("listSessions", { cwd: "D:\\work", limit: 10 }, { canonicalCwd: "D:\\work" });
+    await backend.request("readSession", { cwd: "D:\\work", threadId: "legacy-thread", includeTurns: true }, {
+      sessionId: "client-session",
+      canonicalCwd: "D:\\work",
+      nativeSessionId: "legacy-thread",
+    });
+
+    assert.deepEqual(calls, ["primary:thread/list", "legacy:thread/list", "legacy:thread/read"]);
+  });
+
   it("wraps server events and validates interaction ownership", async () => {
     let emit: ((message: JsonRpcMessage) => void) | undefined;
     let responseId: number | string | undefined;

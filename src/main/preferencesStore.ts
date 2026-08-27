@@ -1,6 +1,7 @@
 import { mkdirSync, readFileSync, statSync } from "node:fs";
 import path from "node:path";
-import { DEFAULT_BASE_FONT_SIZE, DEFAULT_PRESENTATION_MODE, MAX_BASE_FONT_SIZE, MIN_BASE_FONT_SIZE, type ClaudeModelCache, type ClaudeModelCacheModel, type CompactionRecord, type DesktopPreferences, type PresentationMode, type ThemeId } from "../shared/protocol";
+import { DEFAULT_BASE_FONT_SIZE, DEFAULT_PRESENTATION_MODE, MAX_BASE_FONT_SIZE, MIN_BASE_FONT_SIZE, type ClaudeModelCache, type ClaudeModelCacheModel, type CompactionRecord, type DesktopPreferences, type ExternalTerminalSettings, type PresentationMode, type ThemeId } from "../shared/protocol";
+import { DEFAULT_EXTERNAL_TERMINAL_KIND, externalTerminalKindForSettings, externalTerminalSettingsForPreset } from "../shared/externalTerminalPresets";
 import { normalizeFavoriteSessionSummaries } from "../shared/favoriteSessions";
 import { writeTextFileAtomicAsync } from "./atomicFile";
 import { quarantineCorruptFile } from "./corruptFile";
@@ -19,6 +20,7 @@ export const DEFAULT_PREFERENCES: DesktopPreferences = {
   sidebarWidth: 250,
   baseFontSize: DEFAULT_BASE_FONT_SIZE,
   sessionAliases: {},
+  pinnedSessions: [],
   favoriteSessions: [],
   favoriteSessionSummaries: {},
   modelContextWindows: {},
@@ -29,7 +31,21 @@ export const DEFAULT_PREFERENCES: DesktopPreferences = {
   compactionCounts: {},
   codexCompactionCounts: {},
   theme: "github-light",
+  externalTerminal: externalTerminalSettingsForPreset(DEFAULT_EXTERNAL_TERMINAL_KIND),
 };
+
+export function normalizeExternalTerminal(value: unknown): ExternalTerminalSettings {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return { ...DEFAULT_PREFERENCES.externalTerminal! };
+  const record = value as Record<string, unknown>;
+  const kind = externalTerminalKindForSettings({
+    kind: typeof record.kind === "string" ? record.kind as ExternalTerminalSettings["kind"] : undefined,
+    executable: typeof record.executable === "string" ? record.executable : "",
+  });
+  if (kind !== "custom") return externalTerminalSettingsForPreset(kind);
+  const executable = typeof record.executable === "string" ? record.executable.trim().slice(0, 1024) : "";
+  const argsTemplate = typeof record.argsTemplate === "string" ? record.argsTemplate.slice(0, 8192) : "";
+  return { kind, executable, argsTemplate };
+}
 
 const THEME_IDS: ThemeId[] = [
   "github-light", "modern-dark", "github-dark-dimmed",
@@ -164,6 +180,7 @@ export function normalizePreferences(value: unknown): DesktopPreferences {
     sessionAliases: parsed.sessionAliases && typeof parsed.sessionAliases === "object" && !Array.isArray(parsed.sessionAliases)
       ? Object.fromEntries(Object.entries(parsed.sessionAliases).filter((entry): entry is [string, string] => typeof entry[1] === "string" && entry[1].trim().length > 0).slice(0, 2_000))
       : {},
+    pinnedSessions: Array.isArray(parsed.pinnedSessions) ? parsed.pinnedSessions.filter((item): item is string => typeof item === "string" && item.trim().length > 0).slice(0, 2_000) : [],
     favoriteSessions: Array.isArray(parsed.favoriteSessions) ? parsed.favoriteSessions.filter((item): item is string => typeof item === "string").slice(0, 2_000) : [],
     favoriteSessionSummaries: normalizeFavoriteSessionSummaries(parsed.favoriteSessionSummaries),
     modelContextWindows: normalizeModelContextWindows(parsed.modelContextWindows),
@@ -177,6 +194,7 @@ export function normalizePreferences(value: unknown): DesktopPreferences {
       ...normalizeCompactionCounts(parsed.compactionCounts),
     }),
     codexCompactionCounts: normalizeCompactionCounts(parsed.codexCompactionCounts),
+    externalTerminal: normalizeExternalTerminal(parsed.externalTerminal),
   };
   if (parsed.workspaceState && typeof parsed.workspaceState === "object" && !Array.isArray(parsed.workspaceState)) {
     preferences.workspaceState = parsed.workspaceState;

@@ -225,7 +225,7 @@ export function threadIdForMessage(message: JsonRpcMessage): string | null {
   return stringValue(thread.id) || stringValue(params.conversationId) || null;
 }
 
-function activityFromItem(itemValue: unknown, previous?: Activity, fallbackStatus: ActivityStatus = "inProgress"): Activity {
+function activityFromItem(itemValue: unknown, previous?: Activity, fallbackStatus: ActivityStatus = "inProgress", timestamp?: number): Activity {
   const item = asRecord(itemValue);
   const kind = activityKind(item.type);
   const id = stringValue(item.id, previous?.id ?? `activity-${Date.now()}`);
@@ -247,7 +247,7 @@ function activityFromItem(itemValue: unknown, previous?: Activity, fallbackStatu
           : previous?.detail || stringValue(item.text, "后台活动"), ACTIVITY_DETAIL_LIMIT);
   const status = activityStatus(item.status, previous, fallbackStatus);
   return {
-    id, kind, title: kind === "commandExecution" ? "代理命令" : kind === "fileChange" ? "文件修改" : kind === "mcpToolCall" ? "工具调用" : kind === "plan" ? "任务计划" : kind === "reasoning" ? "思考摘要" : kind === "subAgent" ? "子 Agent" : "后台活动",
+    id, kind, timestamp: previous?.timestamp || timestamp, title: kind === "commandExecution" ? "代理命令" : kind === "fileChange" ? "文件修改" : kind === "mcpToolCall" ? "工具调用" : kind === "plan" ? "任务计划" : kind === "reasoning" ? "思考摘要" : kind === "subAgent" ? "子 Agent" : "后台活动",
     detail, status, output, visibleInMain: (kind === "fileChange" || kind === "mcpToolCall" || kind === "other") && (status === "failed" || status === "declined" || status === "interrupted"),
   };
 }
@@ -303,9 +303,9 @@ function updateSubagentState(session: SessionState, threadId: string, patch: Par
   session.subagents = existing ? session.subagents.map((entry) => entry.threadId === threadId ? next : entry) : [...session.subagents, next];
 }
 
-function upsertActivity(session: SessionState, item: unknown, fallbackStatus: ActivityStatus = "inProgress") {
+function upsertActivity(session: SessionState, item: unknown, fallbackStatus: ActivityStatus = "inProgress", timestamp?: number) {
   const previous = session.activities.find((entry) => entry.id === stringValue(asRecord(item).id));
-  const next = activityFromItem(item, previous, fallbackStatus);
+  const next = activityFromItem(item, previous, fallbackStatus, timestamp);
   const existingIndex = session.activities.findIndex((entry) => entry.id === next.id);
   session.activities = existingIndex < 0
     ? [...session.activities, next]
@@ -489,6 +489,7 @@ export interface CodexHydrateOptions {
   preserveLifecycle?: boolean;
   persistedCompactionCount?: number;
   persistedCompactionEventIds?: string[];
+  historyPage?: { prepend?: boolean };
 }
 
 export function hydrateSession(session: SessionState, threadValue: unknown, options: CodexHydrateOptions = {}): SessionState {
@@ -528,7 +529,7 @@ export function hydrateSession(session: SessionState, threadValue: unknown, opti
       const nextMessages = messagesFromItem(item, messageTimestamp);
       if (nextMessages.length) messages.push(...nextMessages);
       if (!["userMessage", "agentMessage"].includes(stringValue(itemRecord.type))) {
-        activities.push(activityFromItem(item));
+        activities.push(activityFromItem(item, undefined, "inProgress", turnUpdatedAt || undefined));
       }
     }
   }
@@ -677,7 +678,7 @@ export function applyServerMessage(source: SessionState, message: JsonRpcMessage
         if (!session.plan || updatedAt >= session.plan.updatedAt) {
           session.plan = { explanation: stringValue(item.text), steps: session.plan?.steps || [], updatedAt };
         }
-        upsertActivity(session, item, method === "item/completed" ? "completed" : "inProgress");
+        upsertActivity(session, item, method === "item/completed" ? "completed" : "inProgress", lifecycleTimestamp);
       }
     } else if (type === "exitedReviewMode" && method === "item/completed") {
       const hydrated = messagesFromItem(item, lifecycleTimestamp);
@@ -693,7 +694,7 @@ export function applyServerMessage(source: SessionState, message: JsonRpcMessage
         session.compactionCount += 1;
         if (eventId) session.compactionEventIds = [...session.compactionEventIds, eventId].slice(-64);
       }
-      upsertActivity(session, item, method === "item/completed" ? "completed" : "inProgress");
+      upsertActivity(session, item, method === "item/completed" ? "completed" : "inProgress", lifecycleTimestamp);
     } else if (item.type === "userMessage") {
       const hydrated = messagesFromItem(item, lifecycleTimestamp);
       const duplicate = hydrated.length && session.messages.some((entry) => entry.id === hydrated[0].id
@@ -701,7 +702,7 @@ export function applyServerMessage(source: SessionState, message: JsonRpcMessage
         || (entry.role === "user" && !entry.clientId && entry.text === hydrated[0].text && entry.images.length === hydrated[0].images.length));
       if (hydrated.length && !duplicate) session.messages = [...session.messages, ...hydrated];
     } else {
-      upsertActivity(session, item, method === "item/completed" ? "completed" : "inProgress");
+      upsertActivity(session, item, method === "item/completed" ? "completed" : "inProgress", receivedAt);
       upsertSubagentFromItem(session, item);
     }
   } else if (method === "item/commandExecution/outputDelta") {
@@ -729,14 +730,14 @@ export function applyServerMessage(source: SessionState, message: JsonRpcMessage
         id: itemId,
         kind: method.includes("fileChange") ? "fileChange" : method.includes("mcpToolCall") ? "mcpToolCall" : "reasoning",
         title: method.includes("fileChange") ? "文件修改" : method.includes("mcpToolCall") ? "工具调用" : "思考摘要",
-        detail: limitActivityText(delta || "进行中", ACTIVITY_DETAIL_LIMIT), output: limitActivityText(delta, ACTIVITY_OUTPUT_LIMIT), status: "inProgress", visibleInMain: false,
+        detail: limitActivityText(delta || "进行中", ACTIVITY_DETAIL_LIMIT), output: limitActivityText(delta, ACTIVITY_OUTPUT_LIMIT), status: "inProgress", timestamp: receivedAt, visibleInMain: false,
       }];
     }
   } else if (method === "turn/diff/updated") {
     const diff = stringValue(params.diff);
     const id = `diff-${stringValue(params.turnId, "current")}`;
     const existing = session.activities.find((entry) => entry.id === id);
-    const activity: Activity = { id, kind: "fileChange", title: "工作区 Diff", detail: "当前 Turn 的文件差异", output: limitActivityText(diff, ACTIVITY_OUTPUT_LIMIT), status: "inProgress", visibleInMain: false };
+    const activity: Activity = { id, kind: "fileChange", title: "工作区 Diff", detail: "当前 Turn 的文件差异", output: limitActivityText(diff, ACTIVITY_OUTPUT_LIMIT), status: "inProgress", timestamp: receivedAt, visibleInMain: false };
     session.activities = existing
       ? session.activities.map((entry) => entry.id === id ? activity : entry)
       : [...session.activities, activity];

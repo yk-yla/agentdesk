@@ -2,7 +2,7 @@ import { ArrowLeftToLine, ArrowRight, ArrowRightToLine, Download, FolderOpen, Gi
 import { useCallback, useEffect, useMemo, useRef, useState, type CSSProperties, type DragEvent, type MouseEvent, type PointerEvent as ReactPointerEvent } from "react";
 import type { AgentCapabilities, AgentOperation, AgentProvider } from "../shared/agentProtocol";
 import { providerDisplayName } from "../shared/providerMetadata";
-import { DEFAULT_BASE_FONT_SIZE, DEFAULT_PRESENTATION_MODE, type ClaudeRuntimeStatus, type CodexCliUpdateStatus, type CompactionRecord, type CodexDefaults, type DesktopPreferences, type DesktopUpdateStatus, type JsonObject } from "../shared/protocol";
+import { DEFAULT_BASE_FONT_SIZE, DEFAULT_PRESENTATION_MODE, type ClaudeRuntimeStatus, type CodexCliUpdateStatus, type CompactionRecord, type CodexDefaults, type DesktopPreferences, type DesktopUpdateStatus, type JsonObject, type PresentationMode } from "../shared/protocol";
 import {
   asRecord, basename, DEFAULT_THEME, emptySession, findModelOption, historyThread,
   EMPTY_CODEX_DEFAULTS, normalizedDirectory, numberValue, sameDirectory, stringValue, upsertHistoryEntry,
@@ -44,6 +44,8 @@ import type { CommandUsage } from "./commandSuggestions";
 import { TurnTelemetry } from "./turnTelemetry";
 import { PreferenceSaveCoordinator } from "./preferenceSaveCoordinator";
 import type { ClaudeTerminalSettings } from "./terminalSettings";
+import { shouldUseTerminalHistoryRequest } from "./terminalHistoryRequest";
+import { userFacingErrorMessage } from "./errorMessage";
 
 declare const __CODEX_BROWSER_PREVIEW__: boolean;
 
@@ -63,6 +65,11 @@ const CODEX_TERMINAL_HANDOFF_SETTLE_MS = 750;
 const INITIAL_UPDATE_STATUS: DesktopUpdateStatus = { phase: "idle", currentVersion: "", message: "等待检查更新。", repositoryUrl: "https://github.com/yk-yla/agentdesk" };
 const INITIAL_CLI_UPDATE_STATUS: CodexCliUpdateStatus = { phase: "idle", currentVersion: "", message: "正在读取 Codex CLI 版本。" };
 const INITIAL_CLAUDE_RUNTIME_STATUS: ClaudeRuntimeStatus = { phase: "idle", binarySource: "sdk", binaryVersion: "", sdkVersion: "", credentialsAvailable: false, credentialSource: "unavailable", credentialMessage: "正在读取 Claude 配置。", message: "等待检查更新。" };
+const CLAUDE_HISTORY_PAGE_SIZE = 200;
+
+function workbenchOnlyPresentationMode(): PresentationMode {
+  return "workbench";
+}
 const DEFAULT_SIDEBAR_WIDTH = 250;
 const MIN_SIDEBAR_WIDTH = 184;
 const MAX_SIDEBAR_WIDTH = 480;
@@ -225,6 +232,8 @@ export default function App() {
   const claudeRuntimeStatusRef = useRef(claudeRuntimeStatus);
   const tabContextMenuRef = useRef(tabContextMenu);
   const sidebarCollapsedRef = useRef(sidebarCollapsed);
+  const sidebarLaunchesRef = useRef(new Map<string, { startedAt: number; inFlight: boolean }>());
+  const externalTerminalLaunchesRef = useRef(new Map<string, { startedAt: number; inFlight: boolean }>());
   sessionsRef.current = sessions;
   workspaceRef.current = workspace;
   layoutRef.current = layout;
@@ -333,7 +342,7 @@ export default function App() {
 
   const setError = useCallback((sessionId: string, error: unknown, fallback: string) => {
     void bridge.writeLog({ level: "error", event: "renderer.session_error", details: { sessionId, fallback, error: error instanceof Error ? { name: error.name, message: error.message, stack: error.stack } : { message: String(error) } } }).catch(() => undefined);
-    updateSession(sessionId, (current) => ({ ...current, errorText: error instanceof Error ? error.message : fallback }));
+    updateSession(sessionId, (current) => ({ ...current, errorText: userFacingErrorMessage(error, fallback) }));
   }, [bridge, updateSession]);
 
   const ensureProviderInitialized = useCallback((provider: AgentProvider) => {
@@ -391,14 +400,20 @@ export default function App() {
     if (session?.readOnly && !READ_ONLY_SESSION_OPERATIONS.has(operation)) {
       throw new Error("当前会话正被其他程序使用，已切换为只读模式。");
     }
-    const context = {
-      sessionId,
-      canonicalCwd: session?.cwd,
-      nativeSessionId: session?.threadId || undefined,
-      queryGeneration: session?.queryGeneration,
-    };
+    const terminalHistoryRequest = shouldUseTerminalHistoryRequest(session && { ...session, provider }, operation);
+    const requestParams = terminalHistoryRequest && session?.threadId
+      ? { ...params, cwd: session.cwd, threadId: session.threadId }
+      : params;
+    const context = terminalHistoryRequest && session?.threadId
+      ? { canonicalCwd: session.cwd, nativeSessionId: session.threadId }
+      : {
+        sessionId,
+        canonicalCwd: session?.cwd,
+        nativeSessionId: session?.threadId || undefined,
+        queryGeneration: session?.queryGeneration,
+      };
     try {
-      const value = await agentClient.request(provider, operation, params, context);
+      const value = await agentClient.request(provider, operation, requestParams, context);
       appendRawEvent(sessionId, `response ${operation}`, { provider, payload: value });
       return value;
     } catch (error) {
@@ -433,11 +448,8 @@ export default function App() {
     return load;
   }, [requestForSession]);
 
-  // Claude only ever runs in a terminal; Codex follows the remembered choice.
-  // Shared so layout-created sessions decide exactly like createSessionState.
-  const newSessionPresentationMode = useCallback((provider: AgentProvider, requested?: "workbench" | "terminal") => (
-    provider === "claude" ? "terminal" : (requested || preferencesRef.current.lastCodexPresentationMode || "workbench")
-  ), []);
+  // Claude is displayed read-only in AgentDesk; interaction happens in the configured external terminal.
+  const newSessionPresentationMode = useCallback((_provider: AgentProvider, _requested?: "workbench" | "terminal"): PresentationMode => workbenchOnlyPresentationMode(), []);
 
   const createSessionState = useCallback((cwd: string, options?: { threadId?: string; title?: string; provider?: AgentProvider; presentationMode?: "workbench" | "terminal"; historyLoading?: boolean }) => {
     const id = `session-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
@@ -455,6 +467,7 @@ export default function App() {
     }
     session.tokenUsage.total = cachedModelContextWindow(preferencesRef.current, session.model);
     session.threadId = options?.threadId ?? null;
+    if (provider === "claude") session.readOnly = true;
     session.title = options?.title || "新会话";
     session.titleOrigin = options?.title ? "provider" : "placeholder";
     session.resumed = false;
@@ -576,6 +589,15 @@ export default function App() {
     addSession, addSessionToPane, activateSession, focusPane, setActiveTab, removeTab, closeTabIds,
     splitPane, closePane, closeActiveTab, moveTab,
   } = layoutController;
+
+  // Asked by a TerminalPane at unmount whether its session is being moved
+  // (still in the layout) rather than closed. moveTab updates layoutRef
+  // synchronously before the unmount cleanup runs, so a session found here is a
+  // move and its PTY must be kept alive for the reattaching remount.
+  const isSessionRetained = useCallback(
+    (sessionId: string) => layoutRef.current.panes.some((pane) => pane.tabIds.includes(sessionId)),
+    [],
+  );
 
   const openTabContextMenu = useCallback((event: MouseEvent<HTMLButtonElement>, paneId: string, sessionId: string) => {
     event.preventDefault();
@@ -1005,12 +1027,18 @@ export default function App() {
     const registered = await bridge.registerWorkspace(directory);
     if (!registered) return undefined;
     directory = registered;
-    const selectedPresentationMode = provider === "claude" ? "terminal" : (presentationMode || preferencesRef.current.lastCodexPresentationMode || "workbench");
+    const selectedPresentationMode = workbenchOnlyPresentationMode();
     if (selectedPresentationMode === "workbench") void ensureProviderInitialized(provider);
     setWorkspace(directory);
+    const nativeSessionId = provider === "claude" ? crypto.randomUUID() : undefined;
     const sessionId = placement
-      ? addSessionToPane(placement.paneId, directory, { provider, presentationMode: selectedPresentationMode }, placement.afterSessionId)
-      : addSession(directory, { provider, presentationMode: selectedPresentationMode });
+      ? addSessionToPane(placement.paneId, directory, { provider, presentationMode: selectedPresentationMode, ...(nativeSessionId ? { threadId: nativeSessionId, title: "新 Claude 会话" } : {}) }, placement.afterSessionId)
+      : addSession(directory, { provider, presentationMode: selectedPresentationMode, ...(nativeSessionId ? { threadId: nativeSessionId, title: "新 Claude 会话" } : {}) });
+    if (provider === "claude") {
+      updateSession(sessionId, (current) => ({ ...current, readOnly: true, statusLabel: "等待外部终端启动", errorText: "" }));
+      setHistory((current) => upsertHistoryEntry(current, { id: nativeSessionId!, provider: "claude", cwd: directory, title: "新 Claude 会话" }));
+      void bridge.openExternalTerminal({ cwd: directory, sessionId: nativeSessionId! }).catch((error) => setError(sessionId, error, "打开外部终端失败"));
+    }
     if (selectedPresentationMode === "terminal") void prepareNewTerminalSession(sessionId, provider, directory);
     trackUiEvent("session.create", { provider, placement: placement ? "tab" : "pane" });
     if (selectedPresentationMode === "workbench") {
@@ -1023,7 +1051,48 @@ export default function App() {
     }
     void savePreference({ lastWorkspace: directory, ...(provider === "codex" && selectedPresentationMode ? { lastCodexPresentationMode: selectedPresentationMode } : {}) });
     return sessionId;
-  }, [addSession, addSessionToPane, bridge, prepareNewTerminalSession, savePreference, setError]);
+  }, [addSession, addSessionToPane, bridge, prepareNewTerminalSession, savePreference, setError, updateSession]);
+
+  const openClaudeTerminalInDirectory = useCallback(async (directory: string) => {
+    const key = `claude:${normalizedDirectory(directory)}`;
+    const now = Date.now();
+    const previous = sidebarLaunchesRef.current.get(key);
+    // Ignore repeat clicks only while this launch is still in progress. Once
+    // the window is open, another deliberate click may create another session.
+    if (previous?.inFlight) return;
+    sidebarLaunchesRef.current.set(key, { startedAt: now, inFlight: true });
+    try {
+      const registered = await bridge.registerWorkspace(directory);
+      if (!registered) throw new Error("当前目录没有获得打开权限，请重新选择目录后再试。");
+      setWorkspace(registered);
+      const sessionId = crypto.randomUUID();
+      await bridge.openExternalTerminal({ cwd: registered, sessionId });
+      // Keep the newly launched external session visible in the directory
+      // history even though it intentionally has no AgentDesk tab.
+      setHistory((current) => upsertHistoryEntry(current, { id: sessionId, provider: "claude", cwd: registered, title: "新 Claude 会话" }));
+      await savePreference({ lastWorkspace: registered });
+      trackUiEvent("session.create", { provider: "claude", placement: "external-terminal" });
+    } catch (error) {
+      throw error instanceof Error ? error : new Error("打开外部 Claude 终端失败。");
+    } finally {
+      const current = sidebarLaunchesRef.current.get(key);
+      if (current) sidebarLaunchesRef.current.set(key, { ...current, inFlight: false });
+    }
+  }, [bridge, savePreference]);
+
+  const createSidebarSession = useCallback(async (directory: string, provider: AgentProvider = "codex") => {
+    const key = `${provider}:${normalizedDirectory(directory)}`;
+    const now = Date.now();
+    const previous = sidebarLaunchesRef.current.get(key);
+    if (previous && (previous.inFlight || now - previous.startedAt < 1_200)) return;
+    sidebarLaunchesRef.current.set(key, { startedAt: now, inFlight: true });
+    try {
+      await createSessionInDirectory(directory, provider);
+    } finally {
+      const current = sidebarLaunchesRef.current.get(key);
+      if (current) sidebarLaunchesRef.current.set(key, { ...current, inFlight: false });
+    }
+  }, [createSessionInDirectory]);
 
   useEffect(() => {
     const handleNewSessionShortcut = (event: KeyboardEvent) => {
@@ -1457,14 +1526,30 @@ export default function App() {
       if (session) setError(sessionId, new Error("发送第一条消息后才能置顶会话。"), "发送第一条消息后才能置顶会话。");
       return;
     }
-    const nextPinned = !history.find((entry) => entry.provider === session.provider && entry.id === session.threadId)?.isPinned;
+    const key = nativeSessionKey(session.provider, session.threadId);
+    const current = preferencesRef.current.pinnedSessions || [];
+    const isPinned = current.includes(key) || current.includes(session.threadId);
+    const pinnedSessions = isPinned
+      ? current.filter((id) => id !== key && id !== session.threadId)
+      : [...current, key];
     try {
-      await requestForSession(sessionId, "updateSessionMetadata", { threadId: session.threadId, isPinned: nextPinned });
-      setHistory((current) => sortHistory(current.map((entry) => entry.provider === session.provider && entry.id === session.threadId ? { ...entry, isPinned: nextPinned } : entry)));
+      await savePreference({ pinnedSessions });
+      setHistory((currentHistory) => sortHistory(currentHistory.map((entry) => entry.provider === session.provider && entry.id === session.threadId ? { ...entry, isPinned: !isPinned } : entry)));
     } catch (error) {
       setError(sessionId, error, "置顶状态更新失败");
     }
-  }, [history, requestForSession, setError]);
+  }, [savePreference, setError]);
+
+  const toggleHistoricalPin = useCallback(async (provider: AgentProvider, threadId: string) => {
+    const key = nativeSessionKey(provider, threadId);
+    const current = preferencesRef.current.pinnedSessions || [];
+    const isPinned = current.includes(key) || current.includes(threadId);
+    const pinnedSessions = isPinned
+      ? current.filter((id) => id !== key && id !== threadId)
+      : [...current, key];
+    await savePreference({ pinnedSessions });
+    setHistory((currentHistory) => sortHistory(currentHistory.map((entry) => entry.provider === provider && entry.id === threadId ? { ...entry, isPinned: !isPinned } : entry)));
+  }, [savePreference]);
 
   const toggleSessionFavorite = useCallback(async (sessionId: string) => {
     const session = sessionsRef.current[sessionId];
@@ -1663,11 +1748,23 @@ export default function App() {
     const activateHistorySession = (sessionId: string) => {
       if (options?.activate !== false) activateSessionTab(sessionId);
     };
-    const selectedPresentationMode = entry.provider === "claude" ? "terminal" : (presentationMode || preferencesRef.current.lastCodexPresentationMode || "workbench");
+    const selectedPresentationMode = workbenchOnlyPresentationMode();
     if (entry.provider === "codex" && presentationMode) {
       void savePreference({ lastCodexPresentationMode: selectedPresentationMode });
     }
     const existing = Object.values(sessionsRef.current).find((session) => session.provider === entry.provider && session.threadId === entry.id && sameDirectory(session.cwd, entry.cwd));
+    let legacyTerminalClosed = false;
+    if (existing?.provider === "codex" && existing.presentationMode === "terminal") {
+      try {
+        await bridge.closeTerminal({ sessionId: existing.id });
+      } catch (error) {
+        setError(existing.id, error, "关闭旧版 Codex 黑窗口失败");
+        activateHistorySession(existing.id);
+        return existing.id;
+      }
+      updateSession(existing.id, (current) => ({ ...current, presentationMode: "workbench", terminalSuspended: false, resumed: false, historyLoading: true, errorText: "" }));
+      legacyTerminalClosed = true;
+    }
     if (existing?.presentationMode === "terminal" && selectedPresentationMode === "terminal" && !existing.terminalSuspended) {
       activateHistorySession(existing.id);
       return existing.id;
@@ -1684,7 +1781,7 @@ export default function App() {
         }
       }
     }
-    if (existing?.presentationMode === "terminal" && selectedPresentationMode === "workbench") {
+    if (!legacyTerminalClosed && existing?.presentationMode === "terminal" && selectedPresentationMode === "workbench") {
       // Opening a history item is a read/navigation action. It must not close
       // a live terminal just because the saved Codex presentation preference
       // is the workbench. The explicit mode toggle owns terminal shutdown.
@@ -1757,8 +1854,9 @@ export default function App() {
             defaultsRef.current,
             providerCapabilitiesRef.current[entry.provider],
           );
-          next.presentationMode = "terminal";
-          next.terminalSuspended = false;
+        next.presentationMode = "terminal";
+        next.terminalSuspended = false;
+        next.readOnly = entry.provider === "claude";
           next.tokenUsage.total = cachedModelContextWindow(preferencesRef.current, next.model);
           return withPersistedCompaction(next, preferencesRef.current);
         });
@@ -1771,7 +1869,7 @@ export default function App() {
       if (existing.presentationMode === "terminal") {
         updateSession(existing.id, (current) => ({ ...current, presentationMode: "workbench", terminalSuspended: false, historyLoading: true, errorText: "" }));
       }
-      if (existing.resumed || existing.readOnly) {
+      if (existing.resumed || (existing.readOnly && existing.provider !== "claude")) {
         updateSession(existing.id, (current) => ({ ...current, historyLoading: false }));
         return existing.id;
       }
@@ -1827,6 +1925,12 @@ export default function App() {
       persistCompactionSnapshot(sessionId);
     };
     try {
+      if (entry.provider === "claude") {
+        const readValue = await readHistoricalSession();
+        updateSession(sessionId, (current) => ({ ...hydrateAgentSession(current, current.provider, asRecord(readValue).thread), historyLoading: false, readOnly: true, resumed: false, errorText: "" }));
+        persistCompactionSnapshot(sessionId);
+        return sessionId;
+      }
       await restoreHistoricalSession({
         resume: () => sessionLifecycleRef.current.resume(sessionId, () => (
           requestForSession(sessionId, "resumeSession", { threadId: entry.id, cwd: registeredCwd })
@@ -1898,6 +2002,74 @@ export default function App() {
     }
   }, [requestForSession, setError, updateSession]);
 
+  const refreshClaudeSession = useCallback(async (sessionId: string) => {
+    const session = sessionsRef.current[sessionId];
+    if (!session || session.provider !== "claude" || !session.threadId) return;
+    updateSession(sessionId, (current) => ({ ...current, historyLoading: true, errorText: "" }));
+    try {
+      const value = await requestForSession(sessionId, "readSession", { threadId: session.threadId, includeTurns: true });
+      updateSession(sessionId, (current) => ({ ...hydrateAgentSession(current, "claude", asRecord(value).thread), historyLoading: false, readOnly: true, resumed: false }));
+    } catch (error) {
+      updateSession(sessionId, (current) => ({ ...current, historyLoading: false }));
+      setError(sessionId, error, "刷新 Claude 会话失败");
+    }
+  }, [requestForSession, setError, updateSession]);
+
+  const loadEarlierClaudeMessages = useCallback(async (sessionId: string) => {
+    const session = sessionsRef.current[sessionId];
+    if (!session || session.provider !== "claude" || !session.threadId || session.historyHasMoreBefore !== true || session.historyLoadingEarlier) return;
+    const currentOffset = session.historyMessageOffset;
+    if (typeof currentOffset !== "number" || currentOffset <= 0) return;
+    updateSession(sessionId, (current) => ({ ...current, historyLoadingEarlier: true, errorText: "" }));
+    try {
+      const value = await requestForSession(sessionId, "readSession", {
+        threadId: session.threadId,
+        includeTurns: true,
+        messageOffset: Math.max(0, currentOffset - CLAUDE_HISTORY_PAGE_SIZE),
+        messageLimit: CLAUDE_HISTORY_PAGE_SIZE,
+      });
+      updateSession(sessionId, (current) => ({
+        ...hydrateAgentSession(current, "claude", asRecord(value).thread, { historyPage: { prepend: true } }),
+        historyLoadingEarlier: false,
+        readOnly: true,
+        resumed: false,
+      }));
+    } catch (error) {
+      updateSession(sessionId, (current) => ({ ...current, historyLoadingEarlier: false }));
+      setError(sessionId, error, "读取更早的 Claude 会话记录失败");
+    }
+  }, [requestForSession, setError, updateSession]);
+
+  const openClaudeExternalTerminal = useCallback(async (sessionId: string) => {
+    const session = sessionsRef.current[sessionId];
+    if (!session || session.provider !== "claude") return;
+    if (!session.threadId) {
+      updateSession(sessionId, (current) => ({ ...current, status: "error", statusLabel: "打开终端失败", errorText: "当前 Claude 会话没有可用的会话 ID，请先刷新会话列表。" }));
+      return;
+    }
+    const now = Date.now();
+    const previous = externalTerminalLaunchesRef.current.get(sessionId);
+    if (previous && (previous.inFlight || now - previous.startedAt < 1_200)) return;
+    externalTerminalLaunchesRef.current.set(sessionId, { startedAt: now, inFlight: true });
+    updateSession(sessionId, (current) => ({ ...current, status: "idle", statusLabel: "正在打开外部终端", errorText: "" }));
+    try {
+      const hasExistingClaudeHistory = session.messages.length > 0
+        || (session.titleOrigin === "provider" && session.title !== "新 Claude 会话");
+      await bridge.openExternalTerminal({ cwd: session.cwd, sessionId: session.threadId, resume: hasExistingClaudeHistory });
+      updateSession(sessionId, (current) => ({
+        ...current,
+        statusLabel: "已打开外部终端",
+        errorText: "",
+      }));
+    } catch (error) {
+      setError(sessionId, error, "打开外部 Claude 终端失败");
+      updateSession(sessionId, (current) => ({ ...current, status: "error", statusLabel: "打开终端失败" }));
+    } finally {
+      const current = externalTerminalLaunchesRef.current.get(sessionId);
+      if (current) externalTerminalLaunchesRef.current.set(sessionId, { ...current, inFlight: false });
+    }
+  }, [bridge, setError, updateSession]);
+
   const isHistoryWorking = useCallback((threadId: string, provider?: AgentProvider) => (
     Object.values(sessionsRef.current).some((session) => session.threadId === threadId && (!provider || session.provider === provider) && sessionHasActiveWork(session))
   ), []);
@@ -1915,6 +2087,16 @@ export default function App() {
       return;
     }
     if (action === "openTerminal") {
+      if (entry.provider === "claude") {
+        try {
+          const cwd = await registerHistoricalWorkspace((directory) => bridge.registerWorkspace(directory), entry.cwd);
+          await bridge.openExternalTerminal({ cwd, sessionId: entry.id, resume: true });
+          await openHistory({ ...entry, cwd }, "workbench");
+        } catch (error) {
+          reportError(error, "打开外部 Claude 终端失败");
+        }
+        return;
+      }
       await openHistory(entry, "terminal");
       return;
     }
@@ -1940,6 +2122,15 @@ export default function App() {
     }
 
     const key = nativeSessionKey(entry.provider, entry.id);
+
+    if (action === "pin") {
+      try {
+        await toggleHistoricalPin(entry.provider, entry.id);
+      } catch (error) {
+        reportError(error, "置顶状态更新失败");
+      }
+      return;
+    }
 
     if (action === "favorite") {
       const favorites = preferencesRef.current.favoriteSessions || [];
@@ -1987,10 +2178,6 @@ export default function App() {
         await savePreference(patch);
         if (terminalSession) updateSession(terminalSession.id, (current) => ({ ...current, title: name, titleOrigin: "manual", updatedAt: Date.now() }));
         setHistory((current) => sortHistory(current.map((candidate) => candidate.provider === entry.provider && candidate.id === entry.id ? { ...candidate, title: name, titleLower: name.toLowerCase() } : candidate)));
-      } else if (action === "pin") {
-        const nextPinned = !entry.isPinned;
-        await agentClient.request(entry.provider, "updateSessionMetadata", { ...params, isPinned: nextPinned }, context);
-        setHistory((current) => sortHistory(current.map((candidate) => candidate.provider === entry.provider && candidate.id === entry.id ? { ...candidate, isPinned: nextPinned } : candidate)));
       } else if (action === "export") {
         await bridge.saveTextFile(sessionMarkdown(source), `${source.title || "agent-session"}.md`);
       } else if (action === "handoffCodex" || action === "handoffClaude") {
@@ -2040,6 +2227,7 @@ export default function App() {
         if (entry.provider === "codex") { delete legacyCodexCompactionCounts[key]; delete legacyCodexCompactionCounts[entry.id]; }
         await savePreference({
           sessionAliases: aliases,
+          pinnedSessions: (preferencesRef.current.pinnedSessions || []).filter((id) => id !== key && id !== entry.id),
           favoriteSessions: (preferencesRef.current.favoriteSessions || []).filter((id) => id !== key && id !== entry.id),
           favoriteSessionSummaries,
           compactionCounts,
@@ -2048,9 +2236,9 @@ export default function App() {
         setHistory((current) => current.filter((candidate) => candidate.provider !== entry.provider || candidate.id !== entry.id));
       }
     } catch (error) {
-      reportError(normalizeAgentRequestError(entry.provider, action === "pin" ? "updateSessionMetadata" : action === "rename" ? "renameSession" : action === "delete" ? "deleteSession" : action === "fork" ? "forkSession" : "readSession", error), "历史会话操作失败");
+      reportError(normalizeAgentRequestError(entry.provider, action === "rename" ? "renameSession" : action === "delete" ? "deleteSession" : action === "fork" ? "forkSession" : "readSession", error), "历史会话操作失败");
     }
-  }, [addSession, agentClient, bridge, createSessionInDirectory, createSessionState, deleteSession, exportSession, forkSession, handoffSession, layoutController, openHistory, persistCompactionSnapshot, releaseSessionState, renameSession, requestForSession, restoreMessagesToDraft, runMessage, savePreference, sessionMessages, setError, toggleSessionFavorite, toggleThreadPin, updateSession]);
+  }, [addSession, agentClient, bridge, createSessionInDirectory, createSessionState, deleteSession, exportSession, forkSession, handoffSession, layoutController, openHistory, persistCompactionSnapshot, releaseSessionState, renameSession, requestForSession, restoreMessagesToDraft, runMessage, savePreference, sessionMessages, setError, toggleHistoricalPin, toggleSessionFavorite, toggleThreadPin, updateSession]);
 
   const addImages = useCallback(async (sessionId: string, files: File[]) => {
     const session = sessionsRef.current[sessionId];
@@ -2345,11 +2533,16 @@ export default function App() {
       const restored = parseWorkspaceState(value.workspaceState, currentWorkspace);
       if (!restored) {
         const initial = emptySession("session-1", currentWorkspace, "", "", launchProvider || "codex");
-        const initialPresentationMode = initial.provider === "claude" ? "terminal" : (value.lastCodexPresentationMode || "workbench");
+        const initialPresentationMode: "workbench" = "workbench";
         initial.presentationMode = initialPresentationMode;
-        if (initialPresentationMode === "terminal") {
-          initial.terminalSuspended = true;
-          initial.statusLabel = "正在准备黑窗口";
+        const initialClaudeSessionId = initial.provider === "claude" ? crypto.randomUUID() : undefined;
+        if (initialClaudeSessionId) {
+          initial.threadId = initialClaudeSessionId;
+          initial.title = "新 Claude 会话";
+          initial.titleOrigin = "provider";
+          initial.readOnly = true;
+          setHistory((current) => upsertHistoryEntry(current, { id: initialClaudeSessionId, provider: "claude", cwd: currentWorkspace, title: initial.title }));
+          void bridge.openExternalTerminal({ cwd: currentWorkspace, sessionId: initialClaudeSessionId }).catch((error) => updateSession("session-1", (current) => ({ ...current, errorText: error instanceof Error ? error.message : "打开外部终端失败" })));
         }
         sessionsRef.current = { "session-1": initial };
         setSessions({ "session-1": initial });
@@ -2358,8 +2551,7 @@ export default function App() {
         }
         workspaceStateReadyRef.current = true;
         setWorkspaceStateReady(true);
-        if (initialPresentationMode === "terminal") void prepareNewTerminalSession(initial.id, initial.provider, currentWorkspace);
-        else void ensureProviderInitialized(initial.provider);
+        void ensureProviderInitialized(initial.provider);
         return;
       }
 
@@ -2369,6 +2561,19 @@ export default function App() {
           errorText: `会话现场已按本地大小上限截断，请检查草稿和附件。${restored.truncationReasons.length ? ` 原因：${restored.truncationReasons.join("、")}` : ""}`,
         }]))
         : restored.sessions;
+      for (const session of Object.values(restoredSessionsBase)) {
+        if (session.provider === "codex") {
+          // Built-in terminal mode is no longer exposed. Old saved tabs return
+          // to the normal workbench so a restart cannot reopen a black window.
+          session.presentationMode = "workbench";
+          session.terminalSuspended = false;
+        }
+        if (session.provider === "claude") {
+          session.presentationMode = "workbench";
+          session.readOnly = true;
+          session.terminalSuspended = false;
+        }
+      }
       const preparedRestoredSessions = Object.fromEntries(Object.entries(restoredSessionsBase)
         .map(([id, session]) => [id, withPersistedCompaction(session, preferencesRef.current)]));
       const authorization = await authorizeRestoredSessionWorkspaces(preparedRestoredSessions, (cwd) => bridge.registerWorkspace(cwd));
@@ -2473,6 +2678,13 @@ export default function App() {
       updateSession(sessionId, (current) => ({ ...current, historyLoading: true }));
       providerEventRef.current?.bindSession(session.provider, session.threadId, sessionId);
       const readVersion = providerEventRef.current?.captureVersion(sessionId) || { event: 0, lifecycle: 0 };
+      if (session.provider === "claude") {
+        void requestForSession(sessionId, "readSession", { threadId: session.threadId, includeTurns: true })
+          .then((readValue) => updateSession(sessionId, (current) => ({ ...hydrateAgentSession(current, "claude", asRecord(readValue).thread), historyLoading: false, readOnly: true, resumed: false })))
+          .then(() => { workspaceRestoreIdsRef.current.delete(sessionId); workspaceRestoreInFlightIdsRef.current.delete(sessionId); })
+          .catch((error) => { workspaceRestoreInFlightIdsRef.current.delete(sessionId); updateSession(sessionId, (current) => ({ ...current, historyLoading: false })); setError(sessionId, error, "读取 Claude 会话失败"); });
+        continue;
+      }
       void restoreHistoricalSession({
         resume: () => sessionLifecycleRef.current.resume(sessionId, () => (
           requestForSession(sessionId, "resumeSession", { threadId: session.threadId as string, cwd: session.cwd })
@@ -2734,13 +2946,14 @@ export default function App() {
       favoriteWorkspaces: preferences.favoriteWorkspaces,
     },
     actions: {
-      onNewSession: (directory, provider) => { void createSessionInDirectory(directory, provider); },
+      onNewSession: (directory, provider) => { void createSidebarSession(directory, provider); },
+      onOpenClaudeTerminal: openClaudeTerminalInDirectory,
       onSelectWorkspace: selectWorkspace,
       onToggleFavorite: toggleFavorite,
       onSavePreference: savePreference,
       onOpenDirectory: openDirectoryInExplorer,
     },
-  }), [createSessionInDirectory, openDirectoryInExplorer, preferences.favoriteWorkspaces, savePreference, selectWorkspace, sidebarCurrentCwd, sidebarDirectoryHistory.length, toggleFavorite]);
+  }), [createSidebarSession, openClaudeTerminalInDirectory, openDirectoryInExplorer, preferences.favoriteWorkspaces, savePreference, selectWorkspace, sidebarCurrentCwd, sidebarDirectoryHistory.length, toggleFavorite]);
   const sidebarHistory = useMemo<SidebarProps["history"]>(() => ({
     viewModel: {
       activeCwd: sidebarCurrentCwd,
@@ -2773,6 +2986,7 @@ export default function App() {
   const sidebarSettings = useMemo<SidebarProps["settings"]>(() => ({
     viewModel: {
       theme: preferences.theme,
+      externalTerminal: preferences.externalTerminal,
       updateStatus,
       cliUpdateStatus,
       claudeStatus: claudeRuntimeStatus,
@@ -2824,6 +3038,9 @@ export default function App() {
         onStopGoal={stopGoal}
         onClearError={clearError}
         onRetryReadOnly={retryReadOnlySession}
+        onRefresh={refreshClaudeSession}
+        onLoadEarlier={loadEarlierClaudeMessages}
+        onOpenExternalTerminal={openClaudeExternalTerminal}
         onRespondApproval={respondToApproval}
         onInterrupt={interrupt}
         getDraft={getDraft}
@@ -2839,6 +3056,7 @@ export default function App() {
         onTerminalError={setTerminalError}
         onTerminalActivity={setTerminalActivity}
         onTerminalSettings={applyTerminalSettings}
+        onIsSessionRetained={isSessionRetained}
         />;
       })}
     </div>;

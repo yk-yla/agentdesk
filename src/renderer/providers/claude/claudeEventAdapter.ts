@@ -101,6 +101,21 @@ function mergeMessages(snapshot: Message[], current: Message[], preferCurrent: b
   return result;
 }
 
+function prependHistoryMessages(page: Message[], current: Message[]) {
+  const result: Message[] = [];
+  const indexes = new Map<string, number>();
+  for (const message of [...page, ...current]) {
+    const index = indexes.get(message.id);
+    if (index === undefined) {
+      indexes.set(message.id, result.length);
+      result.push(message);
+    } else {
+      result[index] = message;
+    }
+  }
+  return result;
+}
+
 function upsertAssistant(session: SessionState, id: string, text: string, streaming: boolean, timestamp?: number) {
   const existing = session.messages.find((message) => message.id === id);
   if (existing) {
@@ -160,10 +175,11 @@ function finalizeAssistant(session: SessionState, id: string, text: string, time
   upsertAssistant(session, id, text, false, timestamp);
 }
 
-function upsertActivity(session: SessionState, activity: Activity) {
+function upsertActivity(session: SessionState, activity: Activity, timestamp = Date.now()) {
+  const nextActivity = activity.timestamp ? activity : { ...activity, timestamp };
   session.activities = session.activities.some((entry) => entry.id === activity.id)
-    ? session.activities.map((entry) => entry.id === activity.id ? { ...entry, ...activity } : entry)
-    : [...session.activities, activity];
+    ? session.activities.map((entry) => entry.id === activity.id ? { ...entry, ...nextActivity, timestamp: entry.timestamp || nextActivity.timestamp } : entry)
+    : [...session.activities, nextActivity];
 }
 
 function settleRunningActivities(session: SessionState, status: "completed" | "failed", detail: string) {
@@ -173,8 +189,8 @@ function settleRunningActivities(session: SessionState, status: "completed" | "f
     : activity);
 }
 
-function enforceSessionBudgets(session: SessionState) {
-  if (session.messages.length > SESSION_MESSAGE_LIMIT) {
+function enforceSessionBudgets(session: SessionState, preserveAllMessages = false) {
+  if (!preserveAllMessages && session.messages.length > SESSION_MESSAGE_LIMIT) {
     session.messages = [
       { id: "claude-message-history-trimmed", role: "system", text: "较早的消息已隐藏，以保持界面流畅。", images: [] },
       ...session.messages.slice(-(SESSION_MESSAGE_LIMIT - 1)),
@@ -289,6 +305,7 @@ export function applyClaudeEvent(source: SessionState, routed: RoutedClaudeEvent
     session.queryGeneration = Number(routed.envelope.queryGeneration);
   }
   const payload = sdkPayload(routed.envelope);
+  const eventTimestamp = routed.envelope.receivedAt;
   if (routed.envelope.type === "claude/queryClosed" || routed.envelope.type === "claude/queryRestarted") {
     session.status = "idle";
     session.statusLabel = "已断开，可继续恢复";
@@ -368,7 +385,7 @@ export function applyClaudeEvent(source: SessionState, routed: RoutedClaudeEvent
             detail: `${name} 参数生成中`,
             status: "inProgress",
             visibleInMain: false,
-          });
+          }, eventTimestamp);
         }
       }
     } else if (type === "assistant") {
@@ -386,7 +403,7 @@ export function applyClaudeEvent(source: SessionState, routed: RoutedClaudeEvent
           detail: stringValue(block.name, "Claude 工具调用"),
           status: "inProgress",
           visibleInMain: false,
-        });
+        }, messageTimestamp);
       }
     } else if (type === "tool_progress") {
       upsertActivity(session, {
@@ -396,7 +413,7 @@ export function applyClaudeEvent(source: SessionState, routed: RoutedClaudeEvent
         detail: `已运行 ${numberValue(payload.elapsed_time_seconds)} 秒`,
         status: "inProgress",
         visibleInMain: false,
-      });
+      }, messageTimestamp);
     } else if (type === "result") {
       const failed = payload.is_error === true;
       session.status = failed ? "error" : "idle";
@@ -428,7 +445,7 @@ export function applyClaudeEvent(source: SessionState, routed: RoutedClaudeEvent
 export function hydrateClaudeSession(
   session: SessionState,
   value: unknown,
-  options: { preserveRealtime?: boolean; preserveLifecycle?: boolean; persistedCompactionCount?: number; persistedCompactionEventIds?: string[] } = {},
+  options: { preserveRealtime?: boolean; preserveLifecycle?: boolean; persistedCompactionCount?: number; persistedCompactionEventIds?: string[]; historyPage?: { prepend?: boolean } } = {},
 ): SessionState {
   const thread = asRecord(value);
   const historyModel = stringValue(thread.model);
@@ -456,7 +473,13 @@ export function hydrateClaudeSession(
   })() : session.messages;
   const preserveRealtime = options.preserveRealtime === true;
   const preserveLifecycle = options.preserveLifecycle ?? preserveRealtime;
+  const prependHistory = options.historyPage?.prepend === true;
   const nativeTitle = stringValue(thread.name, stringValue(thread.title));
+  const messageOffset = numberValue(thread.messageOffset, -1);
+  const messageTotal = numberValue(thread.messageTotal, -1);
+  const nextMessages = prependHistory
+    ? prependHistoryMessages(snapshotMessages, session.messages)
+    : mergeMessages(snapshotMessages, session.messages, preserveRealtime);
   return enforceSessionBudgets({
     ...session,
     threadId: stringValue(thread.id, session.threadId || "") || session.threadId,
@@ -464,7 +487,13 @@ export function hydrateClaudeSession(
     title: nativeTitle || session.title,
     ...(nativeTitle ? { titleOrigin: "provider" as const } : {}),
     ...(historyModel && !session.resumed ? { model: historyModel, resolvedModel: historyModel } : {}),
-    messages: mergeMessages(snapshotMessages, session.messages, preserveRealtime),
+    messages: nextMessages,
+    ...(messageOffset >= 0 ? {
+      historyMessageOffset: messageOffset,
+      historyMessageTotal: messageTotal >= 0 ? messageTotal : session.historyMessageTotal,
+      historyHasMoreBefore: thread.messageHasMoreBefore === true,
+      historyHasMoreAfter: thread.messageHasMoreAfter === true,
+    } : {}),
     compactionCount: Math.max(compactionCount, options.persistedCompactionCount || 0, preserveRealtime ? session.compactionCount : 0),
     compactionEventIds: [...new Set([
       ...(options.persistedCompactionEventIds || []),
@@ -478,7 +507,7 @@ export function hydrateClaudeSession(
       activeTurnId: null,
       startedAt: null,
     }),
-  });
+  }, prependHistory);
 }
 
 export function normalizeClaudeModel(value: unknown): ModelOption {

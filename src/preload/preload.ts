@@ -1,7 +1,7 @@
 import { contextBridge, ipcRenderer } from "electron";
 import type { AgentEventEnvelope, AgentInteractionResponse, AgentOperation, AgentProvider, AgentRequestContext } from "../shared/agentProtocol";
 import type { TerminalEvent, TerminalInputRequest, TerminalResizeRequest, TerminalSessionCommand, TerminalSessionRequest } from "../shared/terminalProtocol";
-import type { AgentBridge, ClaudeRuntimeStatus, CodexBridge, CodexCliUpdateStatus, DesktopPreferences, DesktopUpdateStatus, DesktopWindowState, JsonObject, ClientLogEntry } from "../shared/protocol";
+import type { AgentBridge, ClaudeRuntimeStatus, CodexBridge, CodexCliUpdateStatus, DesktopPreferences, DesktopUpdateStatus, DesktopWindowState, ExternalTerminalStatus, JsonObject, ClientLogEntry } from "../shared/protocol";
 
 const bridge: Omit<CodexBridge, "request" | "respond" | "onMessage"> = {
   getWorkspace() {
@@ -57,6 +57,12 @@ const bridge: Omit<CodexBridge, "request" | "respond" | "onMessage"> = {
   },
   openExternal(url: string) {
     return ipcRenderer.invoke("agentdesk:open-external", url);
+  },
+  openExternalTerminal(input: { cwd: string; sessionId: string; resume?: boolean }) {
+    return ipcRenderer.invoke("agentdesk:open-external-terminal", input);
+  },
+  getExternalTerminalStatus(input: { cwd: string; sessionId: string }): Promise<ExternalTerminalStatus> {
+    return ipcRenderer.invoke("agentdesk:external-terminal-status", input);
   },
   showNotification(notification) {
     return ipcRenderer.invoke("agentdesk:show-notification", notification);
@@ -180,6 +186,8 @@ const agentBridge: AgentBridge = {
   readLocalImage: bridge.readLocalImage,
   openLocalPath: bridge.openLocalPath,
   openExternal: bridge.openExternal,
+  openExternalTerminal: bridge.openExternalTerminal,
+  getExternalTerminalStatus: bridge.getExternalTerminalStatus,
   showNotification: bridge.showNotification,
   getWindowState: bridge.getWindowState,
   minimizeWindow: bridge.minimizeWindow,
