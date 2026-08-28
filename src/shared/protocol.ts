@@ -215,6 +215,9 @@ export type CodexCliUpdatePhase =
 export interface CodexCliUpdateStatus {
   phase: CodexCliUpdatePhase;
   currentVersion: string;
+  installSource?: "npm" | "native" | "custom" | "missing";
+  executablePath?: string;
+  detectedAt?: number;
   latestVersion?: string;
   checkedAt?: number;
   nextCheckAt?: number;
@@ -226,7 +229,9 @@ export type ClaudeCodeUpdatePhase = "idle" | "checking" | "upToDate" | "availabl
 export interface ClaudeRuntimeStatus {
   phase: ClaudeCodeUpdatePhase;
   binarySource: "managed" | "sdk" | "external";
-  installSource?: "npm" | "winget" | "managed" | "unknown";
+  installSource?: "npm" | "winget" | "managed" | "native" | "custom" | "unknown";
+  executablePath?: string;
+  detectedAt?: number;
   binaryVersion: string;
   sdkVersion: string;
   latestVersion?: string;

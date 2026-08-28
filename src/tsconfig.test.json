@@ -20,6 +20,8 @@
     "main/clipboardImageData.test.ts",
     "main/codexHome.ts",
     "main/codexHome.test.ts",
+    "main/cliRuntime.ts",
+    "main/cliRuntime.test.ts",
     "main/executablePath.ts",
     "main/executablePath.test.ts",
     "main/logger.ts",

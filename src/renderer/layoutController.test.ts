@@ -124,28 +124,42 @@ describe("LayoutController", () => {
     assert.equal(harness.layout.activePaneId, "pane-2");
   });
 
-  it("creates at most two panes and merges a closed pane into its neighbor", () => {
+  it("creates an empty pane without creating a Provider session", () => {
     const harness = createHarness();
 
     harness.controller.splitPane("pane-1");
     assert.equal(harness.layout.panes.length, 2);
+    assert.deepEqual(harness.layout.panes[1].tabIds, []);
+    assert.equal(harness.layout.panes[1].activeTabId, "");
+    assert.equal(Object.keys(harness.sessions).length, 3);
     harness.controller.splitPane("pane-1");
     assert.equal(harness.layout.panes.length, 2);
+    assert.deepEqual(harness.layout.panes[1].tabIds, []);
 
     const closingPane = harness.layout.panes[1];
     harness.controller.closePane(closingPane.id);
     assert.equal(harness.layout.panes.length, 1);
-    assert.ok(harness.layout.panes.some((pane) => pane.tabIds.includes(closingPane.activeTabId)));
+    assert.equal(harness.layout.panes[0].activeTabId, "s1");
   });
 
-  it("inherits the active Claude Provider when creating split panes", () => {
+  it("adds a chosen Provider to the empty pane", () => {
     const harness = createHarness();
-    harness.sessions.s1.provider = "claude";
 
     harness.controller.splitPane("pane-1");
+    const created = harness.controller.addSessionToPane(harness.layout.panes[1].id, "D:\\claude", { provider: "claude" });
 
-    const created = harness.layout.panes[1].activeTabId;
     assert.equal(harness.sessions[created].provider, "claude");
+    assert.deepEqual(harness.layout.panes[1].tabIds, [created]);
+    assert.equal(harness.layout.panes[1].activeTabId, created);
+  });
+
+  it("closes an active empty pane instead of doing nothing", async () => {
+    const harness = createHarness();
+    harness.controller.splitPane("pane-1");
+
+    assert.equal(await harness.controller.closeActiveTab(), true);
+    assert.equal(harness.layout.panes.length, 1);
+    assert.equal(harness.layout.activePaneId, "pane-1");
   });
 
   it("does not create a third pane through split-drop", () => {

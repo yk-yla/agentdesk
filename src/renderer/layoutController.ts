@@ -154,11 +154,10 @@ export class LayoutController {
     if (current.panes.length >= 2) return;
     const pane = current.panes.find((entry) => entry.id === paneId);
     if (!pane) return;
-    const sourceSession = this.state.getSession(pane.activeTabId);
-    const cwd = sourceSession?.cwd || "";
-    const provider = sourceSession?.provider;
-    const sessionId = this.services.createSession(cwd, provider ? { provider } : undefined);
-    const addition = { id: this.nextPaneId(), tabIds: [sessionId], activeTabId: sessionId };
+    // Splitting is a layout operation. The new pane stays empty until the
+    // user chooses a directory and Provider, so it cannot create a provider-
+    // specific placeholder that has no native session ID.
+    const addition = { id: this.nextPaneId(), tabIds: [], activeTabId: "" };
     this.state.updateLayout((layout) => ({ ...layout, panes: [...layout.panes, addition], activePaneId: addition.id }));
   };
 
@@ -171,12 +170,15 @@ export class LayoutController {
       const receiver = current.panes[index > 0 ? index - 1 : index + 1];
       const mergedTabIds = [...receiver.tabIds, ...closing.tabIds.filter((id) => !receiver.tabIds.includes(id))];
       const closingWasActive = current.activePaneId === paneId;
+      const mergedActiveTabId = closingWasActive
+        ? closing.activeTabId || receiver.activeTabId || mergedTabIds[0] || ""
+        : receiver.activeTabId || mergedTabIds[0] || "";
       return {
         ...current,
         panes: current.panes
           .filter((pane) => pane.id !== paneId)
           .map((pane) => pane.id === receiver.id
-            ? { ...pane, tabIds: mergedTabIds, activeTabId: closingWasActive ? closing.activeTabId : pane.activeTabId }
+            ? { ...pane, tabIds: mergedTabIds, activeTabId: mergedActiveTabId }
             : pane),
         activePaneId: closingWasActive ? receiver.id : current.activePaneId,
       };
@@ -187,6 +189,11 @@ export class LayoutController {
     const current = this.state.getLayout();
     const pane = current.panes.find((entry) => entry.id === current.activePaneId) ?? current.panes[0];
     if (!pane) return false;
+    if (!pane.tabIds.length) {
+      if (current.panes.length <= 1) return false;
+      this.closePane(pane.id);
+      return true;
+    }
     const sessionId = pane.activeTabId;
     const session = this.state.getSession(sessionId);
     if (!session) return false;

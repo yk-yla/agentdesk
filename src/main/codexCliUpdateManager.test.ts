@@ -4,20 +4,13 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import { describe, it } from "node:test";
 import type { CodexCliUpdateStatus } from "../shared/protocol";
-import { CodexCliUpdateManager, compareVersions, findCodexAppServerRoots } from "./codexCliUpdateManager";
+import { CodexCliUpdateManager, compareVersions } from "./codexCliUpdateManager";
 import { ProcessSupervisor } from "./processSupervisor";
 
 describe("CodexCliUpdateManager", () => {
-  it("compares releases and finds the outer app-server process root", () => {
+  it("compares releases", () => {
     assert.equal(compareVersions("1.2.4", "1.2.3") > 0, true);
     assert.equal(compareVersions("v1.2.3", "1.2.3"), 0);
-    const roots = findCodexAppServerRoots([
-      { pid: 1, parentPid: 0, name: "cmd.exe", commandLine: "codex.cmd app-server" },
-      { pid: 2, parentPid: 1, name: "node.exe", commandLine: "@openai/codex app-server" },
-      { pid: 3, parentPid: 0, name: "node.exe", commandLine: "unrelated.js" },
-      { pid: 4, parentPid: 0, name: "node.exe", commandLine: "feishu-codex-bridge.js --app-server" },
-    ]);
-    assert.deepEqual(roots.map((entry) => entry.pid), [1, 4]);
   });
 
   it("serializes check and update while restoring the local app-server", async () => {
@@ -38,12 +31,12 @@ describe("CodexCliUpdateManager", () => {
         isQuitting: () => false,
         emitStatus: (status) => statuses.push(status),
         notify: (title) => notifications.push(title),
+        isCliInUse: async () => false,
         environment: {},
         operations: {
           readInstalledVersion: async () => installed,
           readLatestVersion: async () => "1.1.0",
           installVersion: async (version) => { installed = version; },
-          readAppServerProcesses: async () => [],
         },
       });
 
@@ -58,7 +51,7 @@ describe("CodexCliUpdateManager", () => {
     }
   });
 
-  it("terminates external app-servers before updating", async () => {
+  it("blocks updating without terminating an external Codex process", async () => {
     const directory = mkdtempSync(path.join(tmpdir(), "agentdesk-codex-external-"));
     let closeCount = 0;
     let installCount = 0;
@@ -76,26 +69,23 @@ describe("CodexCliUpdateManager", () => {
         isQuitting: () => false,
         emitStatus: () => undefined,
         notify: () => undefined,
+        isCliInUse: async () => true,
         environment: {},
         operations: {
           readInstalledVersion: async () => installed,
           readLatestVersion: async () => "1.1.0",
           installVersion: async (version) => { installCount += 1; installed = version; },
-          readAppServerProcesses: async () => [
-            { pid: 9001, parentPid: 0, name: "codex.exe", commandLine: "codex.exe app-server" },
-            { pid: 9004, parentPid: 0, name: "node.exe", commandLine: "feishu-bridge --app-server" },
-          ],
-          terminateAppServerProcess: async (pid) => { terminated.push(pid); },
         },
       });
 
       await manager.check(true);
       const status = await manager.update();
 
-      assert.equal(status.phase, "upToDate");
-      assert.equal(closeCount, 1);
-      assert.equal(installCount, 1);
-      assert.deepEqual(terminated, [9001, 9004]);
+      assert.equal(status.phase, "error");
+      assert.match(status.message, /正在被会话使用/);
+      assert.equal(closeCount, 0);
+      assert.equal(installCount, 0);
+      assert.deepEqual(terminated, []);
       manager.dispose();
     } finally {
       rmSync(directory, { recursive: true, force: true });
@@ -124,12 +114,12 @@ describe("CodexCliUpdateManager", () => {
         isQuitting: () => false,
         emitStatus: () => undefined,
         notify: () => undefined,
+        isCliInUse: async () => false,
         environment: {},
         operations: {
           readInstalledVersion: async () => installed,
           readLatestVersion: async () => "1.1.0",
           installVersion: async (version) => { installed = version; },
-          readAppServerProcesses: async () => [],
         },
       });
 
@@ -143,7 +133,7 @@ describe("CodexCliUpdateManager", () => {
     }
   });
 
-  it("continues updating when an external app-server cannot be terminated", async () => {
+  it("never terminates an external app-server", async () => {
     const directory = mkdtempSync(path.join(tmpdir(), "agentdesk-codex-terminate-failure-"));
     let installCount = 0;
     let installed = "1.0.0";
@@ -155,28 +145,27 @@ describe("CodexCliUpdateManager", () => {
         isQuitting: () => false,
         emitStatus: () => undefined,
         notify: () => undefined,
+        isCliInUse: async () => true,
         environment: {},
         operations: {
           readInstalledVersion: async () => installed,
           readLatestVersion: async () => "1.1.0",
           installVersion: async (version) => { installCount += 1; installed = version; },
-          readAppServerProcesses: async () => [{ pid: 9002, parentPid: 0, name: "node.exe", commandLine: "bridge --app-server" }],
-          terminateAppServerProcess: async () => { throw new Error("access denied"); },
         },
       });
 
       await manager.check(true);
       const status = await manager.update();
 
-      assert.equal(status.phase, "upToDate");
-      assert.equal(installCount, 1);
+      assert.equal(status.phase, "error");
+      assert.equal(installCount, 0);
       manager.dispose();
     } finally {
       rmSync(directory, { recursive: true, force: true });
     }
   });
 
-  it("continues updating when AgentDesk app-server graceful close fails", async () => {
+  it("cancels updating when an AgentDesk app-server cannot close safely", async () => {
     const directory = mkdtempSync(path.join(tmpdir(), "agentdesk-codex-close-failure-"));
     let installed = "1.0.0";
     let terminated = 0;
@@ -192,21 +181,20 @@ describe("CodexCliUpdateManager", () => {
         isQuitting: () => false,
         emitStatus: () => undefined,
         notify: () => undefined,
+        isCliInUse: async () => false,
         environment: {},
         operations: {
           readInstalledVersion: async () => installed,
           readLatestVersion: async () => "1.1.0",
           installVersion: async (version) => { installed = version; },
-          readAppServerProcesses: async () => [{ pid: 9003, parentPid: 0, name: "node.exe", commandLine: "codex app-server" }],
-          terminateAppServerProcess: async () => { terminated += 1; },
         },
       });
 
       await manager.check(true);
       const status = await manager.update();
 
-      assert.equal(status.phase, "upToDate");
-      assert.equal(terminated, 1);
+      assert.equal(status.phase, "error");
+      assert.equal(terminated, 0);
       manager.dispose();
     } finally {
       rmSync(directory, { recursive: true, force: true });

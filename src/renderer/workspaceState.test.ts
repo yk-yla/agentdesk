@@ -70,6 +70,7 @@ describe("update workspace state budgets", () => {
   it("restores a multi-workspace snapshot even when the launch workspace differs", () => {
     const left = emptySession("left", "C:\\left");
     const right = emptySession("right", "D:\\right", "sonnet", "medium", "claude");
+    right.threadId = "claude-thread";
     const state = createWorkspaceState({
       workspace: right.cwd,
       layout: {
@@ -91,6 +92,59 @@ describe("update workspace state budgets", () => {
     assert.equal(restored?.layout.panes.length, 2);
     assert.equal(restored?.layout.activePaneId, "pane-right");
     assert.equal(restored?.sessions.right.cwd, "D:\\right");
+  });
+
+  it("preserves an empty pane so the user can choose its first Provider later", () => {
+    const left = emptySession("left", "C:\\left");
+    const state = createWorkspaceState({
+      workspace: left.cwd,
+      layout: {
+        panes: [
+          { id: "pane-left", tabIds: [left.id], activeTabId: left.id },
+          { id: "pane-right", tabIds: [], activeTabId: "" },
+        ],
+        activePaneId: "pane-right",
+      },
+      sessions: { [left.id]: left },
+      drafts: new Map(),
+      attachments: {},
+      queuedMessages: {},
+      pendingSteers: {},
+      sidebarCollapsed: false,
+    });
+
+    const restored = parseWorkspaceState(state, left.cwd);
+    assert.equal(restored?.layout.panes.length, 2);
+    assert.deepEqual(restored?.layout.panes[1], { id: "pane-right", tabIds: [], activeTabId: "" });
+    assert.equal(restored?.layout.activePaneId, "pane-right");
+  });
+
+  it("migrates an old Claude placeholder tab into an empty pane", () => {
+    const codex = emptySession("codex", "C:\\work");
+    const state = createWorkspaceState({
+      workspace: codex.cwd,
+      layout: {
+        panes: [
+          { id: "pane-left", tabIds: [codex.id], activeTabId: codex.id },
+          { id: "pane-right", tabIds: ["old-claude-placeholder"], activeTabId: "old-claude-placeholder" },
+        ],
+        activePaneId: "pane-right",
+      },
+      sessions: {
+        [codex.id]: codex,
+        "old-claude-placeholder": emptySession("old-claude-placeholder", codex.cwd, "", "", "claude"),
+      },
+      drafts: new Map(),
+      attachments: {},
+      queuedMessages: {},
+      pendingSteers: {},
+      sidebarCollapsed: false,
+    });
+
+    const restored = parseWorkspaceState(state, codex.cwd);
+    assert.equal(restored?.sessions["old-claude-placeholder"], undefined);
+    assert.deepEqual(restored?.layout.panes[1], { id: "pane-right", tabIds: [], activeTabId: "" });
+    assert.equal(restored?.layout.activePaneId, "pane-right");
   });
 
   it("caps oversized drafts and records truncation", () => {

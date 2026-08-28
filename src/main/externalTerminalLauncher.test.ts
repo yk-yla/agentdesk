@@ -23,6 +23,21 @@ describe("external terminal launcher", () => {
     assert.equal(Buffer.from(promptMatch[1], "base64").toString("utf8"), "请读取交接文件并继续任务。");
   });
 
+  it("uses the Claude executable recorded at startup", () => {
+    const args = expandExternalTerminalArgs({
+      kind: "windows-terminal",
+      executable: "wt.exe",
+      argsTemplate: '-d "{cwd}" powershell.exe -NoExit -Command "claude --session-id {sessionId}"',
+    }, "C:\\Apps\\wt.exe", {
+      cwd: "C:\\work",
+      sessionId: "12345678-1234-4234-8234-123456789abc",
+      resume: false,
+      initialPrompt: "",
+      cliExecutable: "C:\\Program Files\\Claude\\claude.exe",
+    });
+    assert.match(args.at(-1) || "", /^& 'C:\\Program Files\\Claude\\claude\.exe' --session-id/);
+  });
+
   it("keeps command prompt handoff text as one Claude argument", () => {
     const args = expandExternalTerminalArgs({
       kind: "command-prompt",

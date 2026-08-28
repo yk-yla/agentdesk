@@ -1,11 +1,12 @@
 import { spawn } from "node:child_process";
-import { existsSync, mkdirSync, readFileSync } from "node:fs";
+import { mkdirSync, readFileSync } from "node:fs";
 import path from "node:path";
 import type { CodexCliUpdateStatus } from "../shared/protocol";
 import { SingleFlight } from "./asyncOperation";
 import { writeTextFileAtomicAsync } from "./atomicFile";
-import { ProcessSupervisor, terminateWindowsProcessTree } from "./processSupervisor";
+import { ProcessSupervisor } from "./processSupervisor";
 import { CLI_VERSION_PATTERN, compareVersions } from "./version";
+import { cliExecutableExists, detectCliRuntime, hasCliProcess, readCliVersion, readWindowsProcesses, type CliRuntimeSnapshot } from "./cliRuntime";
 
 export { compareVersions } from "./version";
 
@@ -13,18 +14,13 @@ const CODEX_CLI_PACKAGE = "@openai/codex";
 const CLI_CHECK_INTERVAL_MS = 6 * 60 * 60 * 1000;
 const CLI_RETRY_MS = 30 * 60 * 1000;
 const CLI_NPM_UPDATE_TIMEOUT_MS = 30 * 60 * 1000;
-const APP_SERVER_SCAN_TIMEOUT_MS = 10_000;
 
 interface CodexCliUpdateCache {
+  schema: 2;
+  source: string;
+  executablePath: string;
   latestVersion: string;
   checkedAt: number;
-}
-
-export interface WindowsProcessSnapshot {
-  pid: number;
-  parentPid: number;
-  name: string;
-  commandLine: string;
 }
 
 interface CodexAppServerControl {
@@ -37,8 +33,6 @@ interface CodexCliUpdateOperations {
   readInstalledVersion(): Promise<string>;
   readLatestVersion(): Promise<string>;
   installVersion(version: string): Promise<void>;
-  readAppServerProcesses(): Promise<WindowsProcessSnapshot[]>;
-  terminateAppServerProcess(pid: number): Promise<void>;
 }
 
 export interface CodexCliUpdateManagerDependencies {
@@ -53,30 +47,9 @@ export interface CodexCliUpdateManagerDependencies {
   environment?: NodeJS.ProcessEnv;
   platform?: NodeJS.Platform;
   operations?: Partial<CodexCliUpdateOperations>;
-}
-
-export function isCodexAppServerProcess(processEntry: WindowsProcessSnapshot) {
-  const commandLine = processEntry.commandLine;
-  return /(?:^|[\s"'])(?:--)?app-server(?:$|[\s"'])/i.test(commandLine);
-}
-
-export function findCodexAppServerRoots(processes: WindowsProcessSnapshot[]) {
-  const byPid = new Map(processes.map((entry) => [entry.pid, entry]));
-  const candidates = processes.filter(isCodexAppServerProcess);
-  const candidateIds = new Set(candidates.map((entry) => entry.pid));
-  const roots = new Map<number, WindowsProcessSnapshot>();
-  for (const candidate of candidates) {
-    let root = candidate;
-    const visited = new Set<number>([root.pid]);
-    while (candidateIds.has(root.parentPid) && !visited.has(root.parentPid)) {
-      const parent = byPid.get(root.parentPid);
-      if (!parent) break;
-      root = parent;
-      visited.add(root.pid);
-    }
-    roots.set(root.pid, root);
-  }
-  return [...roots.values()];
+  runtimeSnapshot?: () => CliRuntimeSnapshot;
+  isCliInUse?: () => Promise<boolean>;
+  fetch?: (url: string, init?: RequestInit) => Promise<Response>;
 }
 
 export class CodexCliUpdateManager {
@@ -89,6 +62,7 @@ export class CodexCliUpdateManager {
     currentVersion: "",
     message: "正在读取 Codex CLI 版本。",
   };
+  private snapshot: CliRuntimeSnapshot | null = null;
 
   constructor(private readonly dependencies: CodexCliUpdateManagerDependencies) {}
 
@@ -110,6 +84,7 @@ export class CodexCliUpdateManager {
   }
 
   async initialize() {
+    this.snapshot = this.dependencies.runtimeSnapshot?.() || detectCliRuntime("codex", this.environment());
     const currentVersion = await this.readInstalledVersion();
     const cache = this.readCache();
     if (!currentVersion) {
@@ -158,10 +133,11 @@ export class CodexCliUpdateManager {
       } catch {
         if (retrying) {
           this.scheduleCheck(CLI_CHECK_INTERVAL_MS);
-          return this.setStatus({ phase: "error", currentVersion, message: "重试失败，将按 6 小时周期再检查。" });
+          return this.setStatus({ phase: "error", currentVersion, message: "重试失败，请检查网络后手动重试。" });
         }
         this.scheduleCheck(CLI_RETRY_MS, true);
-        return this.setStatus({ phase: "error", currentVersion, message: "无法连接 npm 仓库，请检查网络连接。如果使用了镜像源请确认镜像地址可用，30 分钟后将自动重试。" });
+        const sourceName = this.snapshot?.updateStrategy === "self" ? "GitHub（需要外网环境）" : "npm 仓库";
+        return this.setStatus({ phase: "error", currentVersion, message: `无法连接 ${sourceName}，请检查网络后手动重试。` });
       }
     }).finally(() => {
       this.checkPromise = null;
@@ -186,23 +162,27 @@ export class CodexCliUpdateManager {
       };
       try {
         if (this.dependencies.isQuitting()) return this.currentStatus();
-        if (this.environment().CODEX_DESKTOP_CLI) throw new Error("当前使用自定义 Codex CLI，请按自定义来源更新。");
+        if (this.snapshot?.source === "custom") throw new Error("当前使用自定义 Codex CLI，请按自定义来源更新。");
         currentVersion = await this.readInstalledVersion();
         if (this.dependencies.isQuitting()) return this.currentStatus();
         if (!currentVersion) return this.setStatus({ phase: "notInstalled", currentVersion: "", message: "未检测到全局安装的 Codex CLI。" });
+        if (this.snapshot?.executablePath && !cliExecutableExists(this.snapshot.executablePath)) throw new Error("启动时记录的 Codex CLI 文件已不存在，请重启 AgentDesk 使安装信息刷新。");
+        if (this.snapshot?.source === "missing") return this.setStatus({ phase: "notInstalled", currentVersion: "", message: "未检测到 Codex CLI，请重启 AgentDesk 后重试。" });
         if (!latestVersion || !CLI_VERSION_PATTERN.test(latestVersion) || compareVersions(latestVersion, currentVersion) <= 0) {
           return this.setStatus({ phase: "upToDate", currentVersion, latestVersion: latestVersion || currentVersion, checkedAt: Date.now(), message: "当前已经是最新版本。" });
         }
         this.dispose();
+        if (await this.isCliInUse()) throw new Error("Codex CLI 正在被会话使用，请先关闭相关会话后再更新。");
         shouldRestartLocalAppServer = this.dependencies.appServer.isRunning;
         this.suppressExitNotification = shouldRestartLocalAppServer;
         this.setStatus({ phase: "updating", currentVersion, latestVersion, message: "正在停止所有 Codex app-server。", nextCheckAt: undefined });
         await this.prepareAppServerUpdate();
+        if (await this.isCliInUse()) throw new Error("Codex CLI 正在被会话使用，请先关闭相关会话后再更新。");
         if (this.dependencies.isQuitting()) return this.currentStatus();
         this.setStatus({ phase: "updating", currentVersion, latestVersion, message: `正在更新 Codex CLI 到 ${latestVersion}。`, nextCheckAt: undefined });
         await this.installVersion(latestVersion);
         if (this.dependencies.isQuitting()) return this.currentStatus();
-        const installedVersion = await this.readInstalledVersion();
+        const installedVersion = await this.refreshInstalledVersion();
         if (installedVersion !== latestVersion) throw new Error(`更新后检测到版本 ${installedVersion || "未知"}，不是 ${latestVersion}。`);
         const restartError = await restoreLocalAppServer();
         const checkedAt = Date.now();
@@ -235,21 +215,20 @@ export class CodexCliUpdateManager {
   }
 
   private setStatus(patch: Partial<CodexCliUpdateStatus>) {
-    this.status = { ...this.status, ...patch };
+    const installSource = this.snapshot?.source === "npm" || this.snapshot?.source === "native" || this.snapshot?.source === "custom" ? this.snapshot.source : "missing";
+    this.status = { ...this.status, ...patch, ...(this.snapshot ? { installSource, executablePath: this.snapshot.executablePath, detectedAt: this.snapshot.detectedAt } : {}) };
     const status = this.currentStatus();
     this.dependencies.emitStatus(status);
     return status;
   }
 
   private scheduleCheck(delayMs: number, retrying = false) {
+    // 安装来源和程序路径只在启动时快照；运行期间不再后台扫描或切换。
+    // 保留该方法以兼容旧缓存/调用路径，但不创建定时器。
+    void delayMs;
+    void retrying;
     this.dispose();
-    const safeDelay = Math.max(1_000, Math.min(delayMs, 2_147_000_000));
-    this.timer = setTimeout(() => {
-      this.timer = null;
-      void this.check(false, retrying);
-    }, safeDelay);
-    this.timer.unref?.();
-    this.setStatus({ nextCheckAt: Date.now() + safeDelay });
+    this.setStatus({ nextCheckAt: undefined });
   }
 
   private cachePath() {
@@ -259,28 +238,70 @@ export class CodexCliUpdateManager {
   private readCache(): CodexCliUpdateCache | null {
     try {
       const parsed = JSON.parse(readFileSync(this.cachePath(), "utf8")) as Partial<CodexCliUpdateCache>;
+      if (parsed.schema !== 2 || typeof parsed.source !== "string" || typeof parsed.executablePath !== "string" || parsed.source !== this.snapshot?.source || parsed.executablePath !== this.snapshot?.executablePath) return null;
       if (typeof parsed.latestVersion !== "string" || !parsed.latestVersion || typeof parsed.checkedAt !== "number" || !Number.isFinite(parsed.checkedAt)) return null;
-      return { latestVersion: parsed.latestVersion, checkedAt: parsed.checkedAt };
+      return { schema: 2, source: parsed.source, executablePath: parsed.executablePath, latestVersion: parsed.latestVersion, checkedAt: parsed.checkedAt };
     } catch {
       return null;
     }
   }
 
-  private async writeCache(cache: CodexCliUpdateCache) {
+  private async writeCache(cache: Pick<CodexCliUpdateCache, "latestVersion" | "checkedAt">) {
     mkdirSync(this.dependencies.userDataPath(), { recursive: true });
-    await writeTextFileAtomicAsync(this.cachePath(), JSON.stringify(cache, null, 2));
+    await writeTextFileAtomicAsync(this.cachePath(), JSON.stringify({ schema: 2, source: this.snapshot?.source || "missing", executablePath: this.snapshot?.executablePath || "", ...cache }, null, 2));
   }
 
   private readInstalledVersion() {
-    return this.dependencies.operations?.readInstalledVersion?.() || this.readInstalledVersionFromNpm();
+    if (this.dependencies.operations?.readInstalledVersion) return this.dependencies.operations.readInstalledVersion();
+    if (this.snapshot) return Promise.resolve(this.snapshot.currentVersion);
+    return this.readInstalledVersionFromNpm();
+  }
+
+  private refreshInstalledVersion() {
+    if (this.dependencies.operations?.readInstalledVersion) return this.dependencies.operations.readInstalledVersion();
+    if (!this.snapshot?.executablePath) return Promise.resolve("");
+    const currentVersion = readCliVersion(this.snapshot.executablePath, this.environment());
+    this.snapshot = { ...this.snapshot, currentVersion };
+    return Promise.resolve(currentVersion);
   }
 
   private readLatestVersion() {
-    return this.dependencies.operations?.readLatestVersion?.() || this.readLatestVersionFromNpm();
+    if (this.dependencies.operations?.readLatestVersion) return this.dependencies.operations.readLatestVersion();
+    if (this.snapshot?.updateStrategy === "self" && this.dependencies.fetch) return this.readLatestVersionFromGithub();
+    return this.readLatestVersionFromNpm();
+  }
+
+  private async readLatestVersionFromGithub() {
+    const response = await this.dependencies.fetch!("https://api.github.com/repos/openai/codex/releases/latest", { headers: { Accept: "application/vnd.github+json", "User-Agent": "AgentDesk" } });
+    if (!response.ok) throw new Error(`Codex 发布源返回 ${response.status}。`);
+    const value = await response.json() as { tag_name?: unknown };
+    const version = typeof value.tag_name === "string" ? value.tag_name.replace(/^(?:rust-)?v/i, "") : "";
+    if (!CLI_VERSION_PATTERN.test(version)) throw new Error("Codex 发布源没有返回有效版本。");
+    return version;
   }
 
   private installVersion(version: string) {
-    return this.dependencies.operations?.installVersion?.(version) || this.installVersionWithNpm(version);
+    if (this.dependencies.operations?.installVersion) return this.dependencies.operations.installVersion(version);
+    if (this.snapshot?.updateStrategy === "self" && this.snapshot.executablePath) return this.installVersionWithSelf(version);
+    return this.installVersionWithNpm(version);
+  }
+
+  private installVersionWithSelf(version: string) {
+    const executable = this.snapshot?.executablePath || "codex";
+    const isShim = /\.(?:cmd|bat)$/i.test(executable);
+    const command = isShim ? this.environment().ComSpec || "cmd.exe" : executable;
+    const args = isShim ? ["/d", "/s", "/c", `""${executable}" update"`] : ["update"];
+    return this.runExternalCommand(command, args, CLI_NPM_UPDATE_TIMEOUT_MS);
+  }
+
+  private async isCliInUse() {
+    if (this.dependencies.isCliInUse) return this.dependencies.isCliInUse();
+    if (this.platform() !== "win32") return false;
+    try {
+      return hasCliProcess(await readWindowsProcesses({ environment: this.environment(), track: (child) => this.dependencies.processSupervisor.track(child), terminate: (child) => this.dependencies.processSupervisor.terminate(child) }), "codex");
+    } catch {
+      throw new Error("无法确认 Codex 是否正在使用，为避免中断会话，本次更新已取消。");
+    }
   }
 
   private async readInstalledVersionFromNpm() {
@@ -351,7 +372,7 @@ export class CodexCliUpdateManager {
   }
 
   private async installVersionWithNpm(version: string) {
-    if (this.environment().CODEX_DESKTOP_CLI) throw new Error("当前使用自定义 Codex CLI，请按自定义来源更新。");
+    if (this.snapshot?.source === "custom") throw new Error("当前使用自定义 Codex CLI，请按自定义来源更新。");
     const executable = this.platform() === "win32" ? this.environment().ComSpec || "cmd.exe" : "npm";
     const args = this.platform() === "win32"
       ? ["/d", "/s", "/c", `npm.cmd install -g ${CODEX_CLI_PACKAGE}@${version}`]
@@ -396,95 +417,14 @@ export class CodexCliUpdateManager {
     });
   }
 
-  private async readWindowsProcessSnapshot(): Promise<WindowsProcessSnapshot[]> {
-    if (this.platform() !== "win32") return [];
-    const systemRoot = this.environment().SystemRoot;
-    const bundledPowerShell = systemRoot ? path.join(systemRoot, "System32", "WindowsPowerShell", "v1.0", "powershell.exe") : "";
-    const powershell = bundledPowerShell && existsSync(bundledPowerShell) ? bundledPowerShell : "powershell.exe";
-    const command = "Get-CimInstance Win32_Process | Select-Object ProcessId,ParentProcessId,Name,CommandLine | ConvertTo-Json -Compress";
-    const output = await new Promise<string>((resolve, reject) => {
-      const child = this.dependencies.processSupervisor.track(spawn(powershell, ["-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-Command", command], {
-        windowsHide: true,
-        shell: false,
-        stdio: ["ignore", "pipe", "pipe"],
-      }));
-      let settled = false;
-      let timedOut = false;
-      let stdout = "";
-      let stderr = "";
-      const append = (current: string, chunk: string) => `${current}${chunk}`.slice(-4 * 1024 * 1024);
-      child.stdout.on("data", (chunk: Buffer | string) => { stdout = append(stdout, chunk.toString()); });
-      child.stderr.on("data", (chunk: Buffer | string) => { stderr = append(stderr, chunk.toString()); });
-      const timer = setTimeout(() => {
-        if (settled) return;
-        timedOut = true;
-        void this.dependencies.processSupervisor.terminate(child).finally(() => {
-          if (settled) return;
-          settled = true;
-          reject(new Error("读取本机进程列表超时。"));
-        });
-      }, APP_SERVER_SCAN_TIMEOUT_MS);
-      child.once("error", (error) => {
-        if (settled) return;
-        settled = true;
-        clearTimeout(timer);
-        reject(error);
-      });
-      child.once("exit", (code) => {
-        if (settled || timedOut) return;
-        settled = true;
-        clearTimeout(timer);
-        if (code !== 0) reject(new Error(stderr.trim() || "无法读取本机进程列表。"));
-        else if (!stdout.trim()) reject(new Error(stderr.trim() || "无法读取本机进程列表。"));
-        else resolve(stdout.trim());
-      });
-    });
-    let parsed: unknown;
-    try {
-      parsed = JSON.parse(output);
-    } catch {
-      throw new Error("本机进程列表格式无法识别。");
-    }
-    const entries = Array.isArray(parsed) ? parsed : [parsed];
-    return entries.flatMap((value) => {
-      if (!value || typeof value !== "object" || Array.isArray(value)) return [];
-      const entry = value as Record<string, unknown>;
-      const pid = Number(entry.ProcessId);
-      const parentPid = Number(entry.ParentProcessId);
-      if (!Number.isInteger(pid) || pid <= 0 || !Number.isInteger(parentPid) || parentPid < 0) return [];
-      return [{
-        pid,
-        parentPid,
-        name: typeof entry.Name === "string" ? entry.Name : "",
-        commandLine: typeof entry.CommandLine === "string" ? entry.CommandLine : "",
-      }];
-    });
-  }
-
-  private readAppServerProcesses() {
-    return this.dependencies.operations?.readAppServerProcesses?.() || this.readWindowsProcessSnapshot();
-  }
-
-  private terminateAppServerProcess(pid: number) {
-    return this.dependencies.operations?.terminateAppServerProcess?.(pid)
-      || (this.platform() === "win32" ? terminateWindowsProcessTree(pid) : Promise.resolve());
-  }
-
   async prepareAppServerUpdate() {
     const ownedAppServers = [this.dependencies.appServer, ...(this.dependencies.additionalAppServers || [])];
     // Call close on every owned runtime, including one whose child is still
     // being spawned. CodexAppServer.close() waits for that startup race and
     // prevents an update from leaving a late app-server process alive.
-    await Promise.allSettled(ownedAppServers.map((server) => server.close()));
-    let appServerProcesses: WindowsProcessSnapshot[];
-    try {
-      appServerProcesses = findCodexAppServerRoots(await this.readAppServerProcesses());
-    } catch {
-      // 更新由用户明确触发，无法读取进程列表时也继续执行安装。
-      return;
-    }
-    if (!appServerProcesses.length) return;
-    await Promise.allSettled(appServerProcesses.map((entry) => this.terminateAppServerProcess(entry.pid)));
+    const results = await Promise.allSettled(ownedAppServers.map((server) => server.close()));
+    const failure = results.find((result): result is PromiseRejectedResult => result.status === "rejected");
+    if (failure) throw failure.reason;
   }
 
   private errorMessage(error: unknown) {
@@ -492,7 +432,7 @@ export class CodexCliUpdateManager {
     if (/custom Codex CLI|自定义 Codex CLI/i.test(message)) return "当前使用自定义 Codex CLI，请按自定义来源更新。";
     if (/timed out|ETIMEDOUT|timeout|超时/i.test(message)) return "更新超时，请稍后重试。";
     if (/ENOTFOUND|ECONNREFUSED|ECONNRESET|network|net::/i.test(message)) return "无法连接 npm 仓库，请检查网络连接后重试。";
-    if (/app-server|进程列表|无法读取本机进程/i.test(message)) return message;
+    if (/正在被会话使用|无法确认 Codex|启动时记录|app-server|进程列表|无法读取本机进程/i.test(message)) return message;
     return "更新失败，请稍后重试。";
   }
 }

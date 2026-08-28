@@ -78,6 +78,10 @@ export class BackendManager {
     return () => this.listeners.delete(listener);
   }
 
+  rendererSessions() {
+    return this.sessions.rendererSessions();
+  }
+
   async close() {
     if (this.closePromise) return this.closePromise;
     this.closePromise = (async () => {

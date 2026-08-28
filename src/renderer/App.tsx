@@ -20,6 +20,7 @@ import {
   providerDisconnectedMessage,
 } from "./agent/providerRegistry";
 import { createMockAgentBridge } from "./mockBridge";
+import EmptyPane from "./EmptyPane";
 import PaneView from "./PaneView";
 import { appendRawEvent, clearRawEvents } from "./rawEventStore";
 import Sidebar, { type HistoryAction, type SidebarProps } from "./Sidebar";
@@ -1026,6 +1027,12 @@ export default function App() {
     const next = await bridge.chooseWorkspace(workspace);
     if (next) await selectWorkspace(next);
   }, [bridge, selectWorkspace, workspace]);
+
+  const createSessionInPane = useCallback(async (paneId: string, provider: AgentProvider) => {
+    const directory = workspaceRef.current;
+    if (!directory || directory === "正在连接工作区" || directory === "工作区不可用") return;
+    await createSessionInDirectory(directory, provider, { paneId });
+  }, [createSessionInDirectory]);
 
   const chooseDirectoryForSession = useCallback(async (sessionId: string) => {
     const session = sessionsRef.current[sessionId];
@@ -2742,8 +2749,15 @@ export default function App() {
 
   const renderPane = (pane: PaneState) => {
     const sessionIds = pane.tabIds;
-    if (!sessionIds.length) return null;
     return <div className="pane-tab-stack" key={pane.id}>
+      {!sessionIds.length ? <EmptyPane
+        pane={pane}
+        cwd={workspace}
+        isActivePane={pane.id === layout.activePaneId}
+        onFocusPane={focusPane}
+        onChooseWorkspace={chooseWorkspace}
+        onCreateSession={(provider) => createSessionInPane(pane.id, provider)}
+      /> : null}
       {sessionIds.map((sessionId) => {
         const session = sessions[sessionId];
         if (!session) return null;

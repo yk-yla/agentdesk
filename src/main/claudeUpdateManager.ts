@@ -7,6 +7,7 @@ import { CLI_VERSION_PATTERN, compareVersions } from "./version";
 import { hasClaudeCredential, readClaudeCredentials } from "./providers/claude/claudeCredentials";
 import { inspectAndExtractClaudeZip, inspectClaudeExecutable, managedClaudeExecutablePath, replaceClaudeExecutable } from "./providers/claude/claudeUpdater";
 import { resolveExecutableFromPath } from "./executablePath";
+import { cliExecutableExists, detectCliRuntime, hasCliProcess, readCliVersion, readWindowsProcesses, type CliRuntimeSnapshot } from "./cliRuntime";
 
 const CLAUDE_RELEASE_API = "https://api.github.com/repos/anthropics/claude-code/releases/latest";
 const CLAUDE_NPM_PACKAGE = "@anthropic-ai/claude-code";
@@ -16,7 +17,7 @@ const CLAUDE_ASSET_NAME = "claude-win32-x64.zip";
 const CLAUDE_CHECK_INTERVAL_MS = 6 * 60 * 60 * 1000;
 const CLAUDE_RETRY_MS = 30 * 60 * 1000;
 
-export type ClaudeInstallSource = "npm" | "winget" | "managed" | "unknown";
+export type ClaudeInstallSource = "npm" | "winget" | "managed" | "native" | "custom" | "unknown";
 export type ClaudeDownloadSource = "official" | "proxy";
 
 interface PendingClaudeUpdate {
@@ -50,6 +51,8 @@ export interface ClaudeUpdateManagerDependencies {
   processSupervisor?: { track<T extends import("node:child_process").ChildProcess>(child: T): T; terminate(child: import("node:child_process").ChildProcess): Promise<void> };
   platform?: NodeJS.Platform;
   environment?: NodeJS.ProcessEnv;
+  runtimeSnapshot?: () => CliRuntimeSnapshot;
+  isCliInUse?: () => Promise<boolean>;
 }
 
 export function isTrustedClaudeDownloadUrl(value: string) {
@@ -129,6 +132,7 @@ export class ClaudeUpdateManager {
   private timer: ReturnType<typeof setTimeout> | null = null;
   private pendingUpdate: PendingClaudeUpdate | null = null;
   private detectedInstallSource: ClaudeInstallSource | null = null;
+  private snapshot: CliRuntimeSnapshot | null = null;
   private status: ClaudeRuntimeStatus = {
     phase: "idle",
     binarySource: "sdk",
@@ -150,14 +154,15 @@ export class ClaudeUpdateManager {
   currentStatus() {
     const installSource = this.detectInstallSource();
     const managed = installSource === "managed";
-    const binaryVersion = managed ? this.readBinaryVersion(this.managedPath()) : this.readInstalledVersionSync();
+    const binaryVersion = this.snapshot?.currentVersion || (managed ? this.readBinaryVersion(this.managedPath()) : this.readInstalledVersionSync());
     this.status = {
       ...this.status,
       ...this.readCredentialStatus(),
-      binarySource: managed ? "managed" : installSource === "npm" || installSource === "winget" ? "external" : "sdk",
+      binarySource: managed ? "managed" : installSource !== "unknown" ? "external" : "sdk",
       installSource,
       binaryVersion: binaryVersion || this.readSdkVersion(),
       sdkVersion: this.readSdkVersion(),
+      ...(this.snapshot ? { executablePath: this.snapshot.executablePath, detectedAt: this.snapshot.detectedAt } : {}),
     };
     return { ...this.status };
   }
@@ -171,26 +176,51 @@ export class ClaudeUpdateManager {
 
   detectInstallSource(): ClaudeInstallSource {
     if (this.detectedInstallSource) return this.detectedInstallSource;
-    if (existsSync(this.managedPath())) {
+    if (!this.snapshot) {
+      if (this.dependencies.managedExecutablePath && existsSync(this.dependencies.managedExecutablePath())) {
+        const executablePath = this.dependencies.managedExecutablePath();
+        this.snapshot = { provider: "claude", source: "managed", executablePath, currentVersion: this.readBinaryVersion(executablePath), detectedAt: Date.now(), updateStrategy: "self" };
+      } else this.snapshot = this.dependencies.runtimeSnapshot?.() || detectCliRuntime("claude", this.environment());
+    }
+    if (this.snapshot.source === "missing") {
+      this.detectedInstallSource = "unknown";
+      return "unknown";
+    }
+    if (this.snapshot.source === "managed") {
       this.detectedInstallSource = "managed";
       return "managed";
     }
-    const npmShim = resolveExecutableFromPath(this.platform() === "win32" ? "claude.cmd" : "claude");
-    if (npmShim) {
+    if (this.snapshot.source === "native") { this.detectedInstallSource = "native"; return "native"; }
+    if (this.snapshot.source === "winget") { this.detectedInstallSource = "winget"; return "winget"; }
+    if (this.snapshot.source === "custom") { this.detectedInstallSource = "custom"; return "custom"; }
+    if (this.snapshot.source === "npm") {
       this.detectedInstallSource = "npm";
       return "npm";
-    }
-    const exePath = resolveExecutableFromPath("claude.exe");
-    if (exePath) {
-      this.detectedInstallSource = "winget";
-      return "winget";
     }
     this.detectedInstallSource = "unknown";
     return "unknown";
   }
 
+  async initialize() {
+    if (this.dependencies.managedExecutablePath && existsSync(this.dependencies.managedExecutablePath())) {
+      const executablePath = this.dependencies.managedExecutablePath();
+      this.snapshot = { provider: "claude", source: "managed", executablePath, currentVersion: this.readBinaryVersion(executablePath), detectedAt: Date.now(), updateStrategy: "self" };
+    } else this.snapshot = this.dependencies.runtimeSnapshot?.() || detectCliRuntime("claude", this.environment());
+    this.detectedInstallSource = null;
+    const status = this.currentStatus();
+    if (status.installSource !== "unknown") void this.check();
+    return status;
+  }
+
   resetInstallSource() {
     this.detectedInstallSource = null;
+  }
+
+  private refreshSnapshotVersion(fallback = "") {
+    if (!this.snapshot?.executablePath) return fallback;
+    const currentVersion = readCliVersion(this.snapshot.executablePath, this.environment()) || fallback;
+    this.snapshot = { ...this.snapshot, currentVersion };
+    return currentVersion;
   }
 
   async check() {
@@ -226,10 +256,14 @@ export class ClaudeUpdateManager {
     const version = current.latestVersion || "";
     if (installSource === "unknown") return this.setStatus({ phase: "notInstalled", message: "未检测到 Claude Code，请先安装。" });
     if (!CLI_VERSION_PATTERN.test(version)) return this.check();
+    if (this.snapshot?.executablePath && !cliExecutableExists(this.snapshot.executablePath)) return this.setStatus({ phase: "error", message: "启动时记录的 Claude Code 文件已不存在，请重启 AgentDesk 使安装信息刷新。" });
+    if (installSource === "custom") return this.setStatus({ phase: "error", message: "当前使用自定义 Claude Code 路径，请按该路径的安装来源手动更新。" });
     this.busy = true;
     try {
+      if (await this.isCliInUse()) throw new Error("Claude Code 正在被会话使用，请先关闭相关会话后再更新。");
       if (installSource === "npm") return await this.updateViaNpm(version);
       if (installSource === "winget") return await this.updateViaWinget(version);
+      if (installSource === "native") return await this.updateViaNative(version);
       return await this.updateViaManaged(version, allowUnverified);
     } catch (error) {
       return this.setStatus({ phase: "error", message: this.friendlyErrorMessage(error) });
@@ -271,10 +305,32 @@ export class ClaudeUpdateManager {
       ? ["/d", "/s", "/c", `npm.cmd install -g ${CLAUDE_NPM_PACKAGE}@${version}`]
       : ["install", "-g", `${CLAUDE_NPM_PACKAGE}@${version}`];
     await this.runExternalCommand(executable, args, 30 * 60_000);
-    const installedVersion = await this.readInstalledVersionFromNpm();
-    if (installedVersion && installedVersion !== version) throw new Error(`更新后版本 ${installedVersion} 与预期 ${version} 不一致。`);
+    const installedVersion = this.refreshSnapshotVersion(await this.readInstalledVersionFromNpm());
+    if (installedVersion !== version) throw new Error(`更新后版本 ${installedVersion || "未知"} 与预期 ${version} 不一致。`);
     this.resetInstallSource();
     return this.setStatus({ phase: "updated", binaryVersion: installedVersion || version, latestVersion: version, checkedAt: Date.now(), message: `Claude Code 已通过 npm 更新到 ${installedVersion || version}。` });
+  }
+
+  private async updateViaNative(version: string) {
+    const executable = this.snapshot?.executablePath || "claude.exe";
+    const isShim = /\.(?:cmd|bat)$/i.test(executable);
+    const command = isShim ? this.environment().ComSpec || "cmd.exe" : executable;
+    const args = isShim ? ["/d", "/s", "/c", `""${executable}" update"`] : ["update"];
+    this.setStatus({ phase: "updating", message: `正在通过 Claude Code 自身更新到 ${version}。` });
+    await this.runExternalCommand(command, args, 30 * 60_000);
+    const installedVersion = this.refreshSnapshotVersion();
+    if (installedVersion !== version) throw new Error(`更新后版本 ${installedVersion || "未知"} 与预期 ${version} 不一致。`);
+    return this.setStatus({ phase: "updated", binaryVersion: installedVersion, latestVersion: installedVersion, checkedAt: Date.now(), message: `Claude Code 已更新到 ${installedVersion}。` });
+  }
+
+  private async isCliInUse() {
+    if (this.dependencies.isCliInUse) return this.dependencies.isCliInUse();
+    if (this.platform() !== "win32") return false;
+    try {
+      return hasCliProcess(await readWindowsProcesses({ environment: this.environment(), track: (child) => this.dependencies.processSupervisor?.track(child), terminate: async (child) => { await this.dependencies.processSupervisor?.terminate(child); } }), "claude");
+    } catch {
+      throw new Error("无法确认 Claude Code 是否正在使用，为避免中断会话，本次更新已取消。");
+    }
   }
 
   private async updateViaWinget(version: string) {
@@ -282,7 +338,8 @@ export class ClaudeUpdateManager {
     await this.dependencies.shutdownQueries();
     await this.runExternalCommand("winget.exe", ["upgrade", "Anthropic.ClaudeCode", "--silent", "--accept-source-agreements"], 10 * 60_000);
     this.resetInstallSource();
-    const installedVersion = this.readInstalledVersionSync() || version;
+    const installedVersion = this.refreshSnapshotVersion();
+    if (installedVersion !== version) throw new Error(`更新后版本 ${installedVersion || "未知"} 与预期 ${version} 不一致。`);
     return this.setStatus({ phase: "updated", binaryVersion: installedVersion, latestVersion: version, checkedAt: Date.now(), message: `Claude Code 已通过 winget 更新到 ${installedVersion}。` });
   }
 
@@ -329,6 +386,7 @@ export class ClaudeUpdateManager {
       if (this.pendingUpdate.directory) await fsPromises.rm(this.pendingUpdate.directory, { recursive: true, force: true });
       this.pendingUpdate = null;
       this.resetInstallSource();
+      if (this.snapshot) this.snapshot = { ...this.snapshot, currentVersion: installed.version };
       return this.setStatus({ phase: "updated", binaryVersion: installed.version, latestVersion: installed.version, checkedAt: Date.now(), message: `Claude Code 已更新到 ${installed.version}${downloadSource === "proxy" ? "（代理回退）" : "（GitHub 官方源）"}。` });
     } catch (error) {
       const failedDirectory = this.pendingUpdate?.directory || updateDirectory;
@@ -339,14 +397,9 @@ export class ClaudeUpdateManager {
   }
 
   private scheduleCheck(delayMs: number) {
+    void delayMs;
     this.dispose();
-    const safeDelay = Math.max(1_000, Math.min(delayMs, 2_147_000_000));
-    this.timer = setTimeout(() => {
-      this.timer = null;
-      void this.check();
-    }, safeDelay);
-    if (this.timer.unref) this.timer.unref();
-    this.setStatus({ nextCheckAt: Date.now() + safeDelay });
+    this.setStatus({ nextCheckAt: undefined });
   }
 
   private async fetchLatestVersion() {
@@ -415,9 +468,8 @@ export class ClaudeUpdateManager {
   }
 
   private readInstalledVersionSync(): string {
-    const executable = resolveExecutableFromPath(this.platform() === "win32" ? "claude.cmd" : "claude")
-      || resolveExecutableFromPath("claude.exe")
-      || "";
+    const executable = this.snapshot?.executablePath || resolveExecutableFromPath(this.platform() === "win32" ? "claude.cmd" : "claude")
+      || resolveExecutableFromPath("claude.exe") || "";
     if (!executable) return "";
     return this.readBinaryVersion(executable);
   }
@@ -446,7 +498,7 @@ export class ClaudeUpdateManager {
   }
 
   private managedPath() {
-    return this.dependencies.managedExecutablePath?.() || managedClaudeExecutablePath();
+    return this.snapshot?.executablePath || this.dependencies.managedExecutablePath?.() || managedClaudeExecutablePath();
   }
 
   private readSdkVersion() {

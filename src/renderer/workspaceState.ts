@@ -137,8 +137,8 @@ export function createWorkspaceState(input: {
   const allowedSessionIds = new Set(sessionIds);
   const panes = input.layout.panes.slice(0, MAX_PANES).map((pane) => {
     const tabIds = pane.tabIds.filter((sessionId) => allowedSessionIds.has(sessionId));
-    return { id: pane.id, tabIds, activeTabId: tabIds.includes(pane.activeTabId) ? pane.activeTabId : tabIds[0] };
-  }).filter((pane) => pane.tabIds.length);
+    return { id: pane.id, tabIds, activeTabId: tabIds.includes(pane.activeTabId) ? pane.activeTabId : tabIds[0] || "" };
+  });
   const activePaneId = panes.some((pane) => pane.id === input.layout.activePaneId) ? input.layout.activePaneId : panes[0]?.id || "";
   const queuedMessages = Object.fromEntries(sessionIds.map((sessionId) => {
     const pending = (input.pendingSteers[sessionId] || []).map((message) => ({ ...message, queueKind: "rejectedSteer" as const }));
@@ -287,8 +287,13 @@ export function parseWorkspaceState(value: unknown, currentWorkspace: string): R
     const cwd = stringValue(saved.cwd, currentWorkspace).slice(0, 32_000);
     if (!id || !cwd || sessions[id]) continue;
     const provider = saved.provider === "claude" ? "claude" : "codex";
+    const savedThreadId = stringValue(saved.threadId).slice(0, 240);
+    // Older split layouts could persist a Claude placeholder without a
+    // native session ID. It cannot be opened or resumed, so restore it as an
+    // empty pane instead of bringing back a dead Claude tab.
+    if (provider === "claude" && !savedThreadId) continue;
     const session = emptySession(id, cwd, stringValue(saved.model).slice(0, 240), stringValue(saved.effort, "medium").slice(0, 80), provider);
-    session.threadId = stringValue(saved.threadId).slice(0, 240) || null;
+    session.threadId = savedThreadId || null;
     // A workbench session with a native ID needs its history rehydrated after
     // startup. Mark it before the first render so the empty-session welcome
     // view cannot flash while the Provider restore request is in flight.
@@ -321,13 +326,13 @@ export function parseWorkspaceState(value: unknown, currentWorkspace: string): R
     const saved = asRecord(value);
     const id = stateId(saved.id);
     if (!id || usedPaneIds.has(id)) continue;
-    const rawTabIds = Array.isArray(saved.tabIds) ? saved.tabIds : [];
+    if (!Array.isArray(saved.tabIds)) continue;
+    const rawTabIds = saved.tabIds;
     const tabIds = rawTabIds.map(stateId).filter((tabId) => sessions[tabId] && !usedSessionIds.has(tabId));
-    if (!tabIds.length) continue;
     tabIds.forEach((tabId) => usedSessionIds.add(tabId));
     usedPaneIds.add(id);
     const savedActiveTabId = stateId(saved.activeTabId);
-    panes.push({ id, tabIds, activeTabId: tabIds.includes(savedActiveTabId) ? savedActiveTabId : tabIds[0] });
+    panes.push({ id, tabIds, activeTabId: tabIds.includes(savedActiveTabId) ? savedActiveTabId : tabIds[0] || "" });
   }
   if (!panes.length) return null;
   for (const sessionId of Object.keys(sessions)) if (!usedSessionIds.has(sessionId)) delete sessions[sessionId];

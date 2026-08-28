@@ -29,6 +29,7 @@ import { ProcessSupervisor } from "./processSupervisor";
 import { DesktopUpdateManager } from "./desktopUpdateManager";
 import { CodexCliUpdateManager } from "./codexCliUpdateManager";
 import { ClaudeUpdateManager } from "./claudeUpdateManager";
+import { cliExecutableExists, detectCliRuntime, hasCliProcess, readWindowsProcesses, type CliRuntimeSnapshot } from "./cliRuntime";
 import { isSafeExternalUrl, WindowLifecycle, type DesktopWindow } from "./windowLifecycle";
 import { registerDesktopIpc } from "./ipc/registerDesktopIpc";
 import { FileLogger, logErrorDetails } from "./logger";
@@ -64,6 +65,30 @@ const processSupervisor = new ProcessSupervisor();
 let codexCliUpdateManager: CodexCliUpdateManager;
 let claudeUpdateManager: ClaudeUpdateManager;
 const nativeSessionOwnership = new NativeSessionOwnershipRegistry();
+
+async function externalCliInUse(provider: "codex" | "claude") {
+  const internal = backendManager.rendererSessions().some(({ provider: current, queryActive }) => current === provider && queryActive);
+  if (internal) return true;
+  if (provider === "codex" && (codexAppServer.isBusy || legacyCodexAppServer.isBusy || codexTitleGenerator.processIds.length > 0)) return true;
+  if (process.platform !== "win32") return false;
+  const entries = await readWindowsProcesses({ track: (child) => processSupervisor.track(child), terminate: (child) => processSupervisor.terminate(child) });
+  if (provider === "codex") {
+    const owned = new Set([codexAppServer.processId, legacyCodexAppServer.processId, ...codexTitleGenerator.processIds].filter(Boolean));
+    const byPid = new Map(entries.map((entry) => [entry.pid, entry]));
+    const belongsToAgentDesk = (pid: number) => {
+      const visited = new Set<number>();
+      let current = pid;
+      while (current > 0 && !visited.has(current)) {
+        if (owned.has(current)) return true;
+        visited.add(current);
+        current = byPid.get(current)?.parentPid || 0;
+      }
+      return false;
+    };
+    return entries.some((entry) => hasCliProcess([entry], provider) && !belongsToAgentDesk(entry.pid));
+  }
+  return hasCliProcess(entries, provider);
+}
 interface ExternalTerminalExecutableCache {
   schema: 1;
   requestedExecutable: string;
@@ -323,9 +348,10 @@ function openConfiguredExternalTerminal(input: unknown): Promise<{ state: "open"
   if (!cache || cache.requestedExecutable !== requestedExecutable) throw new Error("终端配置正在检测，请稍后再试。");
   if (!cache.available || !cache.executable) throw new Error("找不到外部终端程序，请在设置中填写可执行文件路径。");
   const executable = cache.executable;
+  if (!claudeRuntimeSnapshot.executablePath || !cliExecutableExists(claudeRuntimeSnapshot.executablePath)) throw new Error("启动时记录的 Claude Code 文件已不存在，请重启 AgentDesk 使安装信息刷新。");
   if (!settings.argsTemplate.includes("{sessionId}")) throw new Error("外部终端参数模板必须包含 {sessionId}，否则无法绑定到当前 Claude 会话。");
   appLogger.log("info", "external_terminal.open_requested", { executable: requestedExecutable, cwd, resume, sessionIdPresent: true, initialPromptPresent: Boolean(initialPrompt) });
-  const args = expandExternalTerminalArgs(settings, executable, { cwd, sessionId, resume: resume === true, initialPrompt });
+  const args = expandExternalTerminalArgs(settings, executable, { cwd, sessionId, resume: resume === true, initialPrompt, cliExecutable: claudeRuntimeSnapshot.executablePath });
   if (!args.length) throw new Error("外部终端参数模板不能为空。");
   const launchPlan = createExternalTerminalLaunchPlan(settings, executable, args, cwd);
   return new Promise((resolve, reject) => {
@@ -743,11 +769,15 @@ function preserveLegacyUserDataDirectory() {
 
 preserveLegacyUserDataDirectory();
 
+const codexRuntimeSnapshot: CliRuntimeSnapshot = detectCliRuntime("codex");
+const claudeRuntimeSnapshot: CliRuntimeSnapshot = detectCliRuntime("claude");
+
 const codexCommand = () => {
   if (codexHomeLinkFailure) {
     throw new Error(`无法建立 AgentDesk Codex 配置软链接：${codexHomeLinkFailure.fileName}（${codexHomeLinkFailure.error || codexHomeLinkFailure.status}）`);
   }
-  return process.env.CODEX_DESKTOP_CLI?.trim() || (process.platform === "win32" ? "codex.cmd" : "codex");
+  if (!codexRuntimeSnapshot.executablePath || !cliExecutableExists(codexRuntimeSnapshot.executablePath)) throw new Error("启动时记录的 Codex CLI 文件已不存在，请重启 AgentDesk 使安装信息刷新。");
+  return codexRuntimeSnapshot.executablePath;
 };
 const codexTitleGenerator = new CodexTitleGenerator({
   command: codexCommand,
@@ -812,6 +842,8 @@ claudeUpdateManager = new ClaudeUpdateManager({
   fetch: (url, init) => net.fetch(url, init),
   shutdownQueries: () => claudeBackend.shutdown(),
   emitStatus: (status) => windowLifecycle.send("claude:runtime-status-changed", status),
+  runtimeSnapshot: () => claudeRuntimeSnapshot,
+  isCliInUse: () => externalCliInUse("claude"),
 });
 
 codexCliUpdateManager = new CodexCliUpdateManager({
@@ -824,6 +856,9 @@ codexCliUpdateManager = new CodexCliUpdateManager({
   notify: (title, body) => {
     showRetainedDesktopNotification({ title, body }, () => windowLifecycle.show());
   },
+  runtimeSnapshot: () => codexRuntimeSnapshot,
+  fetch: (url, init) => net.fetch(url, init),
+  isCliInUse: () => externalCliInUse("codex"),
 });
 
 backendManager.subscribeEvents((event) => windowLifecycle.send("agent:event", event));
@@ -842,6 +877,10 @@ const hasLock = windowLifecycle.acquireSingleInstance((argv) => {
 if (hasLock) {
   app.whenReady().then(async () => {
     appLogger.log("info", "app.started", { version: app.getVersion(), packaged: app.isPackaged, argv: process.argv });
+    appLogger.log("info", "cli.runtime_detected", {
+      codex: { source: codexRuntimeSnapshot.source, executablePath: codexRuntimeSnapshot.executablePath, version: codexRuntimeSnapshot.currentVersion },
+      claude: { source: claudeRuntimeSnapshot.source, executablePath: claudeRuntimeSnapshot.executablePath, version: claudeRuntimeSnapshot.currentVersion },
+    });
     const explicitWorkspace = requestedWorkspace(process.argv);
     const startupPreferences = preferencesStore.read();
     // 终端查找只在启动时执行一次，结果写入用户数据缓存；点击按钮不再现场搜索。
@@ -1003,10 +1042,11 @@ if (hasLock) {
         },
       } : {}),
     });
+    void codexCliUpdateManager.initialize();
+    void claudeUpdateManager.initialize();
     windowLifecycle.createWindow();
     windowLifecycle.createTray();
     desktopUpdateManager.initialize();
-    void codexCliUpdateManager.initialize();
   });
 }
 

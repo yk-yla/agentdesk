@@ -83,6 +83,10 @@ export class CodexTitleGenerator {
 
   constructor(private readonly options: CodexTitleGeneratorOptions) {}
 
+  get processIds() {
+    return [...this.active.values()].flatMap((child) => child.pid ? [child.pid] : []);
+  }
+
   async generate(request: CodexTitleRequest) {
     if (this.options.isRequestBlocked?.()) throw new Error("Codex CLI 正在更新，请稍后重试。");
     if (this.options.isQuitting?.()) throw new Error("AgentDesk 正在退出，无法生成会话标题。");

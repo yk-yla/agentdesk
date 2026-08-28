@@ -20,7 +20,12 @@ async page => {
   await page.locator('.pane-panel.active-pane:not(.inactive-tab) textarea[aria-label="消息输入"]').fill(leftDraft);
 
   await sidebar.getByRole("button", { name: "分成两列" }).click({ force: true });
-  await page.waitForFunction(() => document.querySelectorAll(".pane-panel:not(.inactive-tab)").length === 2 && document.querySelector(".app-shell")?.getAttribute("data-pane-count") === "2", null, { timeout: 15_000 });
+  await page.waitForFunction(() => document.querySelectorAll(".pane-panel:not(.inactive-tab)").length === 2
+    && document.querySelector(".app-shell")?.getAttribute("data-pane-count") === "2"
+    && Boolean(document.querySelector(".pane-panel.active-pane[data-empty-pane]")), null, { timeout: 15_000 });
+  assert(await page.locator(".tab").count() === initialTabCount + 1, "分栏操作不应自动创建会话。");
+  await page.locator('.pane-panel.active-pane[data-empty-pane] button[title="新建 Codex 会话"]').click();
+  await page.waitForFunction(() => Boolean(document.querySelector('.pane-panel.active-pane:not(.inactive-tab) textarea[aria-label="消息输入"]')), null, { timeout: 15_000 });
   const panes = page.locator(".pane-panel:not(.inactive-tab)");
   const rightDraft = "AgentDesk restart right draft - forced snapshot";
   await panes.nth(1).locator('textarea[aria-label="消息输入"]').fill(rightDraft);

@@ -79,6 +79,14 @@ export class CodexAppServer implements CodexBackendRuntime {
     return Boolean(this.child?.pid && this.child.exitCode === null && !this.child.killed);
   }
 
+  get processId() {
+    return this.child?.pid || 0;
+  }
+
+  get isBusy() {
+    return this.requests.pendingCount > 0;
+  }
+
   subscribe(listener: (message: JsonRpcMessage) => void) {
     this.listeners.add(listener);
     return () => this.listeners.delete(listener);

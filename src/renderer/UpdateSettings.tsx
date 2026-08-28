@@ -25,8 +25,17 @@ function shortStatus(phase: string, message: string, availableVersion?: string) 
   if (phase === "downloaded") return "新版已下载";
   if (phase === "notInstalled") return "未安装";
   if (phase === "unsupported") return "当前版本不支持更新";
-  if (phase === "error") return "检查失败，请稍后重试";
+  if (phase === "error") return message || "检查失败，请稍后重试";
   return message || "尚未检查";
+}
+
+function sourceLabel(source?: string) {
+  if (source === "npm") return "npm";
+  if (source === "native") return "官方安装";
+  if (source === "winget") return "winget";
+  if (source === "managed") return "受管安装";
+  if (source === "custom") return "自定义路径";
+  return "未识别";
 }
 
 function errorKey(phase: string, message: string) {
@@ -90,15 +99,18 @@ function UpdateSettingsBase({ status, cliStatus, claudeStatus, onCheck, onDownlo
   return <div className="update-settings">
     <div className="settings-section-title">更新</div>
     <section className="update-row">
-      <div className="update-row-info"><strong>AgentDesk</strong><span>当前 v{status.currentVersion || "-"}</span>{error || status.phase !== "error" || appStatusErrorVisible ? <em className={status.phase}>{error || shortStatus(status.phase, status.message, status.availableVersion)}</em> : null}</div>
+      <div className="update-row-product"><strong>AgentDesk</strong><span>v{status.currentVersion || "-"}</span></div>
+      <div className="update-row-state">{error || status.phase !== "error" || appStatusErrorVisible ? <em className={status.phase}>{error || shortStatus(status.phase, status.message, status.availableVersion)}</em> : null}</div>
       <div className="update-row-actions">{error || appStatusErrorVisible ? <button type="button" className="bare-button" onClick={() => { setError(""); if (appStatusErrorKey) setDismissedAppErrorKey(appStatusErrorKey); }} title="关闭错误提示" aria-label="关闭错误提示"><X size={14} /></button> : null}{status.phase === "available" ? <button className="update-action primary" onClick={() => void run(onDownload)} disabled={appBusy}><Download size={13} />更新</button> : status.phase === "downloaded" ? <button className="update-action primary" onClick={install} disabled={busy}><RefreshCw size={13} />重启安装</button> : <button className="bare-button" onClick={() => void run(onCheck)} disabled={appBusy || status.phase === "unsupported"} title="检查 AgentDesk 更新" aria-label="检查 AgentDesk 更新"><RefreshCw className={status.phase === "checking" ? "spin" : ""} size={14} /></button>}</div>
     </section>
     <section className="update-row">
-      <div className="update-row-info"><strong>Codex CLI</strong><span>当前 {cliStatus.currentVersion ? `v${cliStatus.currentVersion}` : "未安装"}</span>{cliStatus.phase !== "error" || cliStatusErrorVisible ? <em className={cliStatus.phase}>{shortStatus(cliStatus.phase, cliStatus.message, cliStatus.latestVersion)}</em> : null}</div>
+      <div className="update-row-product"><strong>Codex CLI</strong><span title={cliStatus.executablePath}>{cliStatus.currentVersion ? `v${cliStatus.currentVersion} · ${sourceLabel(cliStatus.installSource)}` : "未安装"}</span></div>
+      <div className="update-row-state">{cliStatus.phase !== "error" || cliStatusErrorVisible ? <em className={cliStatus.phase}>{shortStatus(cliStatus.phase, cliStatus.message, cliStatus.latestVersion)}</em> : null}</div>
       <div className="update-row-actions">{cliStatusErrorVisible ? <button type="button" className="bare-button" onClick={() => setDismissedCliErrorKey(cliStatusErrorKey)} title="关闭错误提示" aria-label="关闭错误提示"><X size={14} /></button> : null}{cliStatus.phase === "available" ? <button className="update-action primary" onClick={() => void runCli(onUpdateCli)} disabled={cliBusyNow}><Download size={13} />更新</button> : <button className="bare-button" onClick={() => void runCli(onCheckCli)} disabled={cliBusyNow} title="检查 Codex CLI 更新" aria-label="检查 Codex CLI 更新"><RefreshCw className={cliStatus.phase === "checking" ? "spin" : ""} size={14} /></button>}</div>
     </section>
     <section className="update-row">
-      <div className="update-row-info"><strong>Claude Code</strong><span>当前 {claudeStatus.binaryVersion ? `v${claudeStatus.binaryVersion}` : "未安装"}</span>{claudeStatus.phase !== "error" || claudeStatusErrorVisible ? <em className={claudeStatus.phase}>{shortStatus(claudeStatus.phase, claudeStatus.message, claudeStatus.latestVersion)}</em> : null}</div>
+      <div className="update-row-product"><strong>Claude Code</strong><span title={claudeStatus.executablePath}>{claudeStatus.binaryVersion ? `v${claudeStatus.binaryVersion} · ${sourceLabel(claudeStatus.installSource)}` : "未安装"}</span></div>
+      <div className="update-row-state">{claudeStatus.phase !== "error" || claudeStatusErrorVisible ? <em className={claudeStatus.phase}>{shortStatus(claudeStatus.phase, claudeStatus.message, claudeStatus.latestVersion)}</em> : null}</div>
       <div className="update-row-actions">{claudeStatusErrorVisible ? <button type="button" className="bare-button" onClick={() => setDismissedClaudeErrorKey(claudeStatusErrorKey)} title="关闭错误提示" aria-label="关闭错误提示"><X size={14} /></button> : null}{claudeStatus.phase === "available" ? <button className="update-action primary" onClick={() => void runClaude(onUpdateClaude)} disabled={claudeBusyNow}><Download size={13} />更新</button> : <button className="bare-button" onClick={() => void runClaude(onCheckClaude)} disabled={claudeBusyNow} title="检查 Claude Code 更新" aria-label="检查 Claude Code 更新"><RefreshCw className={claudeStatus.phase === "checking" ? "spin" : ""} size={14} /></button>}</div>
     </section>
     <details className="diagnostics-details">

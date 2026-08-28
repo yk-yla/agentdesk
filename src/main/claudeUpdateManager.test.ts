@@ -24,6 +24,7 @@ describe("ClaudeUpdateManager", () => {
         fetch: async () => new Response(JSON.stringify({ tag_name: "v1.1.0" }), { status: 200, headers: { "content-type": "application/json" } }),
         shutdownQueries: async () => undefined,
         emitStatus: () => undefined,
+        isCliInUse: async () => false,
         managedExecutablePath: () => executable,
         readSdkVersion: () => "1.0.0",
         readBinaryVersion: () => "1.0.0",
@@ -33,6 +34,34 @@ describe("ClaudeUpdateManager", () => {
       const status = await manager.check();
       assert.equal(status.phase, "available");
       assert.equal(status.latestVersion, "1.1.0");
+    } finally {
+      rmSync(directory, { recursive: true, force: true });
+    }
+  });
+
+  it("blocks updating while Claude Code is in use", async () => {
+    const directory = mkdtempSync(path.join(tmpdir(), "agentdesk-claude-busy-"));
+    const executable = path.join(directory, "claude.exe");
+    writeFileSync(executable, "fixture", "utf8");
+    let shutdowns = 0;
+    try {
+      const manager = new ClaudeUpdateManager({
+        appPath: () => directory,
+        userDataPath: () => directory,
+        fetch: async () => new Response(JSON.stringify({ tag_name: "v1.1.0" }), { status: 200 }),
+        shutdownQueries: async () => { shutdowns += 1; },
+        emitStatus: () => undefined,
+        managedExecutablePath: () => executable,
+        readSdkVersion: () => "1.0.0",
+        readBinaryVersion: () => "1.0.0",
+        credentialStatus: () => ({ credentialsAvailable: true, credentialSource: "settings", credentialMessage: "ok" }),
+        isCliInUse: async () => true,
+      });
+      await manager.check();
+      const status = await manager.update(false);
+      assert.equal(status.phase, "error");
+      assert.match(status.message, /正在被会话使用/);
+      assert.equal(shutdowns, 0);
     } finally {
       rmSync(directory, { recursive: true, force: true });
     }
@@ -154,6 +183,7 @@ describe("ClaudeUpdateManager", () => {
         fetch: async () => new Response(JSON.stringify({ tag_name: "v1.1.0" }), { status: 200 }),
         shutdownQueries: async () => undefined,
         emitStatus: () => undefined,
+        isCliInUse: async () => false,
         managedExecutablePath: () => managed,
         readSdkVersion: () => "1.0.0",
         readBinaryVersion: () => "1.1.0",

@@ -15,8 +15,9 @@ function powershellPromptExpression(value: string) {
   return `([Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('${encodedPrompt(value)}')))`;
 }
 
-function commandPromptHandoff(sessionId: string, initialPrompt: string) {
-  const script = `& claude --session-id '${sessionId}' ${powershellPromptExpression(initialPrompt)}`;
+function commandPromptHandoff(sessionId: string, initialPrompt: string, cliExecutable = "claude", resume = false) {
+  const command = cliExecutable.includes(" ") ? `& '${cliExecutable.replaceAll("'", "''")}'` : `& ${cliExecutable}`;
+  const script = `${command} ${resume ? "--resume" : "--session-id"} '${sessionId}'${initialPrompt ? ` ${powershellPromptExpression(initialPrompt)}` : ""}`;
   const encodedScript = Buffer.from(script, "utf16le").toString("base64");
   return ["/k", `powershell.exe -NoProfile -EncodedCommand ${encodedScript}`];
 }
@@ -24,10 +25,10 @@ function commandPromptHandoff(sessionId: string, initialPrompt: string) {
 export function expandExternalTerminalArgs(
   settings: ExternalTerminalSettings,
   executable: string,
-  values: { cwd: string; sessionId: string; resume: boolean; initialPrompt: string },
+  values: { cwd: string; sessionId: string; resume: boolean; initialPrompt: string; cliExecutable?: string },
 ) {
   const commandPrompt = settings.kind === "command-prompt" || path.win32.basename(executable).toLowerCase() === "cmd.exe";
-  if (values.initialPrompt && commandPrompt) return commandPromptHandoff(values.sessionId, values.initialPrompt);
+  if (commandPrompt) return commandPromptHandoff(values.sessionId, values.initialPrompt, values.cliExecutable, values.resume);
   let template = settings.argsTemplate;
   // Older saved preferences predate {prompt}. Inject it next to the session ID
   // so handoff keeps working without requiring the user to re-save settings.
@@ -42,7 +43,8 @@ export function expandExternalTerminalArgs(
     .replaceAll("{cwd}", values.cwd.replaceAll("\\", "\\\\").replaceAll('"', '\\"'))
     .replaceAll("{sessionId}", values.sessionId)
     .replaceAll("{provider}", "claude")
-    .replaceAll("{prompt}", values.initialPrompt ? powershellPromptExpression(values.initialPrompt) : "");
+    .replaceAll("{prompt}", values.initialPrompt ? powershellPromptExpression(values.initialPrompt) : "")
+    .replaceAll("{claude}", values.cliExecutable || "claude");
   if (/[{}]/u.test(replaced)) throw new Error("外部终端参数模板包含未识别的变量。");
   const args: string[] = [];
   const pattern = /"((?:\\.|[^"\\])*)"|([^\s]+)/gu;
@@ -50,8 +52,14 @@ export function expandExternalTerminalArgs(
     const value = match[1] ?? match[2] ?? "";
     args.push(value.replaceAll('\\"', '"').replaceAll("\\\\", "\\"));
   }
-  if (!values.resume) return args;
-  return args.map((value) => value.includes("--session-id") ? value.replaceAll("--session-id", "--resume") : value);
+  const explicitArgs = values.cliExecutable ? args.map((value) => {
+    if (!/^claude(?:\.cmd|\.exe)?(?:\s|$)/i.test(value)) return value;
+    const suffix = value.replace(/^claude(?:\.cmd|\.exe)?/i, "");
+    const escaped = values.cliExecutable!.replaceAll("'", "''");
+    return commandPrompt ? `"${values.cliExecutable}"${suffix}` : `& '${escaped}'${suffix}`;
+  }) : args;
+  if (!values.resume) return explicitArgs;
+  return explicitArgs.map((value) => value.includes("--session-id") ? value.replaceAll("--session-id", "--resume") : value);
 }
 
 function quoteWindowsArgument(value: string) {

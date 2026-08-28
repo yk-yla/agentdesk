@@ -1,4 +1,4 @@
-import { Settings2 } from "lucide-react";
+import { Settings2, X } from "lucide-react";
 import { lazy, Suspense, useEffect, useRef, useState } from "react";
 import { type ClaudeRuntimeStatus, type CodexCliUpdateStatus, type DesktopPreferences, type DesktopUpdateStatus, type ThemeId, type DiagnosticExport } from "../shared/protocol";
 import { DEFAULT_EXTERNAL_TERMINAL_KIND, externalTerminalSettingsForPreset } from "../shared/externalTerminalPresets";
@@ -86,13 +86,19 @@ export default function SettingsPopover({ collapsed, viewModel, actions }: Props
   return <>
     <button ref={buttonRef} className="icon-button settings-button" onClick={() => setOpen((value) => { const next = !value; trackUiEvent(next ? "settings.opened" : "settings.closed", { reason: "button" }); return next; })} title={settingsLabel} aria-label={settingsLabel} aria-expanded={open}><Settings2 size={16} />{updateAvailable && !open ? <span className="settings-update-badge" aria-hidden="true" /> : null}</button>
     {open ? <div ref={popoverRef} className="settings-popover">
-      <div className="settings-title">设置</div>
-      <div className="settings-basic-grid">
-        <label className="settings-field">主题<div className="settings-select-row"><span className="theme-swatch" style={{ background: THEME_OPTIONS.find((option) => option.id === viewModel.theme)?.swatch || "#7d8794" }} /><select value={viewModel.theme} onChange={(event) => { const theme = event.target.value as ThemeId; savePreference({ theme }, "settings.theme_changed", { theme }); }}>{THEME_OPTIONS.map((option) => <option value={option.id} key={option.id}>{option.label}</option>)}</select></div></label>
+      <div className="settings-header">
+        <div className="settings-title">设置</div>
+        <button type="button" className="bare-button settings-close" onClick={() => close("close_button")} title="关闭设置" aria-label="关闭设置"><X size={15} /></button>
       </div>
-      <Suspense fallback={<div className="settings-lazy-loading" aria-busy="true">正在加载高级设置</div>}>
-        <SettingsAdvanced externalTerminal={{ value: viewModel.externalTerminal || externalTerminalSettingsForPreset(DEFAULT_EXTERNAL_TERMINAL_KIND), onSave: actions.onSavePreference }} update={{ status: viewModel.updateStatus, cliStatus: viewModel.cliUpdateStatus, claudeStatus: viewModel.claudeStatus, onCheck: actions.onCheckForUpdates, onCheckCli: actions.onCheckCodexCliUpdates, onUpdateCli: actions.onUpdateCodexCli, onCheckClaude: actions.onCheckClaude, onUpdateClaude: actions.onUpdateClaude, onDownload: actions.onDownloadUpdate, onInstall: actions.onInstallUpdate, onOpenRepository: actions.onOpenUpdateRepository, onExportDiagnostics: actions.onExportDiagnostics }} />
-      </Suspense>
+      <div className="settings-body">
+        <section className="settings-appearance">
+          <div className="settings-section-title">外观</div>
+          <label className="settings-inline-field"><span>主题</span><div className="settings-select-control"><span className="theme-swatch" style={{ background: THEME_OPTIONS.find((option) => option.id === viewModel.theme)?.swatch || "#7d8794" }} /><select value={viewModel.theme} onChange={(event) => { const theme = event.target.value as ThemeId; savePreference({ theme }, "settings.theme_changed", { theme }); }}>{THEME_OPTIONS.map((option) => <option value={option.id} key={option.id}>{option.label}</option>)}</select></div></label>
+        </section>
+        <Suspense fallback={<div className="settings-lazy-loading" aria-busy="true">正在加载高级设置</div>}>
+          <SettingsAdvanced externalTerminal={{ value: viewModel.externalTerminal || externalTerminalSettingsForPreset(DEFAULT_EXTERNAL_TERMINAL_KIND), onSave: actions.onSavePreference }} update={{ status: viewModel.updateStatus, cliStatus: viewModel.cliUpdateStatus, claudeStatus: viewModel.claudeStatus, onCheck: actions.onCheckForUpdates, onCheckCli: actions.onCheckCodexCliUpdates, onUpdateCli: actions.onUpdateCodexCli, onCheckClaude: actions.onCheckClaude, onUpdateClaude: actions.onUpdateClaude, onDownload: actions.onDownloadUpdate, onInstall: actions.onInstallUpdate, onOpenRepository: actions.onOpenUpdateRepository, onExportDiagnostics: actions.onExportDiagnostics }} />
+        </Suspense>
+      </div>
     </div> : null}
   </>;
 }
