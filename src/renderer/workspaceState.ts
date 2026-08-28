@@ -175,7 +175,6 @@ export function createWorkspaceState(input: {
       id: session.id,
       threadId: session.threadId || "",
       provider: session.provider,
-      presentationMode: session.presentationMode,
       cwd: session.cwd.slice(0, 2_000),
       title: session.title.slice(0, 500),
       titleOrigin: session.titleOrigin,
@@ -289,16 +288,11 @@ export function parseWorkspaceState(value: unknown, currentWorkspace: string): R
     if (!id || !cwd || sessions[id]) continue;
     const provider = saved.provider === "claude" ? "claude" : "codex";
     const session = emptySession(id, cwd, stringValue(saved.model).slice(0, 240), stringValue(saved.effort, "medium").slice(0, 80), provider);
-    session.presentationMode = provider === "claude" ? "terminal" : (saved.presentationMode === "terminal" ? "terminal" : "workbench");
-    if (session.presentationMode === "terminal") {
-      session.terminalSuspended = true;
-      session.statusLabel = "终端已停止";
-    }
     session.threadId = stringValue(saved.threadId).slice(0, 240) || null;
     // A workbench session with a native ID needs its history rehydrated after
     // startup. Mark it before the first render so the empty-session welcome
     // view cannot flash while the Provider restore request is in flight.
-    session.historyLoading = Boolean(session.threadId && session.presentationMode === "workbench");
+    session.historyLoading = Boolean(session.threadId);
     session.title = stringValue(saved.title, "新会话").slice(0, 500);
     session.titleOrigin = saved.titleOrigin === "manual" || saved.titleOrigin === "provider" || saved.titleOrigin === "fallback"
       ? saved.titleOrigin
@@ -356,7 +350,7 @@ export function parseWorkspaceState(value: unknown, currentWorkspace: string): R
     attachments,
     queuedMessages,
     sidebarCollapsed: state.sidebarCollapsed === true,
-    threadSessionIds: [...usedSessionIds].filter((sessionId) => Boolean(sessions[sessionId]?.threadId) && sessions[sessionId]?.presentationMode !== "terminal"),
+    threadSessionIds: [...usedSessionIds].filter((sessionId) => Boolean(sessions[sessionId]?.threadId)),
     stoppedSessionIds: stoppedSessionIds.filter((sessionId) => usedSessionIds.has(sessionId)),
     truncated: state.truncated === true,
     truncationReasons: Array.isArray(state.truncationReasons)

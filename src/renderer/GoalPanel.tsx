@@ -17,7 +17,7 @@ const STATUS_LABEL: Record<GoalStatus, string> = {
 const STATUS_HINT: Record<GoalStatus, string> = {
   active: "Codex 正在持续推进这个目标。",
   paused: "目标已停止，点击开始可以继续。",
-  blocked: "Codex 暂时无法继续，详情请看主对话或原始事件。",
+  blocked: "Codex 暂时无法继续，详情请看主对话中的进度。",
   usageLimited: "Codex 当前额度不足，恢复后可以继续。",
   budgetLimited: "这个目标的预算已用尽。当前界面不设置预算上限。",
   complete: "Codex 已判断这个目标完成。",

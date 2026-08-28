@@ -7,7 +7,7 @@ import {
   routeAgentEvent,
   type RoutedAgentEvent,
 } from "./agent/AgentEventRouter";
-import { asRecord, stringValue, type ModelOption, type SessionState } from "./domain";
+import { asRecord, stringValue, type CollaborationMode, type ModelOption, type SessionState } from "./domain";
 import { notificationActivationTarget } from "./notificationActivation";
 import type { TurnTelemetry } from "./turnTelemetry";
 
@@ -41,9 +41,9 @@ export interface ProviderEventRuntime {
     handleTurnCompleted(sessionId: string, turnStatus: string): void;
   };
   settings: {
-    confirmed(sessionId: string, fallback: { model: string; effort: string }): { model: string; effort: string };
+    confirmed(sessionId: string, fallback: { model: string; effort: string; collaborationMode: CollaborationMode }): { model: string; effort: string; collaborationMode: CollaborationMode };
     hasPending(sessionId: string): boolean;
-    setConfirmed(sessionId: string, settings: { model: string; effort: string }): void;
+    setConfirmed(sessionId: string, settings: { model: string; effort: string; collaborationMode: CollaborationMode }): void;
   };
 }
 
@@ -291,12 +291,13 @@ export class ProviderEventController {
     }
     if (event.kind === "sessionSettingsUpdated") {
       const settings = event.settings || {};
-      const fallback = { model: session.model || "", effort: session.effort || "" };
+      const fallback = { model: session.model || "", effort: session.effort || "", collaborationMode: session.collaborationMode };
       const current = runtime.settings.confirmed(sessionId, fallback);
       const hadPendingRequest = runtime.settings.hasPending(sessionId);
       runtime.settings.setConfirmed(sessionId, {
         model: settings.model || current.model,
         effort: settings.effort || current.effort,
+        collaborationMode: settings.collaborationMode || current.collaborationMode,
       });
       if (hadPendingRequest) {
         const version = this.captureVersion(sessionId);

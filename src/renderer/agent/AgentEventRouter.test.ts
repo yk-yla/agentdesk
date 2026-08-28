@@ -33,7 +33,7 @@ describe("AgentEventRouter Codex adapter", () => {
     assert.equal(routed.lateResponse?.operation, "startSession");
   });
 
-  it("does not treat a non-terminal Codex client error as a backend exit", () => {
+  it("does not treat a non-fatal Codex client error as a backend exit", () => {
     assert.equal(routeAgentEvent(envelope("client/error", { message: "request failed" })).kind, "state");
     assert.equal(routeAgentEvent(envelope("client/server-exited", { code: 1 })).kind, "backendExited");
   });

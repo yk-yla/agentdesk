@@ -81,8 +81,8 @@ function sessionSummary(session: SDKSessionInfo) {
 
 /**
  * Simplified Claude Backend — only provides history browsing and session
- * identity registration for the terminal manager. All actual Claude Code
- * interaction happens through the embedded PTY.
+ * identity registration. Claude Code interaction happens in the configured
+ * external terminal, so AgentDesk keeps these sessions read-only.
  */
 export class ClaudeBackend implements AgentBackend {
   readonly provider = "claude" as const;
@@ -106,7 +106,7 @@ export class ClaudeBackend implements AgentBackend {
   }
 
   async respondToInteraction(_ref: InteractionRef, _result: JsonObject): Promise<void> {
-    throw new Error("Claude 终端模式不支持交互响应。");
+    throw new Error("Claude 外部终端会话不支持在 AgentDesk 中响应交互。");
   }
 
   subscribeEvents(listener: (event: AgentEventEnvelope) => void) {

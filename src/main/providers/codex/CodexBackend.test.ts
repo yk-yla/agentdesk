@@ -53,6 +53,21 @@ describe("CodexBackend", () => {
     assert.equal(decodeCodexRpcError(error)?.message, "failed");
   });
 
+  it("forwards native collaboration mode settings without rewriting them", async () => {
+    let method = "";
+    let providerParams = {};
+    const backend = new CodexBackend(runtime({ request: async (value, params) => { method = value; providerParams = params; return {}; } }));
+    const collaborationMode = {
+      mode: "plan",
+      settings: { model: "gpt-test", reasoning_effort: "high", developer_instructions: null },
+    };
+
+    await backend.request("updateSessionSettings", { threadId: "thread-1", collaborationMode }, { sessionId: "ui-1" });
+
+    assert.equal(method, "thread/settings/update");
+    assert.deepEqual(providerParams, { threadId: "thread-1", collaborationMode });
+  });
+
   it("keeps the all-workspace marker inside AgentDesk", async () => {
     let method = "";
     let providerParams = {};
@@ -60,6 +75,169 @@ describe("CodexBackend", () => {
     await backend.request("listSessions", { allWorkspaces: true, limit: 50 }, {});
     assert.equal(method, "thread/list");
     assert.deepEqual(providerParams, { limit: 50 });
+  });
+
+  it("reads skills from the default Codex home while keeping the primary runtime isolated", async () => {
+    const calls: string[] = [];
+    const primary = runtime({
+      request: async (method) => {
+        calls.push(`primary:${method}`);
+        return { data: [] };
+      },
+    });
+    const legacy = runtime({
+      request: async (method) => {
+        calls.push(`legacy:${method}`);
+        return { data: [{ cwd: "D:\\work", skills: [{ name: "global-skill" }] }] };
+      },
+    });
+    const backend = new CodexBackend(primary, undefined, legacy);
+
+    const result = await backend.request("listSkills", { cwds: ["D:\\work"] }, { canonicalCwd: "D:\\work" });
+
+    assert.deepEqual(calls, ["legacy:skills/list"]);
+    assert.deepEqual(result, { data: [{ cwd: "D:\\work", skills: [{ name: "global-skill" }] }] });
+  });
+
+  it("keeps independent pagination cursors when merging AgentDesk and default-home history", async () => {
+    const calls: string[] = [];
+    const primary = runtime({
+      request: async (_method, params) => {
+        calls.push(`primary:${String(params.cursor)}`);
+        return params.cursor ? { data: [{ id: "primary-2", updatedAt: 2 }], nextCursor: null } : { data: [{ id: "primary-1", updatedAt: 1 }], nextCursor: "primary-next" };
+      },
+    });
+    const legacy = runtime({
+      request: async (_method, params) => {
+        calls.push(`legacy:${String(params.cursor)}`);
+        return params.cursor ? { data: [{ id: "legacy-2", updatedAt: 4 }], nextCursor: null } : { data: [{ id: "legacy-1", updatedAt: 3 }], nextCursor: "legacy-next" };
+      },
+    });
+    const backend = new CodexBackend(primary, undefined, legacy);
+
+    const first = await backend.request("listSessions", { allWorkspaces: true, limit: 10 }, {});
+    assert.deepEqual(calls, ["primary:null", "legacy:null"]);
+    assert.deepEqual((first as { data: unknown[] }).data.map((entry) => (entry as { id: string }).id), ["legacy-1", "primary-1"]);
+    const cursor = (first as { nextCursor: string }).nextCursor;
+    assert.ok(cursor.includes("primary-next") && cursor.includes("legacy-next"));
+
+    calls.length = 0;
+    const second = await backend.request("listSessions", { allWorkspaces: true, cursor, limit: 10 }, {});
+    assert.deepEqual(calls, ["primary:primary-next", "legacy:legacy-next"]);
+    assert.equal((second as { nextCursor: string | null }).nextCursor, null);
+  });
+
+  it("routes legacy history reads to the default Codex home even with a client session context", async () => {
+    const calls: string[] = [];
+    const primary = runtime({
+      request: async (method) => {
+        calls.push(`primary:${method}`);
+        return method === "thread/list" ? { data: [] } : { thread: { id: "new-thread", cwd: "D:\\work" } };
+      },
+    });
+    const legacy = runtime({
+      request: async (method) => {
+        calls.push(`legacy:${method}`);
+        return method === "thread/list"
+          ? { data: [{ id: "legacy-thread", cwd: "D:\\work", updatedAt: 2 }] }
+          : { thread: { id: "legacy-thread", cwd: "D:\\work", turns: [] } };
+      },
+    });
+    const backend = new CodexBackend(primary, undefined, legacy);
+
+    await backend.request("listSessions", { cwd: "D:\\work", limit: 10 }, { canonicalCwd: "D:\\work" });
+    await backend.request("readSession", { cwd: "D:\\work", threadId: "legacy-thread", includeTurns: true }, {
+      sessionId: "client-session",
+      canonicalCwd: "D:\\work",
+      nativeSessionId: "legacy-thread",
+    });
+
+    assert.deepEqual(calls, ["primary:thread/list", "legacy:thread/list", "legacy:thread/read"]);
+  });
+
+  it("keeps every thread-bound operation on the runtime that resumed a legacy session", async () => {
+    const calls: string[] = [];
+    const primary = runtime({
+      request: async (method) => {
+        calls.push(`primary:${method}`);
+        return method === "thread/list" ? { data: [] } : {};
+      },
+    });
+    const legacy = runtime({
+      request: async (method) => {
+        calls.push(`legacy:${method}`);
+        if (method === "thread/list") return { data: [{ id: "legacy-thread", cwd: "D:\\work" }] };
+        if (method === "thread/resume") return { thread: { id: "legacy-thread", cwd: "D:\\work" } };
+        return {};
+      },
+    });
+    const backend = new CodexBackend(primary, undefined, legacy);
+    const context = { sessionId: "client-session", nativeSessionId: "legacy-thread", canonicalCwd: "D:\\work" };
+
+    await backend.request("listSessions", { allWorkspaces: true, limit: 10 }, {});
+    await backend.request("resumeSession", { threadId: "legacy-thread", cwd: "D:\\work" }, context);
+    await backend.request("updateSessionSettings", { threadId: "legacy-thread", collaborationMode: { mode: "plan" } }, context);
+    await backend.request("startTurn", { threadId: "legacy-thread", input: [] }, context);
+
+    assert.deepEqual(calls, [
+      "primary:thread/list",
+      "legacy:thread/list",
+      "legacy:thread/resume",
+      "legacy:thread/settings/update",
+      "legacy:turn/start",
+    ]);
+  });
+
+  it("falls back to the default-home runtime when startup restore runs before history classification", async () => {
+    const calls: string[] = [];
+    let interactionRuntime = "";
+    const primary = runtime({
+      request: async (method) => {
+        calls.push(`primary:${method}`);
+        if (method === "thread/resume") throw new Error(encodeCodexRpcError({ method, code: -32600, message: "no rollout found for thread id legacy-thread" }));
+        return {};
+      },
+      respond: async () => { interactionRuntime = "primary"; },
+    });
+    const legacy = runtime({
+      request: async (method) => {
+        calls.push(`legacy:${method}`);
+        return method === "thread/resume" ? { thread: { id: "legacy-thread", cwd: "D:\\work" } } : {};
+      },
+      respond: async () => { interactionRuntime = "legacy"; },
+    });
+    const backend = new CodexBackend(primary, undefined, legacy);
+    const context = { sessionId: "client-session", nativeSessionId: "legacy-thread", canonicalCwd: "D:\\work" };
+
+    await backend.request("resumeSession", { threadId: "legacy-thread", cwd: "D:\\work" }, context);
+    await backend.request("updateSessionSettings", { threadId: "legacy-thread", collaborationMode: { mode: "plan" } }, context);
+    await backend.respondToInteraction({ provider: "codex", sessionId: "client-session", queryGeneration: 0, interactionId: "interaction", requestId: 7 }, {});
+
+    assert.deepEqual(calls, ["primary:thread/resume", "legacy:thread/resume", "legacy:thread/settings/update"]);
+    assert.equal(interactionRuntime, "legacy");
+  });
+
+  it("releases legacy history sessions through the default-home runtime", async () => {
+    const calls: string[] = [];
+    const primary = runtime({
+      request: async (method) => {
+        calls.push(`primary:${method}`);
+        return { data: [{ id: "primary-thread", cwd: "D:\\work" }] };
+      },
+    });
+    const legacy = runtime({
+      request: async (method) => {
+        calls.push(`legacy:${method}`);
+        if (method === "thread/list") return { data: [{ id: "legacy-thread", cwd: "D:\\work" }] };
+        return { status: "unsubscribed" };
+      },
+    });
+    const backend = new CodexBackend(primary, undefined, legacy);
+
+    await backend.request("listSessions", { allWorkspaces: true, limit: 10 }, {});
+    await backend.closeSession({ sessionId: "client-session", nativeSessionId: "legacy-thread" });
+
+    assert.deepEqual(calls, ["primary:thread/list", "legacy:thread/list", "legacy:thread/unsubscribe"]);
   });
 
   it("wraps server events and validates interaction ownership", async () => {
@@ -100,45 +278,6 @@ describe("CodexBackend", () => {
       params: { threadId: "thread-1" },
       operation: "closeSession",
     }]);
-  });
-
-  it("closes app-server for a Codex terminal handoff", async () => {
-    let closes = 0;
-    const backend = new CodexBackend(runtime({
-      request: async () => ({ status: "unsubscribed" }),
-      close: async () => { closes += 1; },
-    }));
-
-    await backend.prepareTerminalSession({ sessionId: "client-1", nativeSessionId: "thread-1" });
-
-    assert.equal(closes, 1);
-  });
-
-  it("lets the manager hand off a shared app-server after idle sessions are checked", async () => {
-    let closes = 0;
-    const backend = new CodexBackend(runtime({
-      request: async () => ({ thread: { id: "thread-1" } }),
-      close: async () => { closes += 1; },
-    }));
-    await backend.request("resumeSession", { threadId: "thread-1", cwd: "D:\\work" }, { sessionId: "other-session" });
-
-    await backend.prepareTerminalSession({ sessionId: "client-1", nativeSessionId: "thread-1" });
-    assert.equal(closes, 1);
-  });
-
-  it("allows terminal handoff after the tracked workbench session closes", async () => {
-    let closes = 0;
-    const backend = new CodexBackend(runtime({
-      request: async (method) => method === "thread/resume" ? { thread: { id: "thread-1" } } : { status: "unsubscribed" },
-      close: async () => { closes += 1; },
-    }));
-    const context = { sessionId: "client-1", nativeSessionId: "thread-1", canonicalCwd: "D:\\work" };
-    await backend.request("resumeSession", { threadId: "thread-1", cwd: "D:\\work" }, context);
-
-    await backend.closeSession(context);
-    await backend.prepareTerminalSession(context);
-
-    assert.equal(closes, 1);
   });
 
   it("does not contact app-server when a Codex session has no native thread", async () => {

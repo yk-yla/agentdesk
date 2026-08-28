@@ -14,7 +14,7 @@ async page => {
     windowState: await window.agentDesk.getWindowState(),
   }));
   assert(runtime.url.startsWith("file:"), `打包版没有加载本地产物：${runtime.url}`);
-  assert(/Electron\/43\.3\.0\b/.test(runtime.userAgent), `打包版 Electron 版本不正确：${runtime.userAgent}`);
+  assert(/Electron\/43\.\d+\.\d+\b/.test(runtime.userAgent), `打包版 Electron 主版本不正确：${runtime.userAgent}`);
   assert(runtime.hasBridge && !runtime.hasDevBridge, "打包版 Bridge 或开发夹具暴露状态不正确。");
   assert(!runtime.hasRendererRequire && !runtime.hasRendererProcess, "打包版 Renderer 暴露了 Node 全局对象。");
   assert(runtime.windowState.maximized, "打包版主窗口启动后没有最大化。");
@@ -26,7 +26,7 @@ async page => {
   });
   assert(!windowStates.restored.maximized && windowStates.maximized.maximized, "打包版最大化切换 IPC 状态不正确。");
 
-  const input = page.locator('.pane-panel textarea[aria-label="消息输入"]');
+  const input = page.locator('.pane-panel:visible textarea[aria-label="消息输入"]').first();
   await input.waitFor({ state: "visible", timeout: 15_000 });
   const pointerStyle = await input.evaluate((element) => {
     const style = getComputedStyle(element);

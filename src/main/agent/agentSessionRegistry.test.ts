@@ -53,7 +53,7 @@ describe("AgentSessionRegistry", () => {
     assert.doesNotThrow(() => sessions.prepareRequest("codex", "closeSession", {}, staleContext));
   });
 
-  it("keeps Codex session registrations after a non-terminal client error", () => {
+  it("keeps Codex session registrations after a non-fatal client error", () => {
     const sessions = registry();
     startSession(sessions);
 
@@ -165,28 +165,20 @@ describe("AgentSessionRegistry", () => {
     sessions.prepareRequest("codex", "startTurn", { threadId: "thread-late" }, context({ nativeSessionId: "thread-late" }));
   });
 
-  it("rejects workbench recovery while the terminal owns the native session", () => {
+  it("rejects a second workbench recovery while another tab owns the native session", () => {
     const ownership = new NativeSessionOwnershipRegistry();
     const sessions = registry(ownership);
-    ownership.claim("codex", "thread-terminal", "terminal-1", "terminal");
-    assert.throws(() => sessions.prepareRequest("codex", "resumeSession", { cwd, threadId: "thread-terminal" }, context()), /占用/);
-  });
-
-  it("only authorizes terminal recovery for a listed native session in the same workspace", () => {
-    const sessions = registry();
-    assert.throws(() => sessions.assertNativeSessionAuthorized("codex", "unknown", cwd), /尚未由当前工作区/);
-    sessions.completeRequest("codex", "listSessions", { cwd }, { canonicalCwd: cwd }, { data: [{ id: "known", cwd }] });
-    sessions.assertNativeSessionAuthorized("codex", "known", cwd);
-    assert.throws(() => sessions.assertNativeSessionAuthorized("codex", "known", otherCwd), /尚未由当前工作区/);
+    ownership.claim("codex", "thread-owned", "other-tab");
+    assert.throws(() => sessions.prepareRequest("codex", "resumeSession", { cwd, threadId: "thread-owned" }, context()), /占用/);
   });
 
   it("releases workbench ownership when the session closes", () => {
     const ownership = new NativeSessionOwnershipRegistry();
     const sessions = registry(ownership);
     startSession(sessions);
-    assert.equal(ownership.owner("codex", "thread-1")?.mode, "workbench");
+    assert.equal(ownership.owner("codex", "thread-1")?.clientSessionId, "client-1");
     sessions.prepareRequest("codex", "closeSession", {}, context({ nativeSessionId: "thread-1" }));
     sessions.completeRequest("codex", "closeSession", {}, context({ nativeSessionId: "thread-1" }), undefined);
-    ownership.claim("codex", "thread-1", "terminal-1", "terminal");
+    ownership.claim("codex", "thread-1", "other-tab");
   });
 });

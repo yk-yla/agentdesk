@@ -3,20 +3,19 @@ import { describe, it } from "node:test";
 import { NativeSessionOwnershipRegistry } from "./nativeSessionOwnershipRegistry";
 
 describe("NativeSessionOwnershipRegistry", () => {
-  it("rejects a terminal owner while the workbench owns the native session", () => {
+  it("rejects a second owner while the workbench owns the native session", () => {
     const registry = new NativeSessionOwnershipRegistry();
-    registry.claim("codex", "thread-1", "workbench-tab", "workbench");
-    assert.throws(() => registry.assertAvailable("codex", "thread-1", "terminal-tab", "terminal"), /占用/);
-    assert.equal(registry.owner("codex", "thread-1")?.mode, "workbench");
+    registry.claim("codex", "thread-1", "workbench-tab");
+    assert.throws(() => registry.assertAvailable("codex", "thread-1", "second-tab"), /占用/);
   });
 
-  it("releases terminal ownership without affecting another provider", () => {
+  it("releases ownership without affecting another provider", () => {
     const registry = new NativeSessionOwnershipRegistry();
-    registry.claim("codex", "same-id", "terminal-codex", "terminal");
-    registry.claim("claude", "same-id", "terminal-claude", "terminal");
-    assert.throws(() => registry.claim("codex", "same-id", "workbench-codex", "workbench"), /占用/);
-    registry.release("codex", "same-id", "terminal-codex", "terminal");
-    registry.claim("codex", "same-id", "workbench-codex", "workbench");
-    assert.equal(registry.owner("claude", "same-id")?.clientSessionId, "terminal-claude");
+    registry.claim("codex", "same-id", "codex-tab");
+    registry.claim("claude", "same-id", "claude-tab");
+    assert.throws(() => registry.claim("codex", "same-id", "second-codex"), /占用/);
+    registry.release("codex", "same-id", "codex-tab");
+    registry.claim("codex", "same-id", "workbench-codex");
+    assert.equal(registry.owner("claude", "same-id")?.clientSessionId, "claude-tab");
   });
 });

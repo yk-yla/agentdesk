@@ -16,7 +16,7 @@ export function createMockBridge(): CodexBridge {
   let threadCounter = 0;
   let turnCounter = 0;
   const mockWorkspace = "mock-workspace";
-  let mockPreferences: DesktopPreferences = { lastWorkspace: mockWorkspace, favoriteWorkspaces: [], sidebarWidth: 250, theme: "github-light", lastCodexPresentationMode: "workbench" };
+  let mockPreferences: DesktopPreferences = { lastWorkspace: mockWorkspace, favoriteWorkspaces: [], sidebarWidth: 250, theme: "github-light" };
   let mockUpdateStatus: DesktopUpdateStatus = { phase: "unsupported", currentVersion: "1.0.7", message: "浏览器预览不检查软件更新。", repositoryUrl: "https://github.com/yk-yla/agentdesk" };
   let mockCodexCliUpdateStatus: CodexCliUpdateStatus = { phase: "available", currentVersion: "0.146.1", latestVersion: "0.147.0", checkedAt: Date.now(), nextCheckAt: Date.now() + 6 * 60 * 60 * 1000, message: "发现新版本 0.147.0，可立即更新。" };
   let mockClaudeRuntimeStatus: ClaudeRuntimeStatus = { phase: "available", binarySource: "sdk", binaryVersion: "1.0.0", sdkVersion: "0.1.0", latestVersion: "1.1.0", checkedAt: Date.now(), credentialsAvailable: true, credentialSource: "settings", credentialMessage: "已从 Claude 配置读取凭据。", integrityVerified: true, message: "发现 Claude Code 新版本 1.1.0。" };
@@ -115,10 +115,14 @@ export function createMockBridge(): CodexBridge {
         const input = isReview ? [{ type: "text", text: "审查当前目录的未提交更改", text_elements: [] }] : Array.isArray(params.input) ? params.input : [];
         const prompt = input.map((item) => stringValue(asRecord(item).text)).filter(Boolean).join(" ");
         const simulateRetry = prompt.includes("[mock-retry]");
+        const simulateToolFailures = prompt.includes("[mock-tool-failures]");
+        const toolFailureItems = simulateToolFailures
+          ? Array.from({ length: 4 }, (_unused, index) => ({ id: `mock-tool-failure-${turnCounter}-${index}`, type: "mcpToolCall", server: "node_repl", tool: "js", status: "failed" }))
+          : [];
         const clientUserMessageId = stringValue(params.clientUserMessageId);
         const text = prompt ? `已收到：${prompt}\n\n这是浏览器预览中的 Markdown 回复。\n\n- 当前模型：${stringValue(params.model, "gpt-5.6-sol")}\n- 思考等级：${stringValue(params.effort, "high")}\n\n\`\`\`ts\nconst ready = true;\n\`\`\`` : "已连接 Codex。";
         const thread = threadMap.get(threadId);
-        if (thread) thread.turns.push({ items: [...(isReview ? [] : [{ type: "userMessage", id: userItemId, content: input }]), { type: "agentMessage", id: itemId, text }] });
+        if (thread) thread.turns.push({ items: [...(isReview ? [] : [{ type: "userMessage", id: userItemId, content: input }]), ...toolFailureItems, { type: "agentMessage", id: itemId, text }] });
         activeTurns.set(threadId, { id: turnId, steerable: !prompt.includes("[non-steerable]") });
         if (params.collaborationMode && stringValue(asRecord(params.collaborationMode).mode) === "plan") window.setTimeout(() => emit({ method: "turn/plan/updated", params: { threadId, turnId, explanation: "先确认实现路径，再逐步完成任务。", plan: [{ step: "分析需求和现状", status: "completed" }, { step: "执行实现", status: "inProgress" }, { step: "验证结果", status: "pending" }] } }), 140);
         if (params.multiAgentMode === "proactive") {
@@ -137,6 +141,7 @@ export function createMockBridge(): CodexBridge {
           window.setTimeout(() => emit({ method: "error", params: { threadId, turnId, error: { message: retryMessage }, willRetry: true } }), 260);
           window.setTimeout(() => emit({ method: "error", params: { threadId, turnId, error: { message: retryMessage }, willRetry: true } }), 860);
         }
+        toolFailureItems.forEach((item, index) => window.setTimeout(() => emit({ method: "item/completed", params: { threadId, turnId, item } }), 260 + index * 40));
         if (prompt.includes("[mock-user-input]")) window.setTimeout(() => emit({
           id: 7000 + turnCounter,
           method: "item/tool/requestUserInput",
@@ -227,7 +232,6 @@ export function createMockBridge(): CodexBridge {
     openLocalPath: () => Promise.resolve(""),
     openExternal: () => Promise.resolve(),
     openExternalTerminal: () => Promise.resolve({ state: "open", source: "agentdesk" as const }),
-    getExternalTerminalStatus: () => Promise.resolve({ state: "notOpen", source: "none" as const }),
     showNotification: () => Promise.resolve(true),
     getWindowState: () => Promise.resolve({ maximized: mockWindowMaximized }),
     minimizeWindow: () => Promise.resolve(),
@@ -313,11 +317,5 @@ export function createMockAgentBridge(): AgentBridge {
         payload: message.params ?? message.result ?? message.error ?? {},
       }));
     },
-    startTerminalSession: () => Promise.reject(new Error("浏览器预览不启动本机终端。")),
-    writeTerminalInput: () => Promise.resolve(),
-    resizeTerminal: () => Promise.resolve(),
-    interruptTerminal: () => Promise.resolve(),
-    closeTerminal: () => Promise.resolve(),
-    onTerminalEvent: () => () => undefined,
   };
 }

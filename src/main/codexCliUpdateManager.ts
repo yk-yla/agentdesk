@@ -44,12 +44,12 @@ interface CodexCliUpdateOperations {
 export interface CodexCliUpdateManagerDependencies {
   processSupervisor: ProcessSupervisor;
   appServer: CodexAppServerControl;
+  /** Other AgentDesk-owned app-server instances, such as the read-only history runtime. */
+  additionalAppServers?: readonly CodexAppServerControl[];
   userDataPath(): string;
   isQuitting(): boolean;
   emitStatus(status: CodexCliUpdateStatus): void;
   notify(title: string, body: string): void;
-  shutdownTerminals?(): Promise<void>;
-  setTerminalProviderBlocked?(provider: "codex", blocked: boolean): void;
   environment?: NodeJS.ProcessEnv;
   platform?: NodeJS.Platform;
   operations?: Partial<CodexCliUpdateOperations>;
@@ -174,9 +174,6 @@ export class CodexCliUpdateManager {
       const latestVersion = this.status.latestVersion?.trim() || "";
       let currentVersion = this.status.currentVersion;
       let shouldRestartLocalAppServer = false;
-      let terminalUpdateBlocked = false;
-      this.dependencies.setTerminalProviderBlocked?.("codex", true);
-      terminalUpdateBlocked = true;
       const restoreLocalAppServer = async () => {
         this.suppressExitNotification = false;
         if (!shouldRestartLocalAppServer || this.dependencies.isQuitting()) return "";
@@ -200,7 +197,6 @@ export class CodexCliUpdateManager {
         shouldRestartLocalAppServer = this.dependencies.appServer.isRunning;
         this.suppressExitNotification = shouldRestartLocalAppServer;
         this.setStatus({ phase: "updating", currentVersion, latestVersion, message: "正在停止所有 Codex app-server。", nextCheckAt: undefined });
-        await this.dependencies.shutdownTerminals?.();
         await this.prepareAppServerUpdate();
         if (this.dependencies.isQuitting()) return this.currentStatus();
         this.setStatus({ phase: "updating", currentVersion, latestVersion, message: `正在更新 Codex CLI 到 ${latestVersion}。`, nextCheckAt: undefined });
@@ -225,7 +221,6 @@ export class CodexCliUpdateManager {
         this.dependencies.notify("Codex CLI 更新失败", message);
         return this.setStatus({ phase: "error", currentVersion: await this.readInstalledVersion() || currentVersion, latestVersion, message });
       } finally {
-        if (terminalUpdateBlocked) this.dependencies.setTerminalProviderBlocked?.("codex", false);
         this.suppressExitNotification = false;
       }
     });
@@ -476,22 +471,20 @@ export class CodexCliUpdateManager {
   }
 
   async prepareAppServerUpdate() {
-    if (this.dependencies.appServer.isRunning) {
-      try {
-        await this.dependencies.appServer.close();
-      } catch {
-        // 优雅关闭失败时继续扫描，随后用进程树强制结束。
-      }
-    }
-    let appServers: WindowsProcessSnapshot[];
+    const ownedAppServers = [this.dependencies.appServer, ...(this.dependencies.additionalAppServers || [])];
+    // Call close on every owned runtime, including one whose child is still
+    // being spawned. CodexAppServer.close() waits for that startup race and
+    // prevents an update from leaving a late app-server process alive.
+    await Promise.allSettled(ownedAppServers.map((server) => server.close()));
+    let appServerProcesses: WindowsProcessSnapshot[];
     try {
-      appServers = findCodexAppServerRoots(await this.readAppServerProcesses());
+      appServerProcesses = findCodexAppServerRoots(await this.readAppServerProcesses());
     } catch {
       // 更新由用户明确触发，无法读取进程列表时也继续执行安装。
       return;
     }
-    if (!appServers.length) return;
-    await Promise.allSettled(appServers.map((entry) => this.terminateAppServerProcess(entry.pid)));
+    if (!appServerProcesses.length) return;
+    await Promise.allSettled(appServerProcesses.map((entry) => this.terminateAppServerProcess(entry.pid)));
   }
 
   private errorMessage(error: unknown) {

@@ -164,7 +164,7 @@ export class AgentSessionRegistry {
       }
       this.assertNativeOwnerAvailable(provider, nativeSessionId, clientSessionId);
       this.sessions.set(clientSessionId, { provider, clientSessionId, canonicalCwd, nativeSessionId, queryGeneration: existing?.queryGeneration || 0, queryActive: false });
-      this.nativeOwnership.claim(provider, nativeSessionId, clientSessionId, "workbench");
+      this.nativeOwnership.claim(provider, nativeSessionId, clientSessionId);
       return;
     }
 
@@ -240,7 +240,7 @@ export class AgentSessionRegistry {
       this.assertNativeOwnerAvailable(provider, nativeSessionId, clientSessionId);
       session.nativeSessionId = nativeSessionId;
       this.knownNativeSessions.set(this.nativeKey(provider, nativeSessionId), session.canonicalCwd);
-      this.nativeOwnership.claim(provider, nativeSessionId, clientSessionId, "workbench");
+      this.nativeOwnership.claim(provider, nativeSessionId, clientSessionId);
     }
     if (operation === "startTurn" || operation === "startReview") {
       if (!turnIdFrom(result)) throw new Error("Provider 没有返回可登记的 Turn ID。");
@@ -354,10 +354,6 @@ export class AgentSessionRegistry {
     for (const session of [...this.sessions.values()]) if (session.provider === provider) this.releaseSession(session.clientSessionId);
   }
 
-  releaseRendererSession(clientSessionId: string) {
-    this.releaseSession(clientSessionId);
-  }
-
   clearRendererSessions() {
     for (const sessionId of [...this.sessions.keys()]) this.releaseSession(sessionId);
   }
@@ -394,7 +390,7 @@ export class AgentSessionRegistry {
     this.assertNativeOwnerAvailable("codex", nativeSessionId, clientSessionId);
     session.nativeSessionId = nativeSessionId;
     this.knownNativeSessions.set(this.nativeKey("codex", nativeSessionId), session.canonicalCwd);
-    this.nativeOwnership.claim("codex", nativeSessionId, clientSessionId, "workbench");
+    this.nativeOwnership.claim("codex", nativeSessionId, clientSessionId);
   }
 
   private rejectDangerousCodexOverrides(value: unknown, depth = 0) {
@@ -445,10 +441,9 @@ export class AgentSessionRegistry {
   private assertContextMatches(session: RegisteredSession, context: AgentRequestContext, operation: AgentOperation) {
     if (context.canonicalCwd && canonicalPath(context.canonicalCwd) !== session.canonicalCwd) throw new Error("Agent 会话工作区归属不匹配。");
     if (context.nativeSessionId && context.nativeSessionId !== session.nativeSessionId) throw new Error("Agent 原生会话归属不匹配。");
-    // Closing is cleanup: a Query may advance while the renderer is handing
-    // the session to the embedded terminal. Keep identity checks strict, but
-    // allow an older generation to release the session instead of trapping
-    // the handoff on a stale cleanup request.
+    // Closing is cleanup: a Query may advance while the renderer is releasing
+    // the session. Keep identity checks strict, but allow an older generation
+    // to release the session instead of trapping cleanup on stale state.
     if (operation !== "closeSession" && context.queryGeneration !== undefined && context.queryGeneration !== session.queryGeneration) {
       throw new Error("Agent Query 代次已失效。");
     }
@@ -469,17 +464,12 @@ export class AgentSessionRegistry {
   }
 
   private assertNativeOwnerAvailable(provider: AgentProvider, nativeSessionId: string, clientSessionId: string) {
-    this.nativeOwnership.assertAvailable(provider, nativeSessionId, clientSessionId, "workbench");
-  }
-
-  assertNativeSessionAuthorized(provider: AgentProvider, nativeSessionId: string, cwd: string) {
-    const knownCwd = this.knownNativeSessions.get(this.nativeKey(provider, nativeSessionId));
-    if (!knownCwd || knownCwd !== canonicalPath(cwd)) throw new Error("原生会话尚未由当前工作区的 Provider 历史登记。");
+    this.nativeOwnership.assertAvailable(provider, nativeSessionId, clientSessionId);
   }
 
   private sessionByNative(provider: AgentProvider, nativeSessionId: string) {
     const owner = this.nativeOwnership.owner(provider, nativeSessionId);
-    return owner?.mode === "workbench" ? this.sessions.get(owner.clientSessionId) : undefined;
+    return this.sessions.get(owner?.clientSessionId || "");
   }
 
   private nativeKey(provider: AgentProvider, nativeSessionId: string) {
@@ -527,7 +517,7 @@ export class AgentSessionRegistry {
     } else {
       this.closedSessions.delete(clientSessionId);
     }
-    if (session.nativeSessionId) this.nativeOwnership.release(session.provider, session.nativeSessionId, clientSessionId, "workbench");
+    if (session.nativeSessionId) this.nativeOwnership.release(session.provider, session.nativeSessionId, clientSessionId);
     this.cancelSessionInteractions(clientSessionId);
     this.sessions.delete(clientSessionId);
   }

@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 import { ClaudeBackend, paginateClaudeHistoryMessages } from "./ClaudeBackend";
 
-describe("ClaudeBackend (terminal-only)", () => {
+describe("ClaudeBackend (external-terminal)", () => {
   it("pages the full history from the newest page back to the first", () => {
     const messages = Array.from({ length: 431 }, (_, index) => ({ index }));
     const latest = paginateClaudeHistoryMessages(messages, undefined, 200);

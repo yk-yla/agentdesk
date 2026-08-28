@@ -40,7 +40,7 @@ export interface SessionMessageServices {
   showMcpStatus(sessionId: string): Promise<void>;
   setSessionSetting?: (sessionId: string, field: "model" | "effort", value: string) => Promise<void>;
   renameSession?: (sessionId: string, name: string) => Promise<void>;
-  setCollaborationMode?: (sessionId: string, mode: CollaborationMode) => void;
+  setCollaborationMode?: (sessionId: string, mode: CollaborationMode) => void | Promise<void>;
   rememberCommandUse?: (key: string) => void;
   trackEvent?: (event: string, details?: JsonObject) => void;
   turnTelemetry?: TurnTelemetry;
@@ -153,7 +153,7 @@ export class SessionMessageController {
     if (telemetry && startsTurn) telemetry.begin(sessionId, session.provider, requestMethod, { mode: "submit" });
     try {
       if (localCommand === "/model") {
-        if (session.provider === "claude") throw new Error("Claude Code 的模型请在黑窗口中修改。思考等级也请在黑窗口中调整。");
+        if (session.provider === "claude") throw new Error("Claude Code 的模型和思考等级请在外部终端中调整。");
         if (!commandArgs) throw new Error("请在 /model 后输入模型名称，或直接使用顶部的模型选择框。\n示例：/model claude-opus-4-6[1m]");
         if (!services.setSessionSetting) throw new Error("当前版本暂不支持通过命令切换模型。");
         await services.setSessionSetting(sessionId, "model", commandArgs);
@@ -173,7 +173,7 @@ export class SessionMessageController {
       }
       if (localCommand === "/plan") {
         if (!services.setCollaborationMode) throw new Error("当前版本暂不支持计划模式。");
-        services.setCollaborationMode(sessionId, "plan");
+        await services.setCollaborationMode(sessionId, "plan");
         if (!commandArgs) {
           state.updateSession(sessionId, (current) => current.activeTurnId
             ? current

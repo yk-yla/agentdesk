@@ -3,7 +3,7 @@ import { mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "n
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { describe, it } from "node:test";
-import { DEFAULT_PREFERENCES, normalizeClaudeModelCache, normalizeLastPresentationModes, normalizePreferences, normalizeRecentCommandUsage, PreferencesStore } from "./preferencesStore";
+import { DEFAULT_PREFERENCES, normalizeClaudeModelCache, normalizeDismissedSessionNotices, normalizePreferences, normalizeRecentCommandUsage, PreferencesStore } from "./preferencesStore";
 
 async function withStore(run: (store: PreferencesStore, filePath: string) => void | Promise<void>) {
   const directory = mkdtempSync(path.join(tmpdir(), "agentdesk-preferences-"));
@@ -42,7 +42,6 @@ describe("PreferencesStore", () => {
         invalid: { tokens: -1, updatedAt: 1 },
       },
       lastReasoningEfforts: { codex: " xhigh ", claude: "high", unknown: "medium" },
-      lastPresentationModes: { codex: "terminal", claude: "workbench", unknown: "terminal", invalid: "chat" },
       recentCommandUsage: { "command:status": 20, "skill:review": 30, invalid: -1, bad: "later" },
       codexCompactionCounts: {
         "codex:thread-1": { count: 12, eventIds: ["compact-1", "compact-2", "compact-1"], updatedAt: 100 },
@@ -51,24 +50,29 @@ describe("PreferencesStore", () => {
       compactionCounts: {
         "claude:thread-2": { count: 8, eventIds: ["claude-compaction-1"], updatedAt: 200 },
       },
+      dismissedSessionNotices: {
+        "codex:thread-1": { keys: ["activity:one", "activity:one", "error:two", 4], updatedAt: 300 },
+        invalid: { keys: [], updatedAt: 400 },
+      },
       workspaceState: [],
       ignored: "field",
     });
 
     assert.equal(preferences.theme, "github-light");
-    assert.deepEqual(preferences.lastPresentationModes, { codex: "terminal", claude: "workbench" });
     assert.equal(preferences.sidebarWidth, 480);
     assert.equal(preferences.baseFontSize, 14);
     assert.equal(preferences.favoriteWorkspaces.length, 32);
     assert.deepEqual(preferences.sessionAliases, { valid: "Title" });
     assert.deepEqual(preferences.modelContextWindows, { valid: { tokens: 200_000, updatedAt: 2 } });
     assert.deepEqual(preferences.lastReasoningEfforts, { codex: "xhigh", claude: "high" });
-    assert.deepEqual(preferences.lastPresentationModes, { codex: "terminal", claude: "workbench" });
     assert.deepEqual(preferences.recentCommandUsage, { "skill:review": 30, "command:status": 20 });
     assert.deepEqual(preferences.codexCompactionCounts, { "codex:thread-1": { count: 12, eventIds: ["compact-1", "compact-2"], updatedAt: 100 } });
     assert.deepEqual(preferences.compactionCounts, {
       "codex:thread-1": { count: 12, eventIds: ["compact-1", "compact-2"], updatedAt: 100 },
       "claude:thread-2": { count: 8, eventIds: ["claude-compaction-1"], updatedAt: 200 },
+    });
+    assert.deepEqual(preferences.dismissedSessionNotices, {
+      "codex:thread-1": { keys: ["activity:one", "error:two"], updatedAt: 300 },
     });
     assert.equal(preferences.workspaceState, undefined);
     assert.equal("ignored" in preferences, false);
@@ -78,13 +82,15 @@ describe("PreferencesStore", () => {
     assert.deepEqual(normalizeRecentCommandUsage({ "command:old": 1, "skill:new": 3, "command:middle": 2, invalid: 4 }), { "skill:new": 3, "command:middle": 2, "command:old": 1 });
   });
 
-  it("normalizes the per-provider presentation mode preference", () => {
-    assert.deepEqual(normalizeLastPresentationModes({ codex: "terminal", claude: "workbench", unknown: "terminal" }), {
-      codex: "terminal",
-      claude: "workbench",
-    });
-    assert.deepEqual(normalizeLastPresentationModes({ codex: "chat", claude: 1 }), { codex: "workbench", claude: "workbench" });
-    assert.deepEqual(normalizeLastPresentationModes(null), { codex: "workbench", claude: "workbench" });
+  it("keeps dismissed session notices sorted and bounded", () => {
+    const normalized = normalizeDismissedSessionNotices(Object.fromEntries(Array.from({ length: 520 }, (_, index) => [
+      `codex:thread-${index}`,
+      { keys: Array.from({ length: 130 }, (_unused, keyIndex) => `activity:${keyIndex}`), updatedAt: index + 1 },
+    ])));
+    assert.equal(Object.keys(normalized).length, 512);
+    assert.equal(normalized["codex:thread-519"].keys.length, 128);
+    assert.equal(normalized["codex:thread-519"].keys[0], "activity:2");
+    assert.equal(normalized["codex:thread-0"], undefined);
   });
 
   it("accepts only the three supported themes and migrates removed themes", async () => {

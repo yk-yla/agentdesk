@@ -7,22 +7,22 @@ import { userFacingErrorMessage } from "./errorMessage";
 
 interface Props {
   update: ComponentProps<typeof UpdateSettings>;
-  terminal: { value: NonNullable<DesktopPreferences["externalTerminal"]>; onSave: (patch: Partial<DesktopPreferences>) => Promise<void> };
+  externalTerminal: { value: NonNullable<DesktopPreferences["externalTerminal"]>; onSave: (patch: Partial<DesktopPreferences>) => Promise<void> };
 }
 
-export default function SettingsAdvanced({ update, terminal }: Props) {
-  const [kind, setKind] = useState<ExternalTerminalKind>(() => externalTerminalKindForSettings(terminal.value));
-  const [executable, setExecutable] = useState(terminal.value.executable);
-  const [argsTemplate, setArgsTemplate] = useState(terminal.value.argsTemplate);
+export default function SettingsAdvanced({ update, externalTerminal: externalTerminalConfig }: Props) {
+  const [kind, setKind] = useState<ExternalTerminalKind>(() => externalTerminalKindForSettings(externalTerminalConfig.value));
+  const [executable, setExecutable] = useState(externalTerminalConfig.value.executable);
+  const [argsTemplate, setArgsTemplate] = useState(externalTerminalConfig.value.argsTemplate);
   const [saving, setSaving] = useState(false);
   const [errorText, setErrorText] = useState("");
   const [successText, setSuccessText] = useState("");
   useEffect(() => {
-    setKind(externalTerminalKindForSettings(terminal.value));
-    setExecutable(terminal.value.executable);
-    setArgsTemplate(terminal.value.argsTemplate);
+    setKind(externalTerminalKindForSettings(externalTerminalConfig.value));
+    setExecutable(externalTerminalConfig.value.executable);
+    setArgsTemplate(externalTerminalConfig.value.argsTemplate);
     setSaving(false);
-  }, [terminal.value.argsTemplate, terminal.value.executable, terminal.value.kind]);
+  }, [externalTerminalConfig.value.argsTemplate, externalTerminalConfig.value.executable, externalTerminalConfig.value.kind]);
 
   const selectTerminal = (nextKind: ExternalTerminalKind) => {
     setKind(nextKind);
@@ -39,12 +39,12 @@ export default function SettingsAdvanced({ update, terminal }: Props) {
     setSaving(true);
     setErrorText("");
     setSuccessText("");
-    const externalTerminal = kind === "custom"
+    const nextSettings = kind === "custom"
       ? { kind, executable: executable.trim(), argsTemplate }
       : externalTerminalSettingsForPreset(kind);
     try {
-      await terminal.onSave({ externalTerminal });
-      setSuccessText(`${externalTerminalLabel(externalTerminal)} 已保存，可以使用。`);
+      await externalTerminalConfig.onSave({ externalTerminal: nextSettings });
+      setSuccessText(`${externalTerminalLabel(nextSettings)} 已保存，可以使用。`);
     } catch (error) {
       setErrorText(userFacingErrorMessage(error, "保存终端设置失败。"));
     } finally {

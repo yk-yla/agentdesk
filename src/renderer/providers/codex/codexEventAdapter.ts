@@ -1,6 +1,6 @@
 import type { AgentEventEnvelope, AgentOperation, AgentProvider } from "../../../shared/agentProtocol";
 import type { JsonObject, JsonRpcMessage } from "../../../shared/protocol";
-import type { Activity, ActivityKind, ActivityStatus, ImageAttachment, Message, PendingApproval, PlanStepStatus, RetryState, SessionGoal, SessionPlan, SessionState, SubagentState, SubagentStatus, UserInputQuestion } from "../../domain";
+import type { Activity, ActivityKind, ActivityStatus, CollaborationMode, ImageAttachment, Message, PendingApproval, PlanStepStatus, RetryState, SessionGoal, SessionPlan, SessionState, SubagentState, SubagentStatus, UserInputQuestion } from "../../domain";
 import { asRecord, imageFromContent, numberValue, stringValue, textFromContent } from "../../domain";
 
 const ACTIVITY_OUTPUT_LIMIT = 64 * 1024;
@@ -8,7 +8,7 @@ const ACTIVITY_DETAIL_LIMIT = 8 * 1024;
 const SESSION_MESSAGE_LIMIT = 5_000;
 const SESSION_ACTIVITY_LIMIT = 5_000;
 const SESSION_SUBAGENT_LIMIT = 1_000;
-const TRUNCATION_MARKER = "\n…输出过长，完整内容请查看原始事件。";
+const TRUNCATION_MARKER = "\n…输出过长，已截断。";
 const BACKGROUND_TIMEOUT_ERROR = "请求超时，任务可能仍在后台执行。";
 
 function limitActivityText(value: string, limit: number) {
@@ -21,6 +21,13 @@ function appendActivityText(current: string, delta: string, limit: number) {
   return limitActivityText(`${current}${delta}`, limit);
 }
 
+function pathsFromDiff(diff: string) {
+  const paths: string[] = [];
+  for (const match of diff.matchAll(/^diff --git a\/(.+?) b\/(.+?)$/gm)) paths.push(match[2]);
+  for (const match of diff.matchAll(/^\+\+\+ b\/(.+)$/gm)) paths.push(match[1]);
+  return [...new Set(paths.filter((path) => path && path !== "/dev/null"))];
+}
+
 function activityKind(value: unknown): ActivityKind {
   if (value === "commandExecution" || value === "fileChange" || value === "mcpToolCall" || value === "plan" || value === "reasoning" || value === "subAgent") return value;
   if (value === "collabAgentToolCall" || value === "subAgentActivity") return "subAgent";
@@ -31,6 +38,14 @@ function activityStatus(value: unknown, previous?: Activity, fallback: ActivityS
   if (value === "failed" || value === "declined" || value === "completed" || value === "inProgress" || value === "interrupted") return value;
   if (fallback !== "inProgress") return fallback;
   return previous?.status ?? fallback;
+}
+
+function historicalActivityStatus(turnStatus: unknown, itemStatus: unknown): ActivityStatus {
+  if (itemStatus === "failed" || itemStatus === "declined" || itemStatus === "completed" || itemStatus === "interrupted") return itemStatus;
+  if (turnStatus === "failed") return "failed";
+  if (turnStatus === "interrupted" || turnStatus === "cancelled") return "interrupted";
+  if (turnStatus === "inProgress" || turnStatus === "running") return "inProgress";
+  return "completed";
 }
 
 const GOAL_STATUSES = new Set(["active", "paused", "blocked", "usageLimited", "budgetLimited", "complete"]);
@@ -96,7 +111,7 @@ export interface RoutedCodexEvent {
   launchProvider?: AgentProvider;
   turnStatus?: string;
   committedClientId?: string;
-  settings?: { model?: string; effort?: string };
+  settings?: { model?: string; effort?: string; collaborationMode?: CollaborationMode };
   lateResponse?: { operation?: AgentOperation; result?: unknown; error?: unknown };
   batched: boolean;
   lifecycle: boolean;
@@ -117,6 +132,7 @@ export function adaptCodexEvent(envelope: AgentEventEnvelope): RoutedCodexEvent 
   const item = asRecord(params.item);
   const childNativeSessionId = item.type === "subAgentActivity" ? stringValue(item.agentThreadId) || undefined : undefined;
   const settings = asRecord(params.threadSettings);
+  const collaborationMode = stringValue(asRecord(settings.collaborationMode).mode);
   const response = asRecord(params.response);
   const requestMethod = stringValue(params.requestMethod);
   const kind: RoutedCodexEvent["kind"] =
@@ -148,7 +164,11 @@ export function adaptCodexEvent(envelope: AgentEventEnvelope): RoutedCodexEvent 
       ? stringValue(item.clientId, stringValue(item.client_id)) || undefined
       : undefined,
     settings: kind === "sessionSettingsUpdated"
-      ? { model: stringValue(settings.model) || undefined, effort: stringValue(settings.effort) || undefined }
+      ? {
+        model: stringValue(settings.model) || undefined,
+        effort: stringValue(settings.effort) || undefined,
+        collaborationMode: collaborationMode === "plan" || collaborationMode === "default" ? collaborationMode : undefined,
+      }
       : undefined,
     lateResponse: kind === "lateResponse"
       ? { operation: OPERATION_BY_METHOD[requestMethod], result: response.result, error: response.error }
@@ -227,19 +247,22 @@ export function threadIdForMessage(message: JsonRpcMessage): string | null {
 
 function activityFromItem(itemValue: unknown, previous?: Activity, fallbackStatus: ActivityStatus = "inProgress", timestamp?: number): Activity {
   const item = asRecord(itemValue);
+  const type = stringValue(item.type);
   const kind = activityKind(item.type);
   const id = stringValue(item.id, previous?.id ?? `activity-${Date.now()}`);
   const changes = Array.isArray(item.changes) ? item.changes : [];
   const paths = changes.map((change) => stringValue(asRecord(change).path)).filter(Boolean).join(", ");
   const output = limitActivityText(stringValue(item.aggregatedOutput, previous?.output ?? ""), ACTIVITY_OUTPUT_LIMIT);
-  const detail = limitActivityText(kind === "commandExecution"
+  const detail = limitActivityText(type === "contextCompaction"
+    ? "压缩较早的会话内容，释放上下文空间"
+    : kind === "commandExecution"
     ? stringValue(item.command, previous?.detail ?? "后台命令")
     : kind === "fileChange"
       ? paths || previous?.detail || "文件修改"
       : kind === "mcpToolCall"
         ? `${stringValue(item.server, "MCP")} / ${stringValue(item.tool, "工具")}`
         : kind === "reasoning"
-          ? (Array.isArray(item.summary) ? item.summary.map((entry) => stringValue(entry)).filter(Boolean).join("\n") : stringValue(item.summary, previous?.detail || "思考摘要"))
+          ? ((Array.isArray(item.summary) ? item.summary.map((entry) => stringValue(entry)).filter(Boolean).join("\n") : stringValue(item.summary)) || previous?.detail || "正在分析任务")
           : kind === "subAgent"
             ? `${stringValue(item.tool, stringValue(item.kind, "子 Agent"))}${stringValue(item.prompt) ? `：${stringValue(item.prompt)}` : ""}`
           : kind === "plan"
@@ -247,7 +270,7 @@ function activityFromItem(itemValue: unknown, previous?: Activity, fallbackStatu
           : previous?.detail || stringValue(item.text, "后台活动"), ACTIVITY_DETAIL_LIMIT);
   const status = activityStatus(item.status, previous, fallbackStatus);
   return {
-    id, kind, timestamp: previous?.timestamp || timestamp, title: kind === "commandExecution" ? "代理命令" : kind === "fileChange" ? "文件修改" : kind === "mcpToolCall" ? "工具调用" : kind === "plan" ? "任务计划" : kind === "reasoning" ? "思考摘要" : kind === "subAgent" ? "子 Agent" : "后台活动",
+    id, kind, timestamp: previous?.timestamp || timestamp, title: type === "contextCompaction" ? "整理上下文" : kind === "commandExecution" ? "执行命令" : kind === "fileChange" ? "修改文件" : kind === "mcpToolCall" ? "调用工具" : kind === "plan" ? "更新计划" : kind === "reasoning" ? "分析思路" : kind === "subAgent" ? "子 Agent 工作" : "后台活动",
     detail, status, output, visibleInMain: (kind === "fileChange" || kind === "mcpToolCall" || kind === "other") && (status === "failed" || status === "declined" || status === "interrupted"),
   };
 }
@@ -529,7 +552,8 @@ export function hydrateSession(session: SessionState, threadValue: unknown, opti
       const nextMessages = messagesFromItem(item, messageTimestamp);
       if (nextMessages.length) messages.push(...nextMessages);
       if (!["userMessage", "agentMessage"].includes(stringValue(itemRecord.type))) {
-        activities.push(activityFromItem(item, undefined, "inProgress", turnUpdatedAt || undefined));
+        const status = historicalActivityStatus(turn.status, itemRecord.status);
+        activities.push(activityFromItem({ ...itemRecord, status }, undefined, status, turnUpdatedAt || undefined));
       }
     }
   }
@@ -737,7 +761,8 @@ export function applyServerMessage(source: SessionState, message: JsonRpcMessage
     const diff = stringValue(params.diff);
     const id = `diff-${stringValue(params.turnId, "current")}`;
     const existing = session.activities.find((entry) => entry.id === id);
-    const activity: Activity = { id, kind: "fileChange", title: "工作区 Diff", detail: "当前 Turn 的文件差异", output: limitActivityText(diff, ACTIVITY_OUTPUT_LIMIT), status: "inProgress", timestamp: receivedAt, visibleInMain: false };
+    const paths = pathsFromDiff(diff);
+    const activity: Activity = { id, kind: "fileChange", title: "工作区变更", detail: paths.length ? `当前回合已改动 ${paths.length} 个文件：${paths.join(", ")}` : "当前回合的文件差异已更新", output: limitActivityText(diff, ACTIVITY_OUTPUT_LIMIT), status: "inProgress", timestamp: receivedAt, visibleInMain: false };
     session.activities = existing
       ? session.activities.map((entry) => entry.id === id ? activity : entry)
       : [...session.activities, activity];
@@ -749,6 +774,8 @@ export function applyServerMessage(source: SessionState, message: JsonRpcMessage
     const settings = asRecord(params.threadSettings);
     session.model = stringValue(settings.model, session.model);
     session.effort = stringValue(settings.effort, session.effort);
+    const collaborationMode = stringValue(asRecord(settings.collaborationMode).mode);
+    if (collaborationMode === "plan" || collaborationMode === "default") session.collaborationMode = collaborationMode;
   } else if (method === "serverRequest/resolved") {
     const requestId = asRecord(params).requestId ?? asRecord(params).request_id;
     if (typeof requestId === "string" || typeof requestId === "number") {

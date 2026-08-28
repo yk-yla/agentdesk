@@ -1,7 +1,6 @@
 import { contextBridge, ipcRenderer } from "electron";
 import type { AgentEventEnvelope, AgentInteractionResponse, AgentOperation, AgentProvider, AgentRequestContext } from "../shared/agentProtocol";
-import type { TerminalEvent, TerminalInputRequest, TerminalResizeRequest, TerminalSessionCommand, TerminalSessionRequest } from "../shared/terminalProtocol";
-import type { AgentBridge, ClaudeRuntimeStatus, CodexBridge, CodexCliUpdateStatus, DesktopPreferences, DesktopUpdateStatus, DesktopWindowState, ExternalTerminalStatus, JsonObject, ClientLogEntry } from "../shared/protocol";
+import type { AgentBridge, ClaudeRuntimeStatus, CodexBridge, CodexCliUpdateStatus, DesktopPreferences, DesktopUpdateStatus, DesktopWindowState, ExternalTerminalOpenRequest, JsonObject, ClientLogEntry } from "../shared/protocol";
 
 const bridge: Omit<CodexBridge, "request" | "respond" | "onMessage"> = {
   getWorkspace() {
@@ -58,11 +57,8 @@ const bridge: Omit<CodexBridge, "request" | "respond" | "onMessage"> = {
   openExternal(url: string) {
     return ipcRenderer.invoke("agentdesk:open-external", url);
   },
-  openExternalTerminal(input: { cwd: string; sessionId: string; resume?: boolean }) {
+  openExternalTerminal(input: ExternalTerminalOpenRequest) {
     return ipcRenderer.invoke("agentdesk:open-external-terminal", input);
-  },
-  getExternalTerminalStatus(input: { cwd: string; sessionId: string }): Promise<ExternalTerminalStatus> {
-    return ipcRenderer.invoke("agentdesk:external-terminal-status", input);
   },
   showNotification(notification) {
     return ipcRenderer.invoke("agentdesk:show-notification", notification);
@@ -148,26 +144,6 @@ const agentBridge: AgentBridge = {
     ipcRenderer.on("agent:event", wrapped);
     return () => ipcRenderer.removeListener("agent:event", wrapped);
   },
-  startTerminalSession(request: TerminalSessionRequest) {
-    return ipcRenderer.invoke("terminal:start", request);
-  },
-  writeTerminalInput(request: TerminalInputRequest) {
-    return ipcRenderer.invoke("terminal:write", request);
-  },
-  resizeTerminal(request: TerminalResizeRequest) {
-    return ipcRenderer.invoke("terminal:resize", request);
-  },
-  interruptTerminal(request: TerminalSessionCommand) {
-    return ipcRenderer.invoke("terminal:interrupt", request);
-  },
-  closeTerminal(request: TerminalSessionCommand) {
-    return ipcRenderer.invoke("terminal:close", request);
-  },
-  onTerminalEvent(listener: (event: TerminalEvent) => void) {
-    const wrapped = (_event: Electron.IpcRendererEvent, value: TerminalEvent) => listener(value);
-    ipcRenderer.on("terminal:event", wrapped);
-    return () => ipcRenderer.removeListener("terminal:event", wrapped);
-  },
   getWorkspace: bridge.getWorkspace,
   getLaunchProvider: bridge.getLaunchProvider,
   chooseWorkspace: bridge.chooseWorkspace,
@@ -187,7 +163,6 @@ const agentBridge: AgentBridge = {
   openLocalPath: bridge.openLocalPath,
   openExternal: bridge.openExternal,
   openExternalTerminal: bridge.openExternalTerminal,
-  getExternalTerminalStatus: bridge.getExternalTerminalStatus,
   showNotification: bridge.showNotification,
   getWindowState: bridge.getWindowState,
   minimizeWindow: bridge.minimizeWindow,

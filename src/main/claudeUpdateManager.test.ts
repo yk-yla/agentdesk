@@ -23,7 +23,6 @@ describe("ClaudeUpdateManager", () => {
         userDataPath: () => directory,
         fetch: async () => new Response(JSON.stringify({ tag_name: "v1.1.0" }), { status: 200, headers: { "content-type": "application/json" } }),
         shutdownQueries: async () => undefined,
-        setTerminalProviderBlocked: () => undefined,
         emitStatus: () => undefined,
         managedExecutablePath: () => executable,
         readSdkVersion: () => "1.0.0",
@@ -149,13 +148,11 @@ describe("ClaudeUpdateManager", () => {
       writeFileSync(managed, "MZ-old", "utf8");
       mkdirSync(pendingDirectory, { recursive: true });
       writeFileSync(extracted, "MZ-new", "utf8");
-      const terminalGates: boolean[] = [];
       const manager = new ClaudeUpdateManager({
         appPath: () => directory,
         userDataPath: () => directory,
         fetch: async () => new Response(JSON.stringify({ tag_name: "v1.1.0" }), { status: 200 }),
         shutdownQueries: async () => undefined,
-        setTerminalProviderBlocked: (_provider, blocked) => terminalGates.push(blocked),
         emitStatus: () => undefined,
         managedExecutablePath: () => managed,
         readSdkVersion: () => "1.0.0",
@@ -175,7 +172,6 @@ describe("ClaudeUpdateManager", () => {
       const status = await manager.update(false);
       assert.equal(status.phase, "updated");
       assert.match(status.message, /代理回退/);
-      assert.deepEqual(terminalGates, [true, false]);
     } finally {
       rmSync(directory, { recursive: true, force: true });
     }

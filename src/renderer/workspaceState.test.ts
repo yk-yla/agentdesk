@@ -43,17 +43,16 @@ describe("update workspace state budgets", () => {
     assert.equal(restored?.sessions[codex.id]?.provider, "codex");
     assert.equal(restored?.sessions[claude.id]?.provider, "claude");
     assert.equal(restored?.sessions[codex.id]?.historyLoading, true);
-    assert.equal(restored?.sessions[claude.id]?.historyLoading, false);
+    assert.equal(restored?.sessions[claude.id]?.historyLoading, true);
   });
 
-  it("restores terminal tabs as stopped without resuming their native session", () => {
-    const terminal = emptySession("terminal-session", "C:\\work", "gpt", "medium", "codex");
-    terminal.threadId = "codex-thread";
-    terminal.presentationMode = "terminal";
+  it("restores native sessions as workbench sessions", () => {
+    const restored = emptySession("restored-session", "C:\\work", "gpt", "medium", "codex");
+    restored.threadId = "codex-thread";
     const state = createWorkspaceState({
-      workspace: terminal.cwd,
-      layout: { panes: [{ id: "pane-1", tabIds: [terminal.id], activeTabId: terminal.id }], activePaneId: "pane-1" },
-      sessions: { [terminal.id]: terminal },
+      workspace: restored.cwd,
+      layout: { panes: [{ id: "pane-1", tabIds: [restored.id], activeTabId: restored.id }], activePaneId: "pane-1" },
+      sessions: { [restored.id]: restored },
       drafts: new Map(),
       attachments: {},
       queuedMessages: {},
@@ -61,14 +60,11 @@ describe("update workspace state budgets", () => {
       sidebarCollapsed: false,
     });
 
-    const restored = parseWorkspaceState(state, terminal.cwd);
-    assert.equal(restored?.sessions[terminal.id].presentationMode, "terminal");
-    assert.equal(restored?.sessions[terminal.id].threadId, "codex-thread");
-    assert.equal(restored?.sessions[terminal.id].terminalSuspended, true);
-    assert.equal(restored?.sessions[terminal.id].status, "idle");
-    assert.equal(restored?.sessions[terminal.id].statusLabel, "终端已停止");
-    assert.equal(restored?.sessions[terminal.id].historyLoading, false);
-    assert.deepEqual(restored?.threadSessionIds, []);
+    const parsed = parseWorkspaceState(state, restored.cwd);
+    assert.equal(parsed?.sessions[restored.id].threadId, "codex-thread");
+    assert.equal(parsed?.sessions[restored.id].status, "idle");
+    assert.equal(parsed?.sessions[restored.id].historyLoading, true);
+    assert.deepEqual(parsed?.threadSessionIds, [restored.id]);
   });
 
   it("restores a multi-workspace snapshot even when the launch workspace differs", () => {

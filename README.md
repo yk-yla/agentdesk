@@ -24,7 +24,7 @@
 - 同时管理 Codex 和 Claude Code 会话，两个工具互不干扰。
 - 打开多个项目目录，用标签或左右分栏处理多个任务。
 - 搜索、收藏、恢复历史会话，减少重复说明工作背景。
-- Codex 支持图形界面和内置黑窗口，Claude Code 使用内置黑窗口运行。
+- Codex 在 AgentDesk 工作台中运行；Claude Code 通过配置的外部终端运行。
 - 发送图片和附件，查看执行过程、用量和需要确认的操作。
 - 导出会话，或把未完成的任务交接到另一个工具继续处理。
 - 管理可用的插件，并检查 AgentDesk、Codex 和 Claude Code 的更新。
@@ -63,7 +63,7 @@ AgentDesk 是一个本地桌面界面，不是新的人工智能模型，也不�
 1. 根据上面的要求准备好要使用的工具和账号。
 2. 打开[最新版下载页面](https://github.com/yk-yla/agentdesk/releases/latest)，下载 Windows 安装包。
 3. 安装并启动 AgentDesk，选择一个本地项目目录。
-4. 点击 Codex 或 Claude Code 图标新建会话，然后直接输入任务。
+4. 点击 Codex 图标在工作台中新建会话；点击 Claude Code 图标会打开配置的外部终端。
 
 以后跳过了多个版本也没关系。检查更新时会直接提供最新版，不需要逐个版本安装；每次更新的具体内容可以在软件更新窗口或 [GitHub 更新记录](https://github.com/yk-yla/agentdesk/releases)中查看。
 

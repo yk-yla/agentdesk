@@ -57,6 +57,22 @@ describe("protocolAdapter turn lifecycle", () => {
     assert.equal(completed.activities[0].status, "completed");
   });
 
+  it("summarizes changed file paths when a turn diff arrives", () => {
+    const applied = applyServerMessage(emptySession("session-1", "C:\\work"), {
+      method: "turn/diff/updated",
+      params: {
+        turnId: "turn-1",
+        diff: "diff --git a/src/App.tsx b/src/App.tsx\n--- a/src/App.tsx\n+++ b/src/App.tsx\n"
+          + "diff --git a/src/styles.css b/src/styles.css\n--- a/src/styles.css\n+++ b/src/styles.css\n",
+      },
+    }).session;
+
+    assert.equal(applied.activities[0].title, "工作区变更");
+    assert.match(applied.activities[0].detail, /2 个文件/);
+    assert.match(applied.activities[0].detail, /src\/App\.tsx/);
+    assert.match(applied.activities[0].detail, /src\/styles\.css/);
+  });
+
   it("settles a reasoning activity when the turn ends without an item completion", () => {
     const session = emptySession("session-1", "C:\\work");
     session.status = "working";
@@ -97,6 +113,28 @@ describe("protocolAdapter turn lifecycle", () => {
     assert.equal(applied.errorText, "更新恢复数据已截断。");
   });
 
+  it("applies the native collaboration mode from thread settings", () => {
+    const session = emptySession("session-1", "C:\\work", "model", "medium");
+    assert.equal(session.collaborationMode, "default");
+
+    const applied = applyServerMessage(session, {
+      method: "thread/settings/updated",
+      params: {
+        threadId: "thread-1",
+        threadSettings: {
+          model: "model",
+          effort: "medium",
+          collaborationMode: {
+            mode: "plan",
+            settings: { model: "model", reasoning_effort: "medium", developer_instructions: null },
+          },
+        },
+      },
+    }).session;
+
+    assert.equal(applied.collaborationMode, "plan");
+  });
+
   it("clears the main-conversation marker when a tool later completes", () => {
     const session = emptySession("session-1", "C:\\work");
     session.activities = [{ id: "tool-1", kind: "mcpToolCall", title: "工具调用", detail: "docs / fetch", status: "failed", visibleInMain: true }];
@@ -128,6 +166,29 @@ describe("protocolAdapter hydration", () => {
     assert.equal(hydrated.status, "working");
     assert.equal(hydrated.activeTurnId, "turn-1");
     assert.equal(hydrated.messages[0].timestamp, 100_000);
+  });
+
+  it("restores historical activity status from its owning turn", () => {
+    const cases = [
+      ["completed", "completed"],
+      ["failed", "failed"],
+      ["interrupted", "interrupted"],
+      ["inProgress", "inProgress"],
+    ] as const;
+
+    for (const [turnStatus, activityStatus] of cases) {
+      const hydrated = hydrateSession(emptySession(`session-${turnStatus}`, "C:\\work"), {
+        id: `thread-${turnStatus}`,
+        cwd: "C:\\work",
+        turns: [{
+          id: `turn-${turnStatus}`,
+          status: turnStatus,
+          items: [{ id: `command-${turnStatus}`, type: "commandExecution", command: "npm test", ...(turnStatus === "completed" ? { status: "inProgress" } : {}) }],
+        }],
+      });
+
+      assert.equal(hydrated.activities[0].status, activityStatus);
+    }
   });
 
   it("uses Codex lifecycle timestamps for realtime messages", () => {
@@ -201,7 +262,7 @@ describe("protocolAdapter hydration", () => {
     assert.equal(hydrated.activeTurnId, "turn-1");
   });
 
-  it("keeps a realtime terminal lifecycle newer than an active snapshot", () => {
+  it("keeps a realtime lifecycle newer than an active snapshot", () => {
     const session = emptySession("session-1", "C:\\work");
     session.status = "idle";
     session.statusLabel = "就绪";
@@ -223,6 +284,9 @@ describe("protocolAdapter hydration", () => {
 
     assert.equal(hydrated.compactionCount, 14);
     assert.deepEqual(hydrated.compactionEventIds, ["compact-old"]);
+    assert.equal(hydrated.activities[0].title, "整理上下文");
+    assert.equal(hydrated.activities[0].status, "completed");
+    assert.match(hydrated.activities[0].detail, /释放上下文空间/);
   });
 
   it("does not count a replayed compaction event twice", () => {

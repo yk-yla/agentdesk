@@ -7,14 +7,13 @@ import { homedir } from "node:os";
 import { createServer, type Server } from "node:http";
 import path from "node:path";
 import { parse as parseToml } from "smol-toml";
-import type { CodexDefaults, DiagnosticExport, ExternalTerminalSettings, ExternalTerminalStatus, HandoffPackage, JsonRpcMessage, SavedImage, SavedTextFile } from "../shared/protocol";
+import type { CodexDefaults, DiagnosticExport, ExternalTerminalOpenRequest, ExternalTerminalSettings, HandoffPackage, JsonRpcMessage, SavedImage, SavedTextFile } from "../shared/protocol";
 import { externalTerminalLabel } from "../shared/externalTerminalPresets";
-import type { TerminalInputRequest, TerminalResizeRequest, TerminalSessionCommand, TerminalSessionRequest } from "../shared/terminalProtocol";
 import { createBackendRegistry } from "./agent/backendRegistry";
 import { prepareAgentRequest } from "./agent/requestAdapterRegistry";
 import { writeTextFileAtomicAsync } from "./atomicFile";
 import { DesktopNotificationRetention, normalizeDesktopNotification } from "./desktopNotification";
-import { createExternalTerminalLaunchPlan } from "./externalTerminalLauncher";
+import { createExternalTerminalLaunchPlan, expandExternalTerminalArgs } from "./externalTerminalLauncher";
 import { CoalescingAsyncTask } from "./asyncOperation";
 import { canonicalPath, isWithinDirectory, resolveLocalPathOpenRequest } from "./localPathPolicy";
 import { CodexBackend } from "./providers/codex/CodexBackend";
@@ -41,7 +40,6 @@ import { ensureCodexHomeLinks } from "./codexHome";
 import { parseClipboardImageDataUrl } from "./clipboardImageData";
 import { isClipboardImageSizeAllowed } from "../shared/imagePolicy";
 import { WorkspaceSnapshotCoordinator } from "./workspaceSnapshotCoordinator";
-import { TerminalSessionManager } from "./terminalSessionManager";
 import { NativeSessionOwnershipRegistry } from "./agent/nativeSessionOwnershipRegistry";
 import { detectImageMediaType, MAX_LOCAL_IMAGE_BYTES } from "./imageContent";
 
@@ -66,7 +64,6 @@ const processSupervisor = new ProcessSupervisor();
 let codexCliUpdateManager: CodexCliUpdateManager;
 let claudeUpdateManager: ClaudeUpdateManager;
 const nativeSessionOwnership = new NativeSessionOwnershipRegistry();
-const launchedExternalClaudeSessions = new Map<string, number>();
 interface ExternalTerminalExecutableCache {
   schema: 1;
   requestedExecutable: string;
@@ -114,6 +111,9 @@ const desktopNotificationRetention = new DesktopNotificationRetention<Notificati
 
 process.on("uncaughtExceptionMonitor", (error) => appLogger.log("error", "process.uncaught_exception", logErrorDetails(error)));
 process.on("unhandledRejection", (reason) => appLogger.log("error", "process.unhandled_rejection", reason instanceof Error ? logErrorDetails(reason) : { reason: String(reason) }));
+process.on("exit", (code) => {
+  if (process.env.ELECTRON_RENDERER_URL) console.error(`[agentdesk] main process exit code=${code}`);
+});
 const windowLifecycle = new WindowLifecycle({
   createWindow: (options) => new BrowserWindow(options) as unknown as DesktopWindow,
   createTray: (iconPath) => new Tray(iconPath),
@@ -220,22 +220,6 @@ function requireAuthorizedWorkspacePath(directory: string) {
   return resolved;
 }
 
-function expandExternalTerminalArgs(template: string, values: { cwd: string; sessionId: string; resume: boolean }) {
-  const replaced = template
-    .replaceAll("{cwd}", values.cwd.replaceAll("\\", "\\\\").replaceAll('"', '\\"'))
-    .replaceAll("{sessionId}", values.sessionId)
-    .replaceAll("{provider}", "claude");
-  if (/[{}]/u.test(replaced)) throw new Error("外部终端参数模板包含未识别的变量。");
-  const args: string[] = [];
-  const pattern = /"((?:\\.|[^"\\])*)"|([^\s]+)/gu;
-  for (const match of replaced.matchAll(pattern)) {
-    const value = match[1] ?? match[2] ?? "";
-    args.push(value.replaceAll('\\"', '"').replaceAll("\\\\", "\\"));
-  }
-  if (!values.resume) return args;
-  return args.map((value) => value.includes("--session-id") ? value.replaceAll("--session-id", "--resume") : value);
-}
-
 function externalTerminalEnvironment() {
   const env: NodeJS.ProcessEnv = { ...process.env };
   // AgentDesk may itself run with NO_COLOR/TERM=dumb (for example when it is
@@ -251,20 +235,17 @@ function externalTerminalEnvironment() {
   return env;
 }
 
-function validateExternalTerminalInput(input: unknown) {
+function validateExternalTerminalInput(input: unknown): Required<Pick<ExternalTerminalOpenRequest, "cwd" | "sessionId">> & { resume: boolean; initialPrompt: string } {
   if (!input || typeof input !== "object" || Array.isArray(input)) throw new Error("外部终端参数无效。");
   const record = input as Record<string, unknown>;
   const cwd = requireAuthorizedWorkspacePath(typeof record.cwd === "string" ? record.cwd : "");
   const sessionId = typeof record.sessionId === "string" ? record.sessionId : "";
   const resume = record.resume === true;
+  const initialPrompt = typeof record.initialPrompt === "string" ? record.initialPrompt.trim() : "";
   if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(sessionId)) throw new Error("Claude 会话 ID 无效。");
-  return { cwd, sessionId, resume };
-}
-
-function getExternalTerminalStatus(input: unknown): ExternalTerminalStatus {
-  validateExternalTerminalInput(input);
-  // 保留旧 IPC 接口，但不再扫描系统进程判断会话是否已运行。
-  return { state: "unknown", source: "unavailable" };
+  if (Buffer.byteLength(initialPrompt, "utf8") > 8 * 1024) throw new Error("Claude 初始提示过大。");
+  if (resume && initialPrompt) throw new Error("恢复 Claude 会话时不能同时发送初始提示。");
+  return { cwd, sessionId, resume, initialPrompt };
 }
 
 function configuredExternalTerminalExecutable(value: string) {
@@ -334,17 +315,17 @@ async function refreshExternalTerminalExecutableCache(settings = preferencesStor
   return cache;
 }
 
-function openConfiguredExternalTerminal(input: unknown): Promise<ExternalTerminalStatus> {
-  const { cwd, sessionId, resume } = validateExternalTerminalInput(input);
-  const settings = preferencesStore.read().externalTerminal;
-  const requestedExecutable = settings?.executable?.trim() || "";
+function openConfiguredExternalTerminal(input: unknown): Promise<{ state: "open"; source: "agentdesk" }> {
+  const { cwd, sessionId, resume, initialPrompt } = validateExternalTerminalInput(input);
+  const settings = normalizeExternalTerminal(preferencesStore.read().externalTerminal);
+  const requestedExecutable = settings.executable.trim();
   const cache = readExternalTerminalExecutableCache();
   if (!cache || cache.requestedExecutable !== requestedExecutable) throw new Error("终端配置正在检测，请稍后再试。");
   if (!cache.available || !cache.executable) throw new Error("找不到外部终端程序，请在设置中填写可执行文件路径。");
   const executable = cache.executable;
-  if (!settings?.argsTemplate.includes("{sessionId}")) throw new Error("外部终端参数模板必须包含 {sessionId}，否则无法绑定到当前 Claude 会话。");
-  appLogger.log("info", "external_terminal.open_requested", { executable: requestedExecutable, cwd, resume, sessionIdPresent: true });
-  const args = expandExternalTerminalArgs(settings?.argsTemplate || "", { cwd, sessionId, resume });
+  if (!settings.argsTemplate.includes("{sessionId}")) throw new Error("外部终端参数模板必须包含 {sessionId}，否则无法绑定到当前 Claude 会话。");
+  appLogger.log("info", "external_terminal.open_requested", { executable: requestedExecutable, cwd, resume, sessionIdPresent: true, initialPromptPresent: Boolean(initialPrompt) });
+  const args = expandExternalTerminalArgs(settings, executable, { cwd, sessionId, resume: resume === true, initialPrompt });
   if (!args.length) throw new Error("外部终端参数模板不能为空。");
   const launchPlan = createExternalTerminalLaunchPlan(settings, executable, args, cwd);
   return new Promise((resolve, reject) => {
@@ -366,7 +347,6 @@ function openConfiguredExternalTerminal(input: unknown): Promise<ExternalTermina
         reject(error);
         return;
       }
-      launchedExternalClaudeSessions.set(sessionId, Date.now());
       appLogger.log("info", "external_terminal.started", { executable: requestedExecutable, cwd, launchMode: launchPlan.mode });
       resolve({ state: "open", source: "agentdesk" });
     };
@@ -450,7 +430,6 @@ async function closeAllBackendsForExit() {
         appLogger.log("warn", "app.workspace_snapshot.failed", logErrorDetails(error));
       }
       await runShutdownSteps([
-        { name: "内置终端", run: () => terminalSessionManager.closeAll() },
         { name: "Provider", run: () => backendManager.close() },
         { name: "已跟踪进程", run: () => processSupervisor.terminateAll() },
         { name: "Claude 网关夹具", run: () => closeClaudeGatewayFixture() },
@@ -789,6 +768,7 @@ const codexImagePersistence = new CodexImagePersistence({
 });
 
 const codexAppServer = new CodexAppServer({
+  diagnosticLabel: "primary",
   command: codexCommand,
   cwd: () => workspacePath,
   appVersion: () => app.getVersion(),
@@ -804,33 +784,42 @@ const codexAppServer = new CodexAppServer({
   },
 });
 
-let claudeBackend: ClaudeBackend;
-const backendManager = createBackendRegistry([new CodexBackend(codexAppServer, codexTitleGenerator), (claudeBackend = new ClaudeBackend())], appLogger, (cwd) => isAuthorizedWorkspacePath(cwd), nativeSessionOwnership);
-const terminalSessionManager = new TerminalSessionManager({
-  isWorkspaceAuthorized: (cwd) => isAuthorizedWorkspacePath(cwd),
-  assertNativeSessionAuthorized: (provider, nativeSessionId, cwd) => backendManager.assertNativeSessionAuthorized(provider, nativeSessionId, cwd),
-  nativeOwnership: nativeSessionOwnership,
-  emit: (event) => windowLifecycle.send("terminal:event", event),
-  log: (level, event, details) => appLogger.log(level, event, details),
+// The bridge owns the default Codex home. Keep AgentDesk's writable state
+// isolated, but read legacy history through a separate app-server instance.
+const legacyCodexAppServer = new CodexAppServer({
+  diagnosticLabel: "legacy",
+  command: codexCommand,
+  cwd: () => workspacePath,
+  appVersion: () => app.getVersion(),
+  isRequestBlocked: () => codexCliUpdateManager?.active || false,
+  isQuitting: () => windowLifecycle.isQuitting,
+  isExitNotificationSuppressed: () => true,
+  terminateTree: (child) => processSupervisor.terminate(child),
+  env: { CODEX_HOME: path.join(homedir(), ".codex") },
+  inspectMessage(message, requestMethod) {
+    const inspected = codexImagePersistence.transformMessage(message);
+    registerAuthorizedImageReferences(inspected);
+    return inspected;
+  },
+  logger: appLogger,
 });
 
-  claudeUpdateManager = new ClaudeUpdateManager({
+let claudeBackend: ClaudeBackend;
+const backendManager = createBackendRegistry([new CodexBackend(codexAppServer, codexTitleGenerator, legacyCodexAppServer), (claudeBackend = new ClaudeBackend())], appLogger, (cwd) => isAuthorizedWorkspacePath(cwd), nativeSessionOwnership);
+claudeUpdateManager = new ClaudeUpdateManager({
   appPath: () => app.getAppPath(),
   userDataPath: () => app.getPath("userData"),
   fetch: (url, init) => net.fetch(url, init),
-    shutdownQueries: () => claudeBackend.shutdown(),
-    shutdownTerminals: () => terminalSessionManager.closeProvider("claude"),
-    setTerminalProviderBlocked: (_provider, blocked) => terminalSessionManager.setProviderUpdateBlocked("claude", blocked),
+  shutdownQueries: () => claudeBackend.shutdown(),
   emitStatus: (status) => windowLifecycle.send("claude:runtime-status-changed", status),
 });
 
-  codexCliUpdateManager = new CodexCliUpdateManager({
+codexCliUpdateManager = new CodexCliUpdateManager({
   processSupervisor,
   appServer: codexAppServer,
+  additionalAppServers: [legacyCodexAppServer],
   userDataPath: () => app.getPath("userData"),
   isQuitting: () => windowLifecycle.isQuitting,
-    shutdownTerminals: () => terminalSessionManager.closeProvider("codex"),
-    setTerminalProviderBlocked: (_provider, blocked) => terminalSessionManager.setProviderUpdateBlocked("codex", blocked),
   emitStatus: (status) => windowLifecycle.send("agentdesk:cli-update-status-changed", status),
   notify: (title, body) => {
     showRetainedDesktopNotification({ title, body }, () => windowLifecycle.show());
@@ -940,7 +929,6 @@ if (hasLock) {
           return shell.openExternal(url);
         },
         openExternalTerminal: (input) => openConfiguredExternalTerminal(input),
-        getExternalTerminalStatus: (input) => getExternalTerminalStatus(input),
       },
       showNotification: (input) => {
         const normalized = normalizeDesktopNotification(input);
@@ -980,22 +968,6 @@ if (hasLock) {
           return backendManager.request(request.provider, request.operation, params, request.context);
         },
         respond: (response) => backendManager.respond(response.ref, response.result),
-      },
-      terminal: {
-        start: async (request: TerminalSessionRequest) => {
-          if (request.nativeSessionId) {
-            await backendManager.prepareTerminalSession(request.provider, {
-              sessionId: request.sessionId,
-              canonicalCwd: canonicalPath(request.cwd),
-              nativeSessionId: request.nativeSessionId,
-            });
-          }
-          return terminalSessionManager.start(request);
-        },
-        write: (request: TerminalInputRequest) => terminalSessionManager.write(request),
-        resize: (request: TerminalResizeRequest) => terminalSessionManager.resize(request),
-        interrupt: (request: TerminalSessionCommand) => terminalSessionManager.interrupt(request),
-        close: (request: TerminalSessionCommand) => terminalSessionManager.close(request),
       },
       ...(process.env.ELECTRON_RENDERER_URL ? {
         development: {
@@ -1038,10 +1010,24 @@ if (hasLock) {
   });
 }
 
-app.on("before-quit", (event) => windowLifecycle.handleBeforeQuit(event, closeAllBackendsForExit, () => {
-  desktopUpdateManager.dispose();
-  codexCliUpdateManager.dispose();
-}));
+let beforeQuitCount = 0;
+app.on("before-quit", (event) => {
+  beforeQuitCount += 1;
+  appLogger.log("info", "app.before_quit", {
+    count: beforeQuitCount,
+    quitting: windowLifecycle.isQuitting,
+    allowQuit: windowLifecycle.allowQuit,
+  });
+  windowLifecycle.handleBeforeQuit(event, closeAllBackendsForExit, () => {
+    desktopUpdateManager.dispose();
+    codexCliUpdateManager.dispose();
+  });
+});
+app.on("will-quit", () => appLogger.log("info", "app.will_quit", { beforeQuitCount }));
+app.on("quit", (_event, exitCode) => {
+  appLogger.log("info", "app.quit", { beforeQuitCount, exitCode });
+  if (process.env.ELECTRON_RENDERER_URL) console.error(`[agentdesk] app quit exitCode=${exitCode}`);
+});
 
 let rendererRecoveryInFlight = false;
 app.on("render-process-gone", (_event, webContents, details) => {

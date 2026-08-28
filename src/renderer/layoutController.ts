@@ -5,7 +5,6 @@ export interface SessionCreationOptions {
   threadId?: string;
   title?: string;
   provider?: AgentProvider;
-  presentationMode?: "workbench" | "terminal";
   historyLoading?: boolean;
 }
 
@@ -29,10 +28,6 @@ export interface LayoutControllerServices {
   closeSession(sessionId: string): Promise<void>;
   releaseSession(sessionId: string, reason?: string): void;
   closeContextMenu(): void;
-  // Sessions created by layout actions still need host-side terminal
-  // preparation; the controller itself stays synchronous. Provider and cwd
-  // travel with the call because the host's session map may not be updated yet.
-  prepareSession?(sessionId: string, provider: AgentProvider | undefined, cwd: string): void;
   now?: () => number;
 }
 
@@ -165,7 +160,6 @@ export class LayoutController {
     const sessionId = this.services.createSession(cwd, provider ? { provider } : undefined);
     const addition = { id: this.nextPaneId(), tabIds: [sessionId], activeTabId: sessionId };
     this.state.updateLayout((layout) => ({ ...layout, panes: [...layout.panes, addition], activePaneId: addition.id }));
-    this.services.prepareSession?.(sessionId, provider, cwd);
   };
 
   readonly closePane = (paneId: string) => {
@@ -208,7 +202,6 @@ export class LayoutController {
     } else {
       const nextSessionId = this.services.createSession(session.cwd, { provider: session.provider });
       this.replaceSession(sessionId, nextSessionId);
-      this.services.prepareSession?.(nextSessionId, session.provider, session.cwd);
     }
     void this.services.closeSession(sessionId).finally(() => this.services.releaseSession(sessionId));
     return true;

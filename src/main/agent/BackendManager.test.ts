@@ -3,7 +3,6 @@ import { describe, it } from "node:test";
 import type { AgentBackend } from "./AgentBackend";
 import type { AgentEventEnvelope, AgentProvider } from "../../shared/agentProtocol";
 import { BackendManager } from "./BackendManager";
-import { NativeSessionOwnershipRegistry } from "./nativeSessionOwnershipRegistry";
 
 function backend(provider: AgentProvider, result: unknown): AgentBackend {
   const listeners = new Set<(event: AgentEventEnvelope) => void>();
@@ -63,56 +62,6 @@ describe("BackendManager", () => {
     await manager.request("codex", "startSession", { cwd: process.cwd() }, context);
 
     assert.equal(closes, 1);
-  });
-
-  it("prepares a terminal only for a Provider-listed native session", async () => {
-    const manager = new BackendManager();
-    const codex = backend("codex", { data: [{ id: "thread-1", cwd: process.cwd() }] });
-    let prepared = 0;
-    codex.prepareTerminalSession = async () => { prepared += 1; };
-    manager.register(codex);
-    await manager.request("codex", "listSessions", { cwd: process.cwd() }, { canonicalCwd: process.cwd() });
-
-    await manager.prepareTerminalSession("codex", { sessionId: "client-1", nativeSessionId: "thread-1", canonicalCwd: process.cwd() });
-    await assert.rejects(
-      () => manager.prepareTerminalSession("codex", { sessionId: "client-2", nativeSessionId: "unknown", canonicalCwd: process.cwd() }),
-      /尚未由当前工作区/,
-    );
-    assert.equal(prepared, 1);
-  });
-
-  it("releases only the handoff tab while retaining other workbench bindings", async () => {
-    const ownership = new NativeSessionOwnershipRegistry();
-    const manager = new BackendManager(undefined, () => true, ownership);
-    const codex = backend("codex", null);
-    codex.request = async (operation, params) => operation === "listSessions"
-      ? { data: [{ id: "thread-target", cwd: process.cwd() }, { id: "thread-other", cwd: process.cwd() }] }
-      : { thread: { id: typeof params.threadId === "string" ? params.threadId : "thread-other", cwd: process.cwd() } };
-    codex.prepareTerminalSession = async () => undefined;
-    manager.register(codex);
-    await manager.request("codex", "listSessions", { cwd: process.cwd() }, { canonicalCwd: process.cwd() });
-    await manager.request("codex", "resumeSession", { cwd: process.cwd(), threadId: "thread-other" }, { sessionId: "other", canonicalCwd: process.cwd(), nativeSessionId: "thread-other" });
-    await manager.request("codex", "resumeSession", { cwd: process.cwd(), threadId: "thread-target" }, { sessionId: "target", canonicalCwd: process.cwd(), nativeSessionId: "thread-target" });
-
-    await manager.prepareTerminalSession("codex", { sessionId: "target", nativeSessionId: "thread-target", canonicalCwd: process.cwd() });
-
-    assert.equal(ownership.owner("codex", "thread-other")?.clientSessionId, "other");
-    assert.equal(ownership.owner("codex", "thread-target"), undefined);
-    manager.assertNativeSessionAuthorized("codex", "thread-target", process.cwd());
-  });
-
-  it("blocks a terminal handoff while another Provider query is active", async () => {
-    let emit: ((event: AgentEventEnvelope) => void) | undefined;
-    const manager = new BackendManager();
-    const codex = backend("codex", { thread: { id: "thread-running", cwd: process.cwd() } });
-    codex.subscribeEvents = (listener) => { emit = listener; return () => undefined; };
-    codex.prepareTerminalSession = async () => undefined;
-    manager.register(codex);
-    const context = { sessionId: "running", canonicalCwd: process.cwd(), nativeSessionId: "thread-running" };
-    await manager.request("codex", "resumeSession", { cwd: process.cwd(), threadId: "thread-running" }, context);
-    emit?.({ provider: "codex", type: "turn/started", receivedAt: Date.now(), payload: { threadId: "thread-running" } });
-
-    await assert.rejects(() => manager.prepareTerminalSession("codex", context), /任务正在运行/);
   });
 
   it("closes every provider once and reports partial failures", async () => {

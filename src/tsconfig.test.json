@@ -30,8 +30,6 @@
     "main/preferencesStore.test.ts",
     "main/processSupervisor.ts",
     "main/processSupervisor.test.ts",
-    "main/terminalSessionManager.ts",
-    "main/terminalSessionManager.test.ts",
     "main/desktopNotification.ts",
     "main/desktopNotification.test.ts",
     "main/externalTerminalLauncher.ts",

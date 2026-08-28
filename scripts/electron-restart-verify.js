@@ -6,14 +6,14 @@ async page => {
   const rightDraft = "AgentDesk restart right draft - forced snapshot";
   await page.locator("aside.sidebar").waitFor({ state: "visible", timeout: 15_000 });
   await page.waitForFunction(({ left, right }) => {
-    const panes = Array.from(document.querySelectorAll(".pane-panel"));
+    const panes = Array.from(document.querySelectorAll(".pane-panel:not(.inactive-tab)"));
     const drafts = panes.map((pane) => pane.querySelector('textarea[aria-label="消息输入"]')?.value || "");
     return panes.length === 2 && drafts[0] === left && drafts[1] === right;
   }, { left: leftDraft, right: rightDraft }, { timeout: 20_000 });
 
   const state = await page.evaluate(async () => {
     const preferences = await window.agentDesk.getPreferences();
-    const panes = Array.from(document.querySelectorAll(".pane-panel"));
+    const panes = Array.from(document.querySelectorAll(".pane-panel:not(.inactive-tab)"));
     return {
       paneCount: panes.length,
       tabCounts: Array.from(document.querySelectorAll(".pane-tab-group")).map((group) => group.querySelectorAll(".tab").length),

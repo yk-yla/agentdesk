@@ -2,7 +2,7 @@ import { ArrowLeftToLine, ArrowRight, ArrowRightToLine, Download, FolderOpen, Gi
 import { useCallback, useEffect, useMemo, useRef, useState, type CSSProperties, type DragEvent, type MouseEvent, type PointerEvent as ReactPointerEvent } from "react";
 import type { AgentCapabilities, AgentOperation, AgentProvider } from "../shared/agentProtocol";
 import { providerDisplayName } from "../shared/providerMetadata";
-import { DEFAULT_BASE_FONT_SIZE, DEFAULT_PRESENTATION_MODE, type ClaudeRuntimeStatus, type CodexCliUpdateStatus, type CompactionRecord, type CodexDefaults, type DesktopPreferences, type DesktopUpdateStatus, type JsonObject, type PresentationMode } from "../shared/protocol";
+import { DEFAULT_BASE_FONT_SIZE, type ClaudeRuntimeStatus, type CodexCliUpdateStatus, type CompactionRecord, type CodexDefaults, type DesktopPreferences, type DesktopUpdateStatus, type JsonObject } from "../shared/protocol";
 import {
   asRecord, basename, DEFAULT_THEME, emptySession, findModelOption, historyThread,
   EMPTY_CODEX_DEFAULTS, normalizedDirectory, numberValue, sameDirectory, stringValue, upsertHistoryEntry,
@@ -25,7 +25,7 @@ import { appendRawEvent, clearRawEvents } from "./rawEventStore";
 import Sidebar, { type HistoryAction, type SidebarProps } from "./Sidebar";
 import { handoffMarkdown, sessionMarkdown } from "./sessionTools";
 import { authorizeRestoredSessionWorkspaces, createWorkspaceState, loadSavedImages, parseWorkspaceState, workspaceStateFingerprint } from "./workspaceState";
-import { SessionSettingsCoordinator } from "./sessionSettingsCoordinator";
+import { SessionSettingsCoordinator, type SessionSettings } from "./sessionSettingsCoordinator";
 import { recoverProviderSessions } from "./providerRecovery";
 import { SessionLifecycleController } from "./sessionLifecycleController";
 import { SessionMessageController } from "./sessionMessageController";
@@ -39,13 +39,12 @@ import ProviderIcon from "./ProviderIcon";
 import { closeSessionResources } from "./sessionLifecycle";
 import { installRendererDiagnostics, trackUiEvent } from "./rendererDiagnostics";
 import { initializeProviders, providerCanRestore, type ProviderStartupState } from "./providerInitialization";
-import { workspaceRestoreRetry } from "./workspaceRestorePolicy";
+import { finishWorkspaceRestore, workspaceRestoreRetry } from "./workspaceRestorePolicy";
 import type { CommandUsage } from "./commandSuggestions";
 import { TurnTelemetry } from "./turnTelemetry";
 import { PreferenceSaveCoordinator } from "./preferenceSaveCoordinator";
-import type { ClaudeTerminalSettings } from "./terminalSettings";
-import { shouldUseTerminalHistoryRequest } from "./terminalHistoryRequest";
 import { userFacingErrorMessage } from "./errorMessage";
+import { addDismissedSessionNotices } from "./sessionNoticeDismissal";
 
 declare const __CODEX_BROWSER_PREVIEW__: boolean;
 
@@ -57,19 +56,16 @@ const NO_ATTACHMENTS: ImageAttachment[] = [];
 const NO_QUEUED_MESSAGES: QueuedMessage[] = [];
 const NO_PENDING_STEERS: PendingSteerMessage[] = [];
 const NO_SKILLS: SkillOption[] = [];
+const NO_DISMISSED_NOTICE_KEYS: string[] = [];
 const READ_ONLY_SESSION_OPERATIONS = new Set<AgentOperation>([
   "readSession", "resumeSession", "getGoal", "readRateLimits", "listMcpServers", "listSkills", "closeSession",
 ]);
 
-const CODEX_TERMINAL_HANDOFF_SETTLE_MS = 750;
 const INITIAL_UPDATE_STATUS: DesktopUpdateStatus = { phase: "idle", currentVersion: "", message: "等待检查更新。", repositoryUrl: "https://github.com/yk-yla/agentdesk" };
 const INITIAL_CLI_UPDATE_STATUS: CodexCliUpdateStatus = { phase: "idle", currentVersion: "", message: "正在读取 Codex CLI 版本。" };
 const INITIAL_CLAUDE_RUNTIME_STATUS: ClaudeRuntimeStatus = { phase: "idle", binarySource: "sdk", binaryVersion: "", sdkVersion: "", credentialsAvailable: false, credentialSource: "unavailable", credentialMessage: "正在读取 Claude 配置。", message: "等待检查更新。" };
 const CLAUDE_HISTORY_PAGE_SIZE = 200;
 
-function workbenchOnlyPresentationMode(): PresentationMode {
-  return "workbench";
-}
 const DEFAULT_SIDEBAR_WIDTH = 250;
 const MIN_SIDEBAR_WIDTH = 184;
 const MAX_SIDEBAR_WIDTH = 480;
@@ -89,6 +85,30 @@ function sidebarWidthFromPointer(clientX: number) {
 
 function sessionHasActiveWork(session: SessionState | undefined) {
   return Boolean(session && (session.status === "working" || session.activeTurnId || session.pendingApprovals.length));
+}
+
+function settingsForSession(session: Pick<SessionState, "model" | "effort" | "collaborationMode">): SessionSettings {
+  return { model: session.model, effort: session.effort, collaborationMode: session.collaborationMode };
+}
+
+function collaborationModeParams(settings: SessionSettings) {
+  return {
+    mode: settings.collaborationMode,
+    settings: {
+      model: settings.model,
+      reasoning_effort: settings.effort || null,
+      developer_instructions: null,
+    },
+  };
+}
+
+function threadSettingsParams(threadId: string, settings: SessionSettings): JsonObject {
+  return {
+    threadId,
+    model: settings.model,
+    effort: settings.effort,
+    collaborationMode: collaborationModeParams(settings),
+  };
 }
 
 interface TabContextMenuState {
@@ -195,7 +215,7 @@ export default function App() {
   const [skillsByCwd, setSkillsByCwd] = useState<Record<string, SkillOption[]>>({});
   const [codexDefaults, setCodexDefaults] = useState<CodexDefaults>(EMPTY_CODEX_DEFAULTS);
   const [providerStartupStates, setProviderStartupStates] = useState<Record<AgentProvider, ProviderStartupState>>({ codex: "connecting", claude: "connecting" });
-  const [preferences, setPreferences] = useState<DesktopPreferences>({ lastWorkspace: "", favoriteWorkspaces: [], theme: DEFAULT_THEME, lastCodexPresentationMode: DEFAULT_PRESENTATION_MODE });
+  const [preferences, setPreferences] = useState<DesktopPreferences>({ lastWorkspace: "", favoriteWorkspaces: [], theme: DEFAULT_THEME });
   const recentCommandUsage = (preferences.recentCommandUsage || {}) as CommandUsage;
   const [updateStatus, setUpdateStatus] = useState<DesktopUpdateStatus>(INITIAL_UPDATE_STATUS);
   const [cliUpdateStatus, setCliUpdateStatus] = useState<CodexCliUpdateStatus>(INITIAL_CLI_UPDATE_STATUS);
@@ -230,7 +250,6 @@ export default function App() {
   const providerStartupStatesRef = useRef(providerStartupStates);
   const preferenceSaveCoordinatorRef = useRef(new PreferenceSaveCoordinator());
   const claudeRuntimeStatusRef = useRef(claudeRuntimeStatus);
-  const tabContextMenuRef = useRef(tabContextMenu);
   const sidebarCollapsedRef = useRef(sidebarCollapsed);
   const sidebarLaunchesRef = useRef(new Map<string, { startedAt: number; inFlight: boolean }>());
   const externalTerminalLaunchesRef = useRef(new Map<string, { startedAt: number; inFlight: boolean }>());
@@ -247,7 +266,6 @@ export default function App() {
   preferencesRef.current = preferences;
   providerStartupStatesRef.current = providerStartupStates;
   claudeRuntimeStatusRef.current = claudeRuntimeStatus;
-  tabContextMenuRef.current = tabContextMenu;
   sidebarCollapsedRef.current = sidebarCollapsed;
 
   const draftsRef = useRef(new Map<string, string>());
@@ -269,7 +287,7 @@ export default function App() {
   const settingsCoordinatorRef = useRef(new SessionSettingsCoordinator());
   const commandSetSessionSettingRef = useRef<((sessionId: string, field: "model" | "effort", value: string) => Promise<void>) | null>(null);
   const commandRenameSessionRef = useRef<((sessionId: string, name: string) => Promise<void>) | null>(null);
-  const commandSetCollaborationModeRef = useRef<((sessionId: string, mode: CollaborationMode) => void) | null>(null);
+  const commandSetCollaborationModeRef = useRef<((sessionId: string, mode: CollaborationMode) => Promise<void>) | null>(null);
   const workspaceRestoreInProgressRef = useRef(false);
   const workspaceStateReadyRef = useRef(false);
   const workspaceStateSaveTimerRef = useRef<number | undefined>(undefined);
@@ -400,11 +418,12 @@ export default function App() {
     if (session?.readOnly && !READ_ONLY_SESSION_OPERATIONS.has(operation)) {
       throw new Error("当前会话正被其他程序使用，已切换为只读模式。");
     }
-    const terminalHistoryRequest = shouldUseTerminalHistoryRequest(session && { ...session, provider }, operation);
-    const requestParams = terminalHistoryRequest && session?.threadId
+    const externalClaudeHistoryRequest = session?.provider === "claude" && session.readOnly === true && Boolean(session.threadId)
+      && ["readSession", "forkSession", "renameSession", "deleteSession", "updateSessionMetadata"].includes(operation);
+    const requestParams = externalClaudeHistoryRequest && session?.threadId
       ? { ...params, cwd: session.cwd, threadId: session.threadId }
       : params;
-    const context = terminalHistoryRequest && session?.threadId
+    const context = externalClaudeHistoryRequest && session?.threadId
       ? { canonicalCwd: session.cwd, nativeSessionId: session.threadId }
       : {
         sessionId,
@@ -449,22 +468,13 @@ export default function App() {
   }, [requestForSession]);
 
   // Claude is displayed read-only in AgentDesk; interaction happens in the configured external terminal.
-  const newSessionPresentationMode = useCallback((_provider: AgentProvider, _requested?: "workbench" | "terminal"): PresentationMode => workbenchOnlyPresentationMode(), []);
-
-  const createSessionState = useCallback((cwd: string, options?: { threadId?: string; title?: string; provider?: AgentProvider; presentationMode?: "workbench" | "terminal"; historyLoading?: boolean }) => {
+  const createSessionState = useCallback((cwd: string, options?: { threadId?: string; title?: string; provider?: AgentProvider; historyLoading?: boolean }) => {
     const id = `session-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
     const provider = options?.provider || "codex";
     const defaults = newSessionDefaults(provider, providerModelsRef.current[provider], defaultsRef.current, providerCapabilitiesRef.current[provider], preferencesRef.current.lastReasoningEfforts?.[provider]);
     const session = emptySession(id, cwd, defaults.model, defaults.effort, provider);
     session.capabilities = defaults.capabilities;
-    session.presentationMode = newSessionPresentationMode(provider, options?.presentationMode);
     session.historyLoading = options?.historyLoading === true;
-    if (session.presentationMode === "terminal") {
-      // Keep the pane suspended until workspace authorization completes. A
-      // brand-new terminal gets its native session from the CLI itself.
-      session.terminalSuspended = true;
-      session.statusLabel = "正在准备黑窗口";
-    }
     session.tokenUsage.total = cachedModelContextWindow(preferencesRef.current, session.model);
     session.threadId = options?.threadId ?? null;
     if (provider === "claude") session.readOnly = true;
@@ -472,10 +482,6 @@ export default function App() {
     session.titleOrigin = options?.title ? "provider" : "placeholder";
     session.resumed = false;
     const initialized = withPersistedCompaction(session, preferencesRef.current);
-    // Layout actions start terminal preparation in the same turn as this
-    // state update. Publish the ref immediately so the preparation cannot
-    // mistake a freshly-created session for a deleted one before React runs
-    // the state updater.
     sessionsRef.current = { ...sessionsRef.current, [id]: initialized };
     setSessions((current) => {
       const next = { ...current, [id]: initialized };
@@ -483,7 +489,7 @@ export default function App() {
       return next;
     });
     return id;
-  }, [newSessionPresentationMode]);
+  }, []);
 
   const toggleSidebarCollapsed = useCallback(() => {
     trackUiEvent("sidebar.toggle");
@@ -511,21 +517,9 @@ export default function App() {
     check();
   }), []);
 
-  const closeBackendSession = useCallback((sessionId: string, modeOverride?: "workbench" | "terminal") => {
+  const closeBackendSession = useCallback((sessionId: string) => {
     const session = sessionsRef.current[sessionId];
     if (!session) return Promise.resolve();
-    if ((modeOverride || session.presentationMode) === "terminal") {
-      if (session.provider === "claude") {
-        return bridge.closeTerminal({ sessionId }).catch((error) => {
-          console.warn("[closeBackendSession] Claude terminal close failed:", error);
-        });
-      }
-      updateSession(sessionId, (current) => ({ ...current, statusLabel: "正在关闭", errorText: "" }));
-      return bridge.closeTerminal({ sessionId }).catch((error) => {
-        updateSession(sessionId, (current) => ({ ...current, statusLabel: "关闭失败", errorText: error instanceof Error ? error.message : "关闭终端失败。" }));
-        throw error;
-      });
-    }
     const context = { sessionId, canonicalCwd: session.cwd, nativeSessionId: session.threadId || undefined, queryGeneration: session.queryGeneration };
     updateSession(sessionId, (current) => ({ ...current, statusLabel: "正在关闭", errorText: "" }));
     return sessionLifecycleRef.current.close(sessionId, () => closeSessionResources({
@@ -544,7 +538,7 @@ export default function App() {
       updateSession(sessionId, (current) => ({ ...current, statusLabel: result.closeError ? "关闭失败" : "停止任务失败", errorText: error instanceof Error ? error.message : "关闭会话失败。" }));
       throw error;
     }));
-  }, [agentClient, bridge, updateSession, waitForSessionIdle]);
+  }, [agentClient, updateSession, waitForSessionIdle]);
 
   const releaseSessionState = useCallback((sessionId: string, reason = "会话已关闭。") => {
     setSessions((current) => { const next = { ...current }; delete next[sessionId]; sessionsRef.current = next; return next; });
@@ -561,11 +555,6 @@ export default function App() {
     clearRawEvents(sessionId);
   }, [removeSessionAttachments]);
 
-  // Layout actions create sessions synchronously, before prepareNewTerminalSession
-  // exists in this scope. Forward through a ref so a split or replacement pane
-  // still gets the Provider handshake that clears terminalSuspended.
-  const prepareLayoutSessionRef = useRef<(sessionId: string, provider: AgentProvider | undefined, cwd: string) => void>(() => undefined);
-
   if (!layoutControllerRef.current) {
     layoutControllerRef.current = new LayoutController({
       getLayout: () => layoutRef.current,
@@ -581,7 +570,6 @@ export default function App() {
       closeSession: closeBackendSession,
       releaseSession: releaseSessionState,
       closeContextMenu: () => setTabContextMenu(null),
-      prepareSession: (sessionId, provider, cwd) => prepareLayoutSessionRef.current(sessionId, provider, cwd),
     });
   }
   const layoutController = layoutControllerRef.current;
@@ -589,15 +577,6 @@ export default function App() {
     addSession, addSessionToPane, activateSession, focusPane, setActiveTab, removeTab, closeTabIds,
     splitPane, closePane, closeActiveTab, moveTab,
   } = layoutController;
-
-  // Asked by a TerminalPane at unmount whether its session is being moved
-  // (still in the layout) rather than closed. moveTab updates layoutRef
-  // synchronously before the unmount cleanup runs, so a session found here is a
-  // move and its PTY must be kept alive for the reattaching remount.
-  const isSessionRetained = useCallback(
-    (sessionId: string) => layoutRef.current.panes.some((pane) => pane.tabIds.includes(sessionId)),
-    [],
-  );
 
   const openTabContextMenu = useCallback((event: MouseEvent<HTMLButtonElement>, paneId: string, sessionId: string) => {
     event.preventDefault();
@@ -624,20 +603,15 @@ export default function App() {
   const clearSession = useCallback(async (sessionId: string) => {
     const session = sessionsRef.current[sessionId];
     if (!session) return;
-    if (session.presentationMode === "terminal") {
-      setError(sessionId, new Error("黑窗口会话不会通过清空操作退出，请直接关闭标签。"), "黑窗口不会通过清空操作退出");
-      return false;
-    }
     // /clear is a lifecycle operation: stop the active Query first, including
     // pending approvals, then replace the client session only after resources
     // have been released successfully.
     try { await closeBackendSession(sessionId); } catch { return false; }
     const nextSessionId = createSessionState(session.cwd, { provider: session.provider });
     layoutController.replaceSession(sessionId, nextSessionId);
-    prepareLayoutSessionRef.current(nextSessionId, session.provider, session.cwd);
     releaseSessionState(sessionId, "会话已清空。");
     return true;
-  }, [closeBackendSession, createSessionState, layoutController, releaseSessionState, setError]);
+  }, [closeBackendSession, createSessionState, layoutController, releaseSessionState]);
 
   const appendSystemMessage = useCallback((sessionId: string, text: string) => {
     updateSession(sessionId, (current) => ({
@@ -669,7 +643,7 @@ export default function App() {
     try {
       next = await bridge.savePreferences(patch);
     } catch (error) {
-      const fields = Object.keys(patch).filter((field) => ["theme", "baseFontSize", "sidebarWidth", "lastCodexPresentationMode"].includes(field));
+      const fields = Object.keys(patch).filter((field) => ["theme", "baseFontSize", "sidebarWidth"].includes(field));
       if (fields.length) trackUiEvent("preference.save_failed", { fields, errorName: error instanceof Error ? error.name : "unknown" });
       // If the write failed and no newer write replaced this field, restore the
       // last known persisted value before propagating the error to the caller.
@@ -971,87 +945,32 @@ export default function App() {
     await savePreference({ lastWorkspace: registered });
   }, [bridge, savePreference]);
 
-  const prepareNewTerminalSession = useCallback(async (sessionId: string, provider: AgentProvider, directory: string) => {
-    updateSession(sessionId, (current) => ({ ...current, terminalSuspended: true, statusLabel: "正在准备黑窗口", errorText: "" }));
-    try {
-      // A new terminal session is owned by the CLI itself. Calling the
-      // Provider's startSession here creates a thread ID before Codex has a
-      // rollout, so TerminalPane would incorrectly launch `codex resume ID`
-      // and the CLI exits with "no rollout found". Historical sessions take
-      // the separate readSession/restore path below and keep their resume ID.
-      const registered = await bridge.registerWorkspace(directory);
-      if (!registered) throw new Error("终端工作区未获授权。");
-      if (!sessionsRef.current[sessionId]) return;
-      updateSession(sessionId, (current) => ({ ...current, resumed: true, status: "idle", statusLabel: "正在启动终端", errorText: "", terminalSuspended: false }));
-    } catch (error) {
-      updateSession(sessionId, (current) => ({ ...current, presentationMode: provider === "claude" ? "terminal" : "workbench", terminalSuspended: false, status: "error", statusLabel: "黑窗口准备失败", errorText: error instanceof Error ? error.message : "黑窗口准备失败。" }));
-    }
-  }, [bridge, updateSession]);
-
-  // Split panes and final-tab replacements inherit the source Provider, so a
-  // Claude pane always lands in terminal mode with terminalSuspended set. Run
-  // the same workspace authorization as createSessionInDirectory performs.
-  prepareLayoutSessionRef.current = (sessionId: string, provider: AgentProvider | undefined, cwd: string) => {
-    // The layout action passes Provider and cwd because the session map may
-    // still be awaiting its React state update on this tick.
-    const target = provider || "codex";
-    if (newSessionPresentationMode(target) !== "terminal") return;
-    void prepareNewTerminalSession(sessionId, target, cwd);
-  };
-
-  const restoreTerminalSession = useCallback(async (sessionId: string, provider: AgentProvider, directory: string, threadId: string) => {
-    try {
-      await ensureProviderInitialized(provider);
-      await agentClient.request(provider, "readSession", { cwd: directory, threadId, includeTurns: false });
-      providerEventRef.current?.bindSession(provider, threadId, sessionId);
-      if (!sessionsRef.current[sessionId]) return;
-      updateSession(sessionId, (current) => ({ ...current, terminalSuspended: false, status: "idle", statusLabel: "正在启动终端", errorText: "" }));
-    } catch (error) {
-      updateSession(sessionId, (current) => ({
-        ...current,
-        presentationMode: "workbench",
-        terminalSuspended: false,
-        status: "error",
-        statusLabel: "黑窗口恢复失败",
-        errorText: error instanceof Error ? error.message : "黑窗口恢复失败。",
-      }));
-    }
-  }, [agentClient, ensureProviderInitialized, updateSession]);
-
   const createSessionInDirectory = useCallback(async (
     directory: string,
     provider: AgentProvider = "codex",
     placement?: { paneId: string; afterSessionId?: string },
-    presentationMode?: "workbench" | "terminal",
   ) => {
     const registered = await bridge.registerWorkspace(directory);
     if (!registered) return undefined;
     directory = registered;
-    const selectedPresentationMode = workbenchOnlyPresentationMode();
-    if (selectedPresentationMode === "workbench") void ensureProviderInitialized(provider);
+    void ensureProviderInitialized(provider);
     setWorkspace(directory);
     const nativeSessionId = provider === "claude" ? crypto.randomUUID() : undefined;
     const sessionId = placement
-      ? addSessionToPane(placement.paneId, directory, { provider, presentationMode: selectedPresentationMode, ...(nativeSessionId ? { threadId: nativeSessionId, title: "新 Claude 会话" } : {}) }, placement.afterSessionId)
-      : addSession(directory, { provider, presentationMode: selectedPresentationMode, ...(nativeSessionId ? { threadId: nativeSessionId, title: "新 Claude 会话" } : {}) });
+      ? addSessionToPane(placement.paneId, directory, { provider, ...(nativeSessionId ? { threadId: nativeSessionId, title: "新 Claude 会话" } : {}) }, placement.afterSessionId)
+      : addSession(directory, { provider, ...(nativeSessionId ? { threadId: nativeSessionId, title: "新 Claude 会话" } : {}) });
     if (provider === "claude") {
       updateSession(sessionId, (current) => ({ ...current, readOnly: true, statusLabel: "等待外部终端启动", errorText: "" }));
       setHistory((current) => upsertHistoryEntry(current, { id: nativeSessionId!, provider: "claude", cwd: directory, title: "新 Claude 会话" }));
       void bridge.openExternalTerminal({ cwd: directory, sessionId: nativeSessionId! }).catch((error) => setError(sessionId, error, "打开外部终端失败"));
     }
-    if (selectedPresentationMode === "terminal") void prepareNewTerminalSession(sessionId, provider, directory);
     trackUiEvent("session.create", { provider, placement: placement ? "tab" : "pane" });
-    if (selectedPresentationMode === "workbench") {
-      void agentClient.request(provider, "getCapabilities", {}, { sessionId, canonicalCwd: directory })
-        .then((value) => {
-          const capabilities = value as SessionState["capabilities"];
-          updateSession(sessionId, (current) => ({ ...current, capabilities }));
-        })
-        .catch((error) => setError(sessionId, error, "读取 Provider 能力失败"));
-    }
-    void savePreference({ lastWorkspace: directory, ...(provider === "codex" && selectedPresentationMode ? { lastCodexPresentationMode: selectedPresentationMode } : {}) });
+    void agentClient.request(provider, "getCapabilities", {}, { sessionId, canonicalCwd: directory })
+      .then((value) => updateSession(sessionId, (current) => ({ ...current, capabilities: value as SessionState["capabilities"] })))
+      .catch((error) => setError(sessionId, error, "读取 Provider 能力失败"));
+    void savePreference({ lastWorkspace: directory });
     return sessionId;
-  }, [addSession, addSessionToPane, bridge, prepareNewTerminalSession, savePreference, setError, updateSession]);
+  }, [addSession, addSessionToPane, agentClient, bridge, ensureProviderInitialized, savePreference, setError, updateSession]);
 
   const openClaudeTerminalInDirectory = useCallback(async (directory: string) => {
     const key = `claude:${normalizedDirectory(directory)}`;
@@ -1067,9 +986,6 @@ export default function App() {
       setWorkspace(registered);
       const sessionId = crypto.randomUUID();
       await bridge.openExternalTerminal({ cwd: registered, sessionId });
-      // Keep the newly launched external session visible in the directory
-      // history even though it intentionally has no AgentDesk tab.
-      setHistory((current) => upsertHistoryEntry(current, { id: sessionId, provider: "claude", cwd: registered, title: "新 Claude 会话" }));
       await savePreference({ lastWorkspace: registered });
       trackUiEvent("session.create", { provider: "claude", placement: "external-terminal" });
     } catch (error) {
@@ -1140,10 +1056,10 @@ export default function App() {
     const session = sessionsRef.current[sessionId];
     if (!session) return;
     if (session.provider === "claude") {
-      updateSession(sessionId, (current) => ({ ...current, errorText: "Claude Code 的模型和思考等级请在黑窗口中修改。" }));
+      updateSession(sessionId, (current) => ({ ...current, errorText: "Claude Code 的模型和思考等级请在外部终端中调整。" }));
       return;
     }
-    const fallback = { model: session.model, effort: session.effort };
+    const fallback = settingsForSession(session);
     settingsCoordinatorRef.current.initialize(sessionId, fallback);
     const currentTarget = settingsCoordinatorRef.current.desired(sessionId, fallback);
     if (session.capabilities[field === "model" ? "models" : "effort"] !== "supported") return;
@@ -1153,7 +1069,11 @@ export default function App() {
     const nextEffort = field === "model" && selectedModel && !selectedModel.efforts.includes(currentTarget.effort)
       ? selectedModel.defaultEffort
       : field === "effort" ? value : currentTarget.effort || selectedModel?.defaultEffort || "medium";
-    const requested = { model: field === "model" ? value : selectedModel?.id || currentTarget.model, effort: nextEffort };
+    const requested: SessionSettings = {
+      model: field === "model" ? value : selectedModel?.id || currentTarget.model,
+      effort: nextEffort,
+      collaborationMode: currentTarget.collaborationMode,
+    };
     updateSession(sessionId, (current) => {
       return {
         ...current,
@@ -1169,11 +1089,7 @@ export default function App() {
       return;
     }
     const request = settingsCoordinatorRef.current.enqueue(sessionId, requested, async (target) => {
-      await requestForSession(sessionId, "updateSessionSettings", {
-        threadId: session.threadId as string,
-        model: target.model,
-        effort: target.effort,
-      });
+      await requestForSession(sessionId, "updateSessionSettings", threadSettingsParams(session.threadId as string, target));
     });
     try {
       await request.promise;
@@ -1182,6 +1098,7 @@ export default function App() {
           ...current,
           model: requested.model,
           effort: requested.effort,
+          collaborationMode: requested.collaborationMode,
           tokenUsage: tokenUsageForModel(current, requested.model, preferencesRef.current),
           errorText: "",
         }));
@@ -1194,6 +1111,7 @@ export default function App() {
           ...current,
           model: confirmed.model,
           effort: confirmed.effort,
+          collaborationMode: confirmed.collaborationMode,
           tokenUsage: tokenUsageForModel(current, confirmed.model, preferencesRef.current),
           errorText: error instanceof Error ? error.message : "设置更新失败",
         }));
@@ -1201,9 +1119,67 @@ export default function App() {
     }
   }, [rememberProviderEffort, requestForSession, updateSession]);
 
-  const setCollaborationMode = useCallback((sessionId: string, mode: CollaborationMode) => {
-    updateSession(sessionId, (current) => ({ ...current, collaborationMode: mode }));
-  }, [updateSession]);
+  const setCollaborationMode = useCallback(async (sessionId: string, mode: CollaborationMode) => {
+    const session = sessionsRef.current[sessionId];
+    if (!session || session.provider !== "codex" || session.readOnly || session.capabilities.plans !== "supported") return;
+    const fallback = settingsForSession(session);
+    settingsCoordinatorRef.current.initialize(sessionId, fallback);
+    const currentTarget = settingsCoordinatorRef.current.desired(sessionId, fallback);
+    if (currentTarget.collaborationMode === mode) return;
+    const requested: SessionSettings = { ...currentTarget, collaborationMode: mode };
+    const diagnosticContext = {
+      provider: session.provider,
+      sessionId,
+      threadId: session.threadId || null,
+      queryGeneration: session.queryGeneration ?? null,
+      resumed: session.resumed === true,
+      fromMode: currentTarget.collaborationMode,
+      mode,
+    };
+    trackUiEvent("session.collaboration_mode.change", diagnosticContext);
+    updateSession(sessionId, (current) => ({ ...current, collaborationMode: mode, errorText: "" }));
+    if (!session.threadId) {
+      settingsCoordinatorRef.current.setConfirmed(sessionId, requested);
+      return;
+    }
+    const request = settingsCoordinatorRef.current.enqueue(sessionId, requested, async (target) => {
+      await requestForSession(sessionId, "updateSessionSettings", threadSettingsParams(session.threadId as string, target));
+    });
+    try {
+      await request.promise;
+      trackUiEvent("session.collaboration_mode.applied", diagnosticContext);
+      if (request.isLatest()) {
+        updateSession(sessionId, (current) => ({
+          ...current,
+          model: requested.model,
+          effort: requested.effort,
+          collaborationMode: requested.collaborationMode,
+          tokenUsage: tokenUsageForModel(current, requested.model, preferencesRef.current),
+          errorText: "",
+        }));
+      }
+    } catch (error) {
+      void bridge.writeLog({
+        level: "error",
+        event: "renderer.session_collaboration_mode.failed",
+        details: {
+          ...diagnosticContext,
+          error: error instanceof Error ? { name: error.name, message: error.message, stack: error.stack } : { message: String(error) },
+        },
+      }).catch(() => undefined);
+      if (request.isLatest()) {
+        const confirmed = settingsCoordinatorRef.current.confirmed(sessionId, fallback);
+        updateSession(sessionId, (current) => ({
+          ...current,
+          model: confirmed.model,
+          effort: confirmed.effort,
+          collaborationMode: confirmed.collaborationMode,
+          tokenUsage: tokenUsageForModel(current, confirmed.model, preferencesRef.current),
+          errorText: error instanceof Error ? error.message : "模式切换失败",
+        }));
+      }
+    }
+  }, [bridge, requestForSession, updateSession]);
 
   commandSetSessionSettingRef.current = setSessionSetting;
   commandSetCollaborationModeRef.current = setCollaborationMode;
@@ -1211,7 +1187,7 @@ export default function App() {
   const cycleEffort = useCallback((sessionId: string, direction: 1 | -1) => {
     const session = sessionsRef.current[sessionId];
     if (!session || session.provider === "claude") return;
-    const target = settingsCoordinatorRef.current.desired(sessionId, { model: session.model, effort: session.effort });
+    const target = settingsCoordinatorRef.current.desired(sessionId, settingsForSession(session));
     if (session.capabilities.effort !== "supported") return;
     const model = findModelOption(providerModelsRef.current[session.provider], target.model);
     const efforts = model?.efforts || [];
@@ -1243,7 +1219,7 @@ export default function App() {
         ? applyAgentEvent({ ...current, threadId, model, effort, resumed: true, tokenUsage }, pendingStart).session
         : { ...current, threadId, model, effort, resumed: true, tokenUsage };
     });
-    settingsCoordinatorRef.current.setConfirmed(sessionId, { model, effort });
+    settingsCoordinatorRef.current.setConfirmed(sessionId, { model, effort, collaborationMode: session.collaborationMode });
     return threadId;
   }, [updateSession]);
 
@@ -1300,6 +1276,7 @@ export default function App() {
       `- 模型：${session.model || "加载中"}`,
       ...(session.provider === "claude" ? [`- 实际模型：${session.resolvedModel || "等待 Claude 返回"}`] : []),
       `- 思考等级：${session.effort || "未设置"}`,
+      ...(session.provider === "codex" ? [`- 工作模式：${session.collaborationMode === "plan" ? "计划模式" : "执行模式"}`] : []),
       `- 上下文：${session.tokenUsage.used}/${session.tokenUsage.total ?? "?"}`,
     ];
     try {
@@ -1394,21 +1371,6 @@ export default function App() {
   useEffect(() => {
     void sessionMessages.drainQueues(Object.keys(queuedMessages));
   }, [queuedMessages, sessionMessages, sessions]);
-
-  useEffect(() => {
-    const handleEscape = (event: KeyboardEvent) => {
-      if (event.key !== "Escape") return;
-      if (tabContextMenuRef.current || document.querySelector(".image-lightbox")) return;
-      const currentLayout = layoutRef.current;
-      const pane = currentLayout.panes.find((entry) => entry.id === currentLayout.activePaneId) ?? currentLayout.panes[0];
-      const session = pane ? sessionsRef.current[pane.activeTabId] : undefined;
-      if (!session || session.status !== "working") return;
-      event.preventDefault();
-      void interrupt(session.id);
-    };
-    window.addEventListener("keydown", handleEscape, true);
-    return () => window.removeEventListener("keydown", handleEscape, true);
-  }, [interrupt]);
 
   const respondToApproval = useCallback(async (sessionId: string, result: JsonObject) => {
     const approval = sessionsRef.current[sessionId]?.pendingApprovals[0];
@@ -1625,10 +1587,6 @@ export default function App() {
       if (session) setError(sessionId, new Error("当前会话还没有保存到本机历史。"), "当前会话还没有保存到本机历史。");
       return;
     }
-    if (session.presentationMode === "terminal") {
-      setError(sessionId, new Error("请先关闭黑窗口标签，再删除这条会话。"), "请先关闭黑窗口标签，再删除会话");
-      return;
-    }
     if (sessionHasActiveWork(session)) {
       setError(sessionId, new Error("正在运行的会话不可删除，请先停止任务并处理待处理请求。"), "正在运行的会话不可删除");
       return;
@@ -1653,6 +1611,8 @@ export default function App() {
       delete compactionCounts[key];
       delete compactionCounts[threadId];
       const legacyCodexCompactionCounts = { ...(preferencesRef.current.codexCompactionCounts || {}) };
+      const dismissedSessionNotices = { ...(preferencesRef.current.dismissedSessionNotices || {}) };
+      delete dismissedSessionNotices[key];
       if (session.provider === "codex") {
         delete legacyCodexCompactionCounts[key];
         delete legacyCodexCompactionCounts[threadId];
@@ -1662,12 +1622,12 @@ export default function App() {
         favoriteSessions: (preferencesRef.current.favoriteSessions || []).filter((id) => id !== key && id !== threadId),
         favoriteSessionSummaries,
         compactionCounts,
+        dismissedSessionNotices,
         ...(session.provider === "codex" ? { codexCompactionCounts: legacyCodexCompactionCounts } : {}),
       });
       setHistory((current) => current.filter((entry) => entry.provider !== session.provider || entry.id !== threadId));
       const nextSessionId = createSessionState(session.cwd, { provider: session.provider });
       layoutController.replaceSession(sessionId, nextSessionId);
-      prepareLayoutSessionRef.current(nextSessionId, session.provider, session.cwd);
       releaseSessionState(sessionId, "会话已删除。");
     } catch (error) {
       setError(sessionId, error, "删除会话失败");
@@ -1709,6 +1669,11 @@ export default function App() {
         threadId: session.threadId || "",
         content: handoffMarkdown(session),
       });
+      if (targetProvider === "claude") {
+        await bridge.openExternalTerminal({ cwd: session.cwd, sessionId: crypto.randomUUID(), initialPrompt: packageInfo.prompt });
+        appendSystemMessage(sessionId, "已生成交接材料，并在外部终端启动 Claude Code 接力会话。");
+        return;
+      }
       const nextSessionId = await createSessionInDirectory(session.cwd, targetProvider);
       if (!nextSessionId) return;
       updateSession(nextSessionId, (current) => ({ ...current, title: `${session.title || "新会话"} 接力`, titleOrigin: "manual" }));
@@ -1718,7 +1683,7 @@ export default function App() {
           if (!accepted) restoreMessagesToDraft(nextSessionId, [handoffMessage]);
         });
       }, 0);
-      appendSystemMessage(sessionId, `已生成交接材料，并打开新的 ${targetProvider === "codex" ? "Codex" : "Claude Code"} 接力会话。`);
+      appendSystemMessage(sessionId, "已生成交接材料，并打开新的 Codex 接力会话。");
     } catch (error) {
       setError(sessionId, error, "创建交接材料失败");
     }
@@ -1744,50 +1709,11 @@ export default function App() {
   const historyController = historyControllerRef.current;
   const { refresh: refreshHistory, loadMore: loadMoreHistory, loadRecent: loadRecentHistory, loadMoreRecent: loadMoreRecentHistory, search: searchHistory, loadMoreSearch: loadMoreHistorySearch } = historyController;
 
-  const openHistory = useCallback(async (entry: HistoryThread, presentationMode?: "workbench" | "terminal", options?: { activate?: boolean }) => {
+  const openHistory = useCallback(async (entry: HistoryThread, options?: { activate?: boolean }) => {
     const activateHistorySession = (sessionId: string) => {
       if (options?.activate !== false) activateSessionTab(sessionId);
     };
-    const selectedPresentationMode = workbenchOnlyPresentationMode();
-    if (entry.provider === "codex" && presentationMode) {
-      void savePreference({ lastCodexPresentationMode: selectedPresentationMode });
-    }
     const existing = Object.values(sessionsRef.current).find((session) => session.provider === entry.provider && session.threadId === entry.id && sameDirectory(session.cwd, entry.cwd));
-    let legacyTerminalClosed = false;
-    if (existing?.provider === "codex" && existing.presentationMode === "terminal") {
-      try {
-        await bridge.closeTerminal({ sessionId: existing.id });
-      } catch (error) {
-        setError(existing.id, error, "关闭旧版 Codex 黑窗口失败");
-        activateHistorySession(existing.id);
-        return existing.id;
-      }
-      updateSession(existing.id, (current) => ({ ...current, presentationMode: "workbench", terminalSuspended: false, resumed: false, historyLoading: true, errorText: "" }));
-      legacyTerminalClosed = true;
-    }
-    if (existing?.presentationMode === "terminal" && selectedPresentationMode === "terminal" && !existing.terminalSuspended) {
-      activateHistorySession(existing.id);
-      return existing.id;
-    }
-    if (existing && selectedPresentationMode === "terminal") {
-      activateHistorySession(existing.id);
-      if (existing.presentationMode !== "terminal") {
-        try {
-          await closeBackendSession(existing.id);
-          updateSession(existing.id, (current) => ({ ...current, presentationMode: "terminal", terminalSuspended: false, resumed: false, status: "idle", statusLabel: "正在启动终端", errorText: "" }));
-        } catch (error) {
-          setError(existing.id, error, "切换到内置终端失败");
-          return existing.id;
-        }
-      }
-    }
-    if (!legacyTerminalClosed && existing?.presentationMode === "terminal" && selectedPresentationMode === "workbench") {
-      // Opening a history item is a read/navigation action. It must not close
-      // a live terminal just because the saved Codex presentation preference
-      // is the workbench. The explicit mode toggle owns terminal shutdown.
-      activateHistorySession(existing.id);
-      return existing.id;
-    }
     let registeredCwd: string;
     try {
       const [, registered] = await Promise.all([
@@ -1807,68 +1733,8 @@ export default function App() {
       if (activePane) setError(activePane.activeTabId, error, "打开历史会话失败");
       return undefined;
     }
-    if (selectedPresentationMode === "terminal") {
-      // A favorite/history summary is only renderer state after restart. Read
-      // it through the Provider first so the main-process registry can authorize
-      // the terminal's native-session ownership.
-      try {
-        await agentClient.request(entry.provider, "readSession", { cwd: registeredCwd, threadId: entry.id, includeTurns: false });
-      } catch (error) {
-        if (existing) {
-          updateSession(existing.id, (current) => ({ ...current, historyLoading: false }));
-          activateHistorySession(existing.id);
-          setError(existing.id, error, "打开历史终端失败");
-        } else {
-          const activePane = layoutRef.current.panes.find((pane) => pane.id === layoutRef.current.activePaneId) ?? layoutRef.current.panes[0];
-          if (activePane) setError(activePane.activeTabId, error, "打开历史终端失败");
-        }
-        return undefined;
-      }
-      if (existing?.presentationMode === "terminal" && existing.terminalSuspended) {
-        updateSession(existing.id, (current) => ({ ...current, terminalSuspended: false, status: "idle", statusLabel: "正在启动终端", errorText: "" }));
-      }
-      const currentLayout = layoutRef.current;
-      const activePane = currentLayout.panes.find((pane) => pane.id === currentLayout.activePaneId) ?? currentLayout.panes[0];
-      const placeholder = activePane ? sessionsRef.current[activePane.activeTabId] : undefined;
-      const canReusePlaceholder = Boolean(
-        placeholder
-        && !placeholder.threadId
-        && !placeholder.messages.length
-        && !placeholder.activities.length
-        && placeholder.status === "idle"
-        && !(attachmentsRef.current[placeholder.id] || []).length
-        && !draftsRef.current.get(placeholder.id),
-      );
-      const sessionId = existing?.id ?? (canReusePlaceholder && placeholder
-        ? placeholder.id
-        : addSession(registeredCwd, { threadId: entry.id, title: entry.title, provider: entry.provider, presentationMode: "terminal" }));
-      if (!existing && canReusePlaceholder && placeholder) {
-        updateSession(sessionId, (current) => {
-          const next = retargetEmptySession(
-            current,
-            entry.provider,
-            registeredCwd,
-            entry.id,
-            entry.title,
-            providerModelsRef.current[entry.provider],
-            defaultsRef.current,
-            providerCapabilitiesRef.current[entry.provider],
-          );
-        next.presentationMode = "terminal";
-        next.terminalSuspended = false;
-        next.readOnly = entry.provider === "claude";
-          next.tokenUsage.total = cachedModelContextWindow(preferencesRef.current, next.model);
-          return withPersistedCompaction(next, preferencesRef.current);
-        });
-      }
-      activateHistorySession(sessionId);
-      return sessionId;
-    }
     if (existing) {
       activateHistorySession(existing.id);
-      if (existing.presentationMode === "terminal") {
-        updateSession(existing.id, (current) => ({ ...current, presentationMode: "workbench", terminalSuspended: false, historyLoading: true, errorText: "" }));
-      }
       if (existing.resumed || (existing.readOnly && existing.provider !== "claude")) {
         updateSession(existing.id, (current) => ({ ...current, historyLoading: false }));
         return existing.id;
@@ -2075,39 +1941,29 @@ export default function App() {
   ), []);
 
   const runHistoryAction = useCallback(async (entry: HistoryThread, action: HistoryAction, value?: string) => {
-    let existing = Object.values(sessionsRef.current).find((session) => session.provider === entry.provider && session.threadId === entry.id && sameDirectory(session.cwd, entry.cwd));
-    const terminalSession = existing?.presentationMode === "terminal" ? existing : undefined;
+    const existing = Object.values(sessionsRef.current).find((session) => session.provider === entry.provider && session.threadId === entry.id && sameDirectory(session.cwd, entry.cwd));
     const reportError = (error: unknown, fallback: string) => {
       const currentLayout = layoutRef.current;
       const pane = currentLayout.panes.find((candidate) => candidate.id === currentLayout.activePaneId) ?? currentLayout.panes[0];
       if (pane?.activeTabId) setError(pane.activeTabId, error, fallback);
     };
     if (action === "openWorkbench") {
-      await openHistory(entry, "workbench");
+      await openHistory(entry);
       return;
     }
-    if (action === "openTerminal") {
-      if (entry.provider === "claude") {
-        try {
-          const cwd = await registerHistoricalWorkspace((directory) => bridge.registerWorkspace(directory), entry.cwd);
-          await bridge.openExternalTerminal({ cwd, sessionId: entry.id, resume: true });
-          await openHistory({ ...entry, cwd }, "workbench");
-        } catch (error) {
-          reportError(error, "打开外部 Claude 终端失败");
-        }
+    if (action === "openExternalTerminal") {
+      if (entry.provider !== "claude") {
+        await openHistory(entry);
         return;
       }
-      await openHistory(entry, "terminal");
+      try {
+        const cwd = await registerHistoricalWorkspace((directory) => bridge.registerWorkspace(directory), entry.cwd);
+        await bridge.openExternalTerminal({ cwd, sessionId: entry.id, resume: true });
+        await openHistory({ ...entry, cwd });
+      } catch (error) {
+        reportError(error, "打开外部 Claude 终端失败");
+      }
       return;
-    }
-    if (terminalSession && action === "delete") {
-      reportError(new Error("请先关闭黑窗口标签，再删除这条会话。"), "请先关闭黑窗口标签，再删除会话");
-      return;
-    }
-    if (terminalSession && action !== "favorite" && action !== "export") {
-      // History-only actions can use the unscoped Provider request path. Do
-      // not close the live terminal just to perform rename/pin/fork/handoff.
-      existing = undefined;
     }
     if (existing) {
       if (action === "rename" && value) await renameSession(existing.id, value);
@@ -2176,13 +2032,16 @@ export default function App() {
           };
         }
         await savePreference(patch);
-        if (terminalSession) updateSession(terminalSession.id, (current) => ({ ...current, title: name, titleOrigin: "manual", updatedAt: Date.now() }));
         setHistory((current) => sortHistory(current.map((candidate) => candidate.provider === entry.provider && candidate.id === entry.id ? { ...candidate, title: name, titleLower: name.toLowerCase() } : candidate)));
       } else if (action === "export") {
         await bridge.saveTextFile(sessionMarkdown(source), `${source.title || "agent-session"}.md`);
       } else if (action === "handoffCodex" || action === "handoffClaude") {
         const targetProvider: AgentProvider = action === "handoffCodex" ? "codex" : "claude";
         const packageInfo = await bridge.createHandoffPackage({ cwd, title: source.title, threadId: entry.id, content: handoffMarkdown(source) });
+        if (targetProvider === "claude") {
+          await bridge.openExternalTerminal({ cwd, sessionId: crypto.randomUUID(), initialPrompt: packageInfo.prompt });
+          return;
+        }
         const nextSessionId = await createSessionInDirectory(cwd, targetProvider);
         if (!nextSessionId) return;
         updateSession(nextSessionId, (current) => ({ ...current, title: `${source.title || "新会话"} 接力`, titleOrigin: "manual" }));
@@ -2224,6 +2083,8 @@ export default function App() {
         const compactionCounts = { ...(preferencesRef.current.compactionCounts || preferencesRef.current.codexCompactionCounts || {}) };
         delete compactionCounts[key]; delete compactionCounts[entry.id];
         const legacyCodexCompactionCounts = { ...(preferencesRef.current.codexCompactionCounts || {}) };
+        const dismissedSessionNotices = { ...(preferencesRef.current.dismissedSessionNotices || {}) };
+        delete dismissedSessionNotices[key];
         if (entry.provider === "codex") { delete legacyCodexCompactionCounts[key]; delete legacyCodexCompactionCounts[entry.id]; }
         await savePreference({
           sessionAliases: aliases,
@@ -2231,6 +2092,7 @@ export default function App() {
           favoriteSessions: (preferencesRef.current.favoriteSessions || []).filter((id) => id !== key && id !== entry.id),
           favoriteSessionSummaries,
           compactionCounts,
+          dismissedSessionNotices,
           ...(entry.provider === "codex" ? { codexCompactionCounts: legacyCodexCompactionCounts } : {}),
         });
         setHistory((current) => current.filter((candidate) => candidate.provider !== entry.provider || candidate.id !== entry.id));
@@ -2296,124 +2158,19 @@ export default function App() {
     updateSession(sessionId, (current) => ({ ...current, errorText: "", ...(current.status === "error" && !current.activeTurnId ? { status: "idle" as const, statusLabel: "就绪" } : {}) }));
   }, [updateSession]);
 
-  const setPresentationMode = useCallback(async (sessionId: string, mode: "workbench" | "terminal") => {
+  const dismissSessionNotice = useCallback((sessionId: string, noticeKeys: string | readonly string[]) => {
     const session = sessionsRef.current[sessionId];
-    if (!session || session.presentationMode === mode) return;
-    if (session.provider === "claude") return;
-    if (mode === "terminal" && session.provider === "codex" && session.readOnly) {
-      setError(sessionId, new Error("该会话正被其他 Codex 窗口使用，请先关闭占用它的窗口后再切换。"), "切换到内置终端失败");
-      return;
-    }
-    if (mode === "workbench" && session.presentationMode === "terminal") {
-      const entry = session.threadId
-        ? history.find((candidate) => candidate.provider === session.provider && candidate.id === session.threadId && sameDirectory(candidate.cwd, session.cwd))
-          || historyThread({ id: session.threadId, provider: session.provider, title: session.title, cwd: session.cwd, updatedAt: session.updatedAt, source: "tab" })
-        : undefined;
-      // Show the workbench immediately, but keep Provider recovery suspended
-      // until the terminal process has fully released its native session.
-      updateSession(sessionId, (current) => ({
-        ...current,
-        presentationMode: "workbench",
-        terminalSuspended: true,
-        historyLoading: Boolean(entry),
-        resumed: false,
-        status: "idle",
-        statusLabel: "正在关闭黑窗口",
-        errorText: "",
-      }));
-      try {
-        await bridge.closeTerminal({ sessionId });
-      } catch (error) {
-        updateSession(sessionId, (current) => ({ ...current, presentationMode: "terminal", terminalSuspended: false, historyLoading: false, statusLabel: "终端运行中" }));
-        setError(sessionId, error, "关闭内置终端失败");
-        return;
-      }
-      // Windows may keep the Codex rollout database locked briefly after the
-      // PTY has exited. Let that handle settle before resumeSession starts a
-      // new app-server process.
-      await new Promise<void>((resolve) => window.setTimeout(resolve, CODEX_TERMINAL_HANDOFF_SETTLE_MS));
-      if (!sessionsRef.current[sessionId]) return;
-      updateSession(sessionId, (current) => ({ ...current, terminalSuspended: false, status: "idle", statusLabel: "就绪", errorText: "" }));
-      if (entry) void openHistory(entry, "workbench", { activate: false });
-      else void savePreference({ lastCodexPresentationMode: "workbench" });
-      return;
-    }
-    if (mode === "terminal" && (session.threadId || session.messages.length || session.activities.length || session.status === "working" || session.pendingApprovals.length)) {
-      // Render the terminal pane while the workbench Provider session is being
-      // released. TerminalPane waits for terminalSuspended=false before
-      // spawning the native CLI, so the handoff remains exclusive without
-      // making the whole pane appear frozen.
-      updateSession(sessionId, (current) => ({
-        ...current,
-        presentationMode: "terminal",
-        terminalSuspended: true,
-        statusLabel: "正在关闭图形会话",
-        errorText: "",
-      }));
-      try {
-        await closeBackendSession(sessionId, "workbench");
-      } catch (error) {
-        updateSession(sessionId, (current) => ({ ...current, presentationMode: "workbench", terminalSuspended: false, statusLabel: "就绪" }));
-        setError(sessionId, error, "切换到内置终端失败");
-        return;
-      }
-      updateSession(sessionId, (current) => ({ ...current, terminalSuspended: false, status: "idle", statusLabel: "正在启动终端", errorText: "" }));
-      void savePreference({ lastCodexPresentationMode: mode });
-      return;
-    }
-    if (mode === "terminal") {
-      updateSession(sessionId, (current) => ({ ...current, presentationMode: "terminal", terminalSuspended: true, status: "idle", statusLabel: "正在准备黑窗口", errorText: "" }));
-      void prepareNewTerminalSession(sessionId, session.provider, session.cwd);
-      void savePreference({ lastCodexPresentationMode: mode });
-      return;
-    }
-    updateSession(sessionId, (current) => ({
-      ...current,
-      presentationMode: mode,
-      terminalSuspended: false,
-      status: "idle",
-      statusLabel: "就绪",
-      errorText: "",
-    }));
-    void savePreference({ lastCodexPresentationMode: mode });
-  }, [bridge, closeBackendSession, history, openHistory, prepareNewTerminalSession, savePreference, setError, updateSession]);
-
-  const setTerminalError = useCallback((sessionId: string, message: string) => {
-    setError(sessionId, new Error(message), "终端操作失败");
-  }, [setError]);
-
-  const setTerminalActivity = useCallback((sessionId: string, working: boolean) => {
-    updateSession(sessionId, (current) => current.terminalWorking === working
-      ? current
-      : { ...current, ...(working ? { terminalWorking: true } : { terminalWorking: undefined }) });
-  }, [updateSession]);
-
-  const applyTerminalSettings = useCallback((sessionId: string, settings: ClaudeTerminalSettings) => {
-    if (!settings.model && !settings.effort) return;
-    updateSession(sessionId, (current) => {
-      if (current.provider !== "claude") return current;
-      return {
-        ...current,
-        // The terminal is the source of truth for Claude settings. Keep the
-        // SDK-facing alias/ID in `model`; a previous SDK-resolved value is no
-        // longer valid after changing the model in the terminal.
-        ...(settings.model ? { model: settings.model, resolvedModel: undefined } : {}),
-        ...(settings.effort ? { effort: settings.effort } : {}),
-      };
+    if (!session?.threadId) return;
+    const sessionKey = nativeSessionKey(session.provider, session.threadId);
+    const dismissedSessionNotices = addDismissedSessionNotices(
+      preferencesRef.current.dismissedSessionNotices || {},
+      sessionKey,
+      typeof noticeKeys === "string" ? [noticeKeys] : noticeKeys,
+    );
+    void savePreference({ dismissedSessionNotices }).catch((error) => {
+      trackUiEvent("preference.save_failed", { fields: ["dismissedSessionNotices"], errorName: error instanceof Error ? error.name : "unknown" });
     });
-  }, [updateSession]);
-
-  const resumeTerminal = useCallback((sessionId: string) => {
-    const session = sessionsRef.current[sessionId];
-    if (session?.provider === "codex") {
-      for (const candidate of Object.values(sessionsRef.current)) {
-        if (candidate.provider === "codex" && candidate.presentationMode === "workbench" && candidate.resumed) {
-          updateSession(candidate.id, (current) => ({ ...current, resumed: false }));
-        }
-      }
-    }
-    updateSession(sessionId, (current) => ({ ...current, terminalSuspended: false, status: "idle", statusLabel: "正在启动终端", errorText: "" }));
-  }, [updateSession]);
+  }, [savePreference]);
 
   const recoverProvider = useCallback((provider: AgentProvider) => {
     const providerSessionIds = new Set(Object.values(sessionsRef.current).filter((session) => session.provider === provider).map((session) => session.id));
@@ -2533,8 +2290,6 @@ export default function App() {
       const restored = parseWorkspaceState(value.workspaceState, currentWorkspace);
       if (!restored) {
         const initial = emptySession("session-1", currentWorkspace, "", "", launchProvider || "codex");
-        const initialPresentationMode: "workbench" = "workbench";
-        initial.presentationMode = initialPresentationMode;
         const initialClaudeSessionId = initial.provider === "claude" ? crypto.randomUUID() : undefined;
         if (initialClaudeSessionId) {
           initial.threadId = initialClaudeSessionId;
@@ -2562,16 +2317,8 @@ export default function App() {
         }]))
         : restored.sessions;
       for (const session of Object.values(restoredSessionsBase)) {
-        if (session.provider === "codex") {
-          // Built-in terminal mode is no longer exposed. Old saved tabs return
-          // to the normal workbench so a restart cannot reopen a black window.
-          session.presentationMode = "workbench";
-          session.terminalSuspended = false;
-        }
         if (session.provider === "claude") {
-          session.presentationMode = "workbench";
           session.readOnly = true;
-          session.terminalSuspended = false;
         }
       }
       const preparedRestoredSessions = Object.fromEntries(Object.entries(restoredSessionsBase)
@@ -2654,7 +2401,7 @@ export default function App() {
       setProviderStartupStates(providerStartupStatesRef.current);
     });
     return () => { active = false; };
-  }, [addSession, bridge, ensureProviderInitialized, prepareNewTerminalSession, restoreMessagesToDraft, updateSession]);
+  }, [addSession, bridge, ensureProviderInitialized, restoreMessagesToDraft, updateSession]);
 
   useEffect(() => {
     if (!workspaceRestoreIdsRef.current.size) return;
@@ -2681,8 +2428,8 @@ export default function App() {
       if (session.provider === "claude") {
         void requestForSession(sessionId, "readSession", { threadId: session.threadId, includeTurns: true })
           .then((readValue) => updateSession(sessionId, (current) => ({ ...hydrateAgentSession(current, "claude", asRecord(readValue).thread), historyLoading: false, readOnly: true, resumed: false })))
-          .then(() => { workspaceRestoreIdsRef.current.delete(sessionId); workspaceRestoreInFlightIdsRef.current.delete(sessionId); })
-          .catch((error) => { workspaceRestoreInFlightIdsRef.current.delete(sessionId); updateSession(sessionId, (current) => ({ ...current, historyLoading: false })); setError(sessionId, error, "读取 Claude 会话失败"); });
+          .then(() => finishWorkspaceRestore(workspaceRestoreIdsRef.current, workspaceRestoreInFlightIdsRef.current, sessionId))
+          .catch((error) => { finishWorkspaceRestore(workspaceRestoreIdsRef.current, workspaceRestoreInFlightIdsRef.current, sessionId); updateSession(sessionId, (current) => ({ ...current, historyLoading: false })); setError(sessionId, error, "读取 Claude 会话失败"); });
         continue;
       }
       void restoreHistoricalSession({
@@ -2754,18 +2501,6 @@ export default function App() {
       });
     }
   }, [persistCompactionSnapshot, providerStartupStates, requestForSession, sessions, setError, updateSession, workspaceRestoreRevision]);
-
-  const terminalRestoreInFlightRef = useRef(new Set<string>());
-  useEffect(() => {
-    if (!workspaceStateReady) return;
-    for (const session of Object.values(sessions)) {
-      if (session.presentationMode !== "terminal" || !session.terminalSuspended || !session.threadId) continue;
-      if (terminalRestoreInFlightRef.current.has(session.id)) continue;
-      terminalRestoreInFlightRef.current.add(session.id);
-      void restoreTerminalSession(session.id, session.provider, session.cwd, session.threadId)
-        .finally(() => terminalRestoreInFlightRef.current.delete(session.id));
-    }
-  }, [restoreTerminalSession, sessions, workspaceStateReady]);
 
   useEffect(() => () => {
     for (const timer of workspaceRestoreRetryTimersRef.current.values()) window.clearTimeout(timer);
@@ -3006,7 +2741,7 @@ export default function App() {
   }), [bridge.exportDiagnostics, checkClaudeCodeUpdates, checkCodexCliUpdates, checkForUpdates, claudeRuntimeStatus, cliUpdateStatus, downloadUpdate, installUpdate, openUpdateRepository, preferences.theme, savePreference, updateClaudeCode, updateCodexCli, updateStatus]);
 
   const renderPane = (pane: PaneState) => {
-    const sessionIds = pane.tabIds.filter((sessionId) => sessionId === pane.activeTabId || sessions[sessionId]?.presentationMode === "terminal");
+    const sessionIds = pane.tabIds;
     if (!sessionIds.length) return null;
     return <div className="pane-tab-stack" key={pane.id}>
       {sessionIds.map((sessionId) => {
@@ -3037,6 +2772,10 @@ export default function App() {
         onStartGoal={startGoal}
         onStopGoal={stopGoal}
         onClearError={clearError}
+        dismissedNoticeKeys={session.threadId
+          ? preferences.dismissedSessionNotices?.[nativeSessionKey(session.provider, session.threadId)]?.keys || NO_DISMISSED_NOTICE_KEYS
+          : NO_DISMISSED_NOTICE_KEYS}
+        onDismissNotice={dismissSessionNotice}
         onRetryReadOnly={retryReadOnlySession}
         onRefresh={refreshClaudeSession}
         onLoadEarlier={loadEarlierClaudeMessages}
@@ -3051,12 +2790,6 @@ export default function App() {
         onRemoveImage={removeImage}
         onRemoveQueuedMessage={removeQueuedMessage}
         onChooseDirectory={chooseDirectoryForSession}
-        onModeChange={setPresentationMode}
-        onResumeTerminal={resumeTerminal}
-        onTerminalError={setTerminalError}
-        onTerminalActivity={setTerminalActivity}
-        onTerminalSettings={applyTerminalSettings}
-        onIsSessionRetained={isSessionRetained}
         />;
       })}
     </div>;
@@ -3153,7 +2886,7 @@ export default function App() {
                   onContextMenu={(event) => openTabContextMenu(event, pane.id, session.id)}
                   key={session.id}
                 >
-                  <ProviderIcon provider={session.provider} size={15} /><span className={`tab-status ${session.status === "error" ? "error" : session.status === "working" || session.terminalWorking ? "working" : session.status}`} />
+                  <ProviderIcon provider={session.provider} size={15} /><span className={`tab-status ${session.status === "error" ? "error" : session.status === "working" ? "working" : session.status}`} />
                   <span className="tab-label"><span className="tab-directory">{basename(session.cwd)}</span><span className="tab-separator">·</span><span className="tab-title">{session.title}</span></span>
                   {pane.tabIds.length > 1
                     ? <span className="tab-close" role="button" aria-label={`关闭 ${session.title}`} title={`关闭 ${session.title}`} onClick={(event) => { event.stopPropagation(); removeTab(pane.id, session.id); }}><X size={12} /></span>

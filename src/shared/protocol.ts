@@ -1,11 +1,8 @@
 import type { AgentEventEnvelope, AgentInteractionResponse, AgentOperation, AgentProvider, AgentRequestContext } from "./agentProtocol";
 import type { ExternalTerminalKind } from "./externalTerminalPresets";
-import type { TerminalEvent, TerminalInputRequest, TerminalResizeRequest, TerminalSessionCommand, TerminalSessionInfo, TerminalSessionRequest } from "./terminalProtocol";
 
 export type JsonObject = Record<string, unknown>;
 
-export type PresentationMode = "workbench" | "terminal";
-export const DEFAULT_PRESENTATION_MODE: PresentationMode = "workbench";
 
 export type LogLevel = "debug" | "info" | "warn" | "error";
 
@@ -93,6 +90,11 @@ export interface CompactionRecord {
   updatedAt: number;
 }
 
+export interface SessionNoticeDismissalRecord {
+  keys: string[];
+  updatedAt: number;
+}
+
 /** @deprecated 仅用于兼容旧版偏好字段。 */
 export type CodexCompactionRecord = CompactionRecord;
 
@@ -115,14 +117,13 @@ export interface DesktopPreferences {
   modelContextWindows?: Record<string, ModelContextWindowCacheEntry>;
   claudeModelCache?: ClaudeModelCache;
   lastReasoningEfforts?: Partial<Record<AgentProvider, string>>;
-  /** @deprecated 由 lastCodexPresentationMode 替代，读取时迁移。 */
-  lastPresentationModes?: Partial<Record<AgentProvider, PresentationMode>>;
-  lastCodexPresentationMode?: PresentationMode;
   /** 斜杠命令和 Skill 的最近使用时间，键为 command:name 或 skill:name。 */
   recentCommandUsage?: Record<string, number>;
   compactionCounts?: Record<string, CompactionRecord>;
   /** @deprecated 旧版本 Codex 专用字段，读取时会合并到 compactionCounts。 */
   codexCompactionCounts?: Record<string, CodexCompactionRecord>;
+  /** 按 Provider 原生会话保存已关闭的活动/错误提示指纹。 */
+  dismissedSessionNotices?: Record<string, SessionNoticeDismissalRecord>;
   workspaceState?: JsonObject;
   externalTerminal?: ExternalTerminalSettings;
 }
@@ -133,10 +134,11 @@ export interface ExternalTerminalSettings {
   argsTemplate: string;
 }
 
-export type ExternalTerminalStatusState = "open" | "notOpen" | "unknown";
-export interface ExternalTerminalStatus {
-  state: ExternalTerminalStatusState;
-  source: "process" | "agentdesk" | "none" | "unavailable";
+export interface ExternalTerminalOpenRequest {
+  cwd: string;
+  sessionId: string;
+  resume?: boolean;
+  initialPrompt?: string;
 }
 
 export interface CodexDefaults {
@@ -276,8 +278,7 @@ export interface CodexBridge {
   readLocalImage(filePath: string): Promise<string | null>;
   openLocalPath(input: LocalPathOpenRequest): Promise<string>;
   openExternal(url: string): Promise<void>;
-  openExternalTerminal(input: { cwd: string; sessionId: string; resume?: boolean }): Promise<ExternalTerminalStatus>;
-  getExternalTerminalStatus(input: { cwd: string; sessionId: string }): Promise<ExternalTerminalStatus>;
+  openExternalTerminal(input: ExternalTerminalOpenRequest): Promise<{ state: "open"; source: "agentdesk" }>;
   showNotification(notification: DesktopNotification): Promise<boolean>;
   getWindowState(): Promise<DesktopWindowState>;
   minimizeWindow(): Promise<void>;
@@ -306,12 +307,6 @@ export interface AgentBridge extends Omit<CodexBridge, "request" | "respond" | "
   agentRequest(provider: AgentProvider, operation: AgentOperation, params?: JsonObject, context?: AgentRequestContext): Promise<unknown>;
   respondToInteraction(response: AgentInteractionResponse): Promise<void>;
   onAgentEvent(listener: (event: AgentEventEnvelope) => void): () => void;
-  startTerminalSession(request: TerminalSessionRequest): Promise<TerminalSessionInfo>;
-  writeTerminalInput(request: TerminalInputRequest): Promise<void>;
-  resizeTerminal(request: TerminalResizeRequest): Promise<void>;
-  interruptTerminal(request: TerminalSessionCommand): Promise<void>;
-  closeTerminal(request: TerminalSessionCommand): Promise<void>;
-  onTerminalEvent(listener: (event: TerminalEvent) => void): () => void;
   dev?: {
     holdClaudeWorkerRequests(): Promise<void>;
     injectClaudeWorkerFatal(): Promise<void>;

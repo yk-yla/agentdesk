@@ -4,7 +4,7 @@ async page => {
   };
   const sidebar = page.locator("aside.sidebar");
   await sidebar.waitFor({ state: "visible", timeout: 15_000 });
-  await page.waitForFunction(() => document.querySelectorAll(".pane-panel").length === 1 && Boolean(document.querySelector('.pane-panel textarea[aria-label="消息输入"]')), null, { timeout: 15_000 });
+  await page.waitForFunction(() => document.querySelectorAll(".pane-panel:not(.inactive-tab)").length === 1 && Boolean(document.querySelector('.pane-panel:not(.inactive-tab) textarea[aria-label="消息输入"]')), null, { timeout: 15_000 });
 
   const restoredTitle = "AgentDesk restart content fixture";
   const restoredContent = "AgentDesk restart restored content";
@@ -17,21 +17,21 @@ async page => {
   await sidebar.locator(".current-workspace .provider-new-codex").click({ force: true });
   await page.waitForFunction((previousCount) => document.querySelectorAll(".tab").length === previousCount + 1, initialTabCount, { timeout: 15_000 });
   const leftDraft = "AgentDesk restart left draft";
-  await page.locator('.pane-panel textarea[aria-label="消息输入"]').fill(leftDraft);
+  await page.locator('.pane-panel.active-pane:not(.inactive-tab) textarea[aria-label="消息输入"]').fill(leftDraft);
 
   await sidebar.getByRole("button", { name: "分成两列" }).click({ force: true });
-  await page.waitForFunction(() => document.querySelectorAll(".pane-panel").length === 2 && document.querySelector(".app-shell")?.getAttribute("data-pane-count") === "2", null, { timeout: 15_000 });
-  const panes = page.locator(".pane-panel");
+  await page.waitForFunction(() => document.querySelectorAll(".pane-panel:not(.inactive-tab)").length === 2 && document.querySelector(".app-shell")?.getAttribute("data-pane-count") === "2", null, { timeout: 15_000 });
+  const panes = page.locator(".pane-panel:not(.inactive-tab)");
   const rightDraft = "AgentDesk restart right draft - forced snapshot";
   await panes.nth(1).locator('textarea[aria-label="消息输入"]').fill(rightDraft);
   await sidebar.getByRole("button", { name: "收起左侧面板" }).click({ force: true });
   await page.waitForFunction(() => document.querySelector("aside.sidebar")?.classList.contains("collapsed"), null, { timeout: 10_000 });
 
   const state = await page.evaluate(() => ({
-    paneCount: document.querySelectorAll(".pane-panel").length,
+    paneCount: document.querySelectorAll(".pane-panel:not(.inactive-tab)").length,
     tabCounts: Array.from(document.querySelectorAll(".pane-tab-group")).map((group) => group.querySelectorAll(".tab").length),
-    activePaneIndex: Array.from(document.querySelectorAll(".pane-panel")).findIndex((pane) => pane.classList.contains("active-pane")),
-    drafts: Array.from(document.querySelectorAll('.pane-panel textarea[aria-label="消息输入"]')).map((input) => input.value),
+    activePaneIndex: Array.from(document.querySelectorAll(".pane-panel:not(.inactive-tab)")).findIndex((pane) => pane.classList.contains("active-pane")),
+    drafts: Array.from(document.querySelectorAll('.pane-panel:not(.inactive-tab) textarea[aria-label="消息输入"]')).map((input) => input.value),
     collapsed: document.querySelector("aside.sidebar")?.classList.contains("collapsed") === true,
   }));
   assert(state.paneCount === 2, "退出前没有形成两栏。");

@@ -35,6 +35,15 @@ export class BackendManager {
   async request(provider: AgentProvider, operation: AgentOperation, params: JsonObject = {}, context: AgentRequestContext = {}) {
     const requestId = context.requestId || `${provider}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
     const startedAt = Date.now();
+    const requestContext = {
+      requestId,
+      provider,
+      operation,
+      sessionId: context.sessionId,
+      nativeSessionId: context.nativeSessionId,
+      queryGeneration: context.queryGeneration,
+    };
+    this.logger?.log("debug", "provider.request.started", requestContext);
     try {
       const backend = this.require(provider);
       const preparation = this.sessions.prepareRequest(provider, operation, params, context);
@@ -44,11 +53,11 @@ export class BackendManager {
       else if (operation === "closeSession") result = await backend.closeSession(context);
       else result = await backend.request(operation, params, context);
       this.sessions.completeRequest(provider, operation, params, context, result);
-      this.logger?.log("info", "provider.request.completed", { requestId, provider, operation, durationMs: Date.now() - startedAt });
+      this.logger?.log("info", "provider.request.completed", { ...requestContext, durationMs: Date.now() - startedAt });
       return result;
     } catch (error) {
       this.sessions.failRequest(provider, operation, context, error);
-      this.logger?.log("error", "provider.request.failed", { requestId, provider, operation, durationMs: Date.now() - startedAt, error: logErrorDetails(error) });
+      this.logger?.log("error", "provider.request.failed", { ...requestContext, durationMs: Date.now() - startedAt, error: logErrorDetails(error) });
       throw error;
     }
   }
@@ -108,21 +117,6 @@ export class BackendManager {
     }));
     if (failures.length) this.logger?.log("warn", "provider.renderer_session_reset_partial", { count: failures.length });
     return { reset: registrations.length, failures: failures.length };
-  }
-
-  assertNativeSessionAuthorized(provider: AgentProvider, nativeSessionId: string, cwd: string) {
-    this.sessions.assertNativeSessionAuthorized(provider, nativeSessionId, cwd);
-  }
-
-  async prepareTerminalSession(provider: AgentProvider, context: AgentRequestContext) {
-    if (!context.nativeSessionId) return;
-    this.sessions.assertNativeSessionAuthorized(provider, context.nativeSessionId, context.canonicalCwd || "");
-    const activeWork = this.sessions.rendererSessions().some((registration) => registration.provider === provider && registration.queryActive);
-    if (activeWork) throw new Error(`${provider === "codex" ? "Codex" : "Claude Code"} 还有任务正在运行，完成或停止后才能切换黑窗口。`);
-    await this.require(provider).prepareTerminalSession?.(context);
-    // Release only the handoff target. Other idle workbench tabs remain
-    // registered and can be resumed after the shared runtime restarts.
-    this.sessions.releaseRendererSession(context.sessionId || "");
   }
 
   private require(provider: AgentProvider) {

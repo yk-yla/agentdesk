@@ -26,25 +26,25 @@ export const EXTERNAL_TERMINAL_PRESETS: readonly ExternalTerminalPreset[] = [
     id: "windows-terminal",
     label: "Windows Terminal",
     executable: "wt.exe",
-    argsTemplate: '-d "{cwd}" powershell.exe -NoExit -Command "claude --session-id {sessionId}"',
+    argsTemplate: '-d "{cwd}" powershell.exe -NoExit -Command "claude --session-id {sessionId} {prompt}"',
   },
   {
     id: "powershell-7",
     label: "PowerShell 7",
     executable: "pwsh.exe",
-    argsTemplate: '-NoExit -Command "claude --session-id {sessionId}"',
+    argsTemplate: '-NoExit -Command "claude --session-id {sessionId} {prompt}"',
   },
   {
     id: "windows-powershell",
     label: "Windows PowerShell",
     executable: "powershell.exe",
-    argsTemplate: '-NoExit -Command "claude --session-id {sessionId}"',
+    argsTemplate: '-NoExit -Command "claude --session-id {sessionId} {prompt}"',
   },
   {
     id: "command-prompt",
     label: "命令提示符",
     executable: "cmd.exe",
-    argsTemplate: '/k "claude --session-id {sessionId}"',
+    argsTemplate: '/k "claude --session-id {sessionId} {prompt}"',
   },
 ];
 

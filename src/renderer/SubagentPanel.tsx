@@ -1,18 +1,20 @@
 import { Bot, Check, CircleDot, LoaderCircle, X } from "lucide-react";
-import { memo, useState } from "react";
+import { memo } from "react";
 import type { SubagentState } from "./domain";
+import { subagentNoticeKey } from "./sessionNoticeDismissal";
 
 interface Props {
   subagents: SubagentState[];
+  dismissedNoticeKeys: ReadonlySet<string>;
+  onDismissNotice: (noticeKey: string) => void;
 }
 
 const STATUS: Record<SubagentState["status"], string> = {
   pendingInit: "准备中", running: "运行中", interrupted: "已中断", completed: "已完成", errored: "失败", shutdown: "已关闭", notFound: "未找到",
 };
 
-function SubagentPanel({ subagents }: Props) {
-  const [dismissedThreadIds, setDismissedThreadIds] = useState<Set<string>>(() => new Set());
-  const visibleSubagents = subagents.filter((agent) => !dismissedThreadIds.has(agent.threadId));
+function SubagentPanel({ subagents, dismissedNoticeKeys, onDismissNotice }: Props) {
+  const visibleSubagents = subagents.filter((agent) => !dismissedNoticeKeys.has(subagentNoticeKey(agent)));
   if (!visibleSubagents.length) return <div className="details-empty"><span>当前会话还没有子 Agent</span></div>;
   return (
     <div className="subagent-panel">
@@ -23,7 +25,7 @@ function SubagentPanel({ subagents }: Props) {
           {agent.prompt ? <div className="subagent-prompt">{agent.prompt}</div> : null}
           {agent.message ? <pre className="subagent-message">{agent.message}</pre> : null}
           <div className="subagent-meta">{agent.model || "默认模型"}{agent.effort ? ` · ${agent.effort}` : ""}</div>
-          {agent.status === "errored" ? <button type="button" className="bare-button subagent-dismiss" onClick={() => setDismissedThreadIds((current) => { const next = new Set(current); next.add(agent.threadId); return next; })} title="关闭错误提示" aria-label="关闭错误提示"><X size={13} /></button> : null}
+          {agent.status === "errored" ? <button type="button" className="bare-button subagent-dismiss" onClick={() => onDismissNotice(subagentNoticeKey(agent))} title="关闭错误提示" aria-label="关闭错误提示"><X size={13} /></button> : null}
         </article>
       ))}
     </div>

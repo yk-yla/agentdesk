@@ -21,8 +21,8 @@
 
 AgentDesk 是 Windows x64 Electron 桌面客户端。Electron 主进程负责窗口、文件、进程、更新和受控 IPC；Renderer 负责会话状态与界面；Codex 和 Claude Code 是彼此隔离的 Provider。
 
-- Codex 通过本机 `codex app-server` 的 JSONL 协议通信，图形界面（工作台模式）和内置终端（黑窗口模式）两种交互形式。
-- Claude Code 通过内置终端（PTY）运行用户系统中已安装的 `claude` CLI；历史读取通过 `@anthropic-ai/claude-agent-sdk` 的 JS 层函数实现。AgentDesk 不打包 claude.exe 二进制，用户需自行安装 Claude Code CLI。
+- Codex 通过本机 `codex app-server` 的 JSONL 协议在工作台中运行。
+- Claude Code 通过用户配置的外部 Windows Terminal、PowerShell 或自定义终端运行系统中已安装的 `claude` CLI；历史读取通过 `@anthropic-ai/claude-agent-sdk` 的 JS 层函数实现。AgentDesk 不打包 claude.exe 二进制，用户需自行安装 Claude Code CLI。
 - Provider 的进程、凭据、会话、Query 代次、交互请求、事件和关闭清理必须隔离；一个 Provider 退出不得清理另一个 Provider 的会话。
 
 ## 分层与代码地图
@@ -31,7 +31,7 @@ AgentDesk 是 Windows x64 Electron 桌面客户端。Electron 主进程负责窗
 - `src/main/agent`：Provider 无关的 Backend 接口、注册表、请求适配、会话登记和交互归属校验。
 - `src/main/providers/codex`：Codex app-server 子进程、RPC 请求登记、超时和事件转换。
 - `src/main/providers/claude`：Claude Backend（历史读取）、凭据检查、历史搜索和更新完整性检查。
-- `src/main/terminalSessionManager.ts`：内置终端（PTY）管理，Provider 无关；Claude 和 Codex 共用。
+- `src/main/externalTerminalLauncher.ts`：外部 Windows Terminal、PowerShell 和自定义终端的启动参数组装。
 - `src/main/ipc/registerDesktopIpc.ts`：桌面 IPC 注册、操作白名单、参数归一化和输入边界；`main.ts` 只负责注入真实服务。
 - `src/preload/preload.ts`：通过 `contextBridge` 暴露最小 Bridge，不暴露 Node、文件系统或子进程 API。
 - `src/shared`：Bridge、Provider 操作/事件、偏好、更新和共享 JSON 类型。
@@ -55,7 +55,7 @@ AgentDesk 是 Windows x64 Electron 桌面客户端。Electron 主进程负责窗
 
 - 正式窗口保持 `frame: false`、`contextIsolation: true`、`nodeIntegration: false`、`sandbox: true`；Renderer 使用 CSP 和受控 preload。
 - 单实例启动支持 `--cwd` 和 `--provider`；第二实例只通过主进程唤醒现有窗口并转发已校验的工作区/Provider。
-- 关闭窗口默认隐藏到托盘；真正退出和更新安装必须先有序关闭 Provider、终端、受管进程和测试网关。
+- 关闭窗口默认隐藏到托盘；真正退出和更新安装必须先有序关闭 Provider、受管进程和测试网关。外部终端由系统独立管理，不纳入 AgentDesk 的退出清理。
 - 外部链接只允许 `http:` 或 `https:`，交给系统浏览器；窗口导航和新窗口必须拦截其他协议。
 - 本地路径先规范化/真实路径校验，再检查附件根目录、已授权工作区或显式授权文件；不得仅凭扩展名信任文件。
 - 图片输入必须限制大小、拒绝符号链接，并按内容签名校验 PNG/JPEG/GIF/WebP。
@@ -81,7 +81,7 @@ AgentDesk 是 Windows x64 Electron 桌面客户端。Electron 主进程负责窗
 
 ### Claude Code
 
-- Claude Code 通过内置终端运行用户已安装的 `claude` CLI（支持 npm、winget 或官方脚本安装）。
+- Claude Code 通过配置的外部终端运行用户已安装的 `claude` CLI（支持 npm、winget 或官方脚本安装）。
 - Claude 更新管理器自动检测安装来源（npm/winget/managed），按来源选择对应更新方式。
 - 每 6 小时通过 GitHub Releases API 检查新版本；所有安装方式统一使用此 API。
 - 受管更新（managed）必须限制下载地址、大小、ZIP 内容和 Authenticode 签名；未验证签名需用户二次确认。

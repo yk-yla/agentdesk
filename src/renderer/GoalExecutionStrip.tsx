@@ -1,5 +1,5 @@
 import { memo, useEffect, useMemo, useState } from "react";
-import { Square, Target } from "lucide-react";
+import { Square, Target, X } from "lucide-react";
 import { formatCount, type GoalStatus, type SessionGoal } from "./domain";
 
 const STATUS_LABEL: Record<GoalStatus, string> = {
@@ -27,6 +27,7 @@ interface Props {
   stage: string;
   onOpenDetails: () => void;
   onStop: () => void;
+  onDismiss: () => void;
 }
 
 function timestampMilliseconds(value: number) {
@@ -60,7 +61,7 @@ function GoalElapsed({ goal }: { goal: SessionGoal }) {
   return <>{formatGoalDuration(goal.timeUsedSeconds + elapsedSinceUpdate)}</>;
 }
 
-function GoalExecutionStripBase({ goal, working, readOnly, stage, onOpenDetails, onStop }: Props) {
+function GoalExecutionStripBase({ goal, working, readOnly, stage, onOpenDetails, onStop, onDismiss }: Props) {
   const active = goal.status === "active";
   const stageLabel = useMemo(() => {
     if (readOnly && working) return "其他程序正在执行此会话";
@@ -72,12 +73,13 @@ function GoalExecutionStripBase({ goal, working, readOnly, stage, onOpenDetails,
     <section className={`goal-execution-strip ${goal.status}`} aria-live="polite">
       <div className="goal-execution-main">
         <span className="goal-execution-icon" aria-hidden="true"><Target size={16} /></span>
-        <button type="button" className="goal-execution-summary" onClick={onOpenDetails} title="打开目标详情">
+        <button type="button" className="goal-execution-summary" data-details-trigger onClick={onOpenDetails} title="打开目标详情">
           <strong>{STATUS_LABEL[goal.status]}</strong>
           <span title={goal.objective}>{goal.objective}</span>
         </button>
         <span className="goal-execution-time">已运行 <GoalElapsed goal={goal} /></span>
         {active && !readOnly ? <button type="button" className="goal-execution-stop" onClick={onStop} title="停止目标"><Square size={11} fill="currentColor" /><span>停止</span></button> : null}
+        {goal.status === "complete" ? <button type="button" className="goal-execution-dismiss" onClick={onDismiss} title="关闭已完成目标提示" aria-label="关闭已完成目标提示"><X size={14} /></button> : null}
       </div>
       <div className="goal-execution-meta">
         <span className="goal-execution-stage" title={stageLabel}>当前阶段：{stageLabel}</span>

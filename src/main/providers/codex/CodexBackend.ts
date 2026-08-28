@@ -36,6 +36,48 @@ const CAPABILITIES: AgentCapabilities = {
 };
 
 const THREAD_CONFIGURATION_OPERATIONS = new Set<AgentOperation>(["startSession", "resumeSession", "forkSession"]);
+const THREAD_BOUND_OPERATIONS = new Set<AgentOperation>([
+  "readSession", "resumeSession", "forkSession", "renameSession", "deleteSession", "updateSessionMetadata", "updateSessionSettings",
+  "startTurn", "startReview", "generateSessionTitle", "steerTurn", "interruptTurn", "compactSession", "getGoal", "setGoal", "clearGoal", "closeSession",
+]);
+// Skills are read-only shared Codex resources. Keep them on the default
+// CODEX_HOME so AgentDesk sees the user's global and plugin-provided skills
+// while the primary app-server remains isolated for writable state.
+const DEFAULT_HOME_RESOURCE_OPERATIONS = new Set<AgentOperation>(["listSkills"]);
+
+interface MergedHistoryCursor {
+  primary: string | null;
+  legacy: string | null;
+}
+
+function decodeMergedHistoryCursor(value: unknown): MergedHistoryCursor {
+  if (typeof value !== "string" || !value) return { primary: null, legacy: null };
+  try {
+    const parsed = JSON.parse(value) as Record<string, unknown>;
+    if (parsed && typeof parsed === "object" && !Array.isArray(parsed)
+      && (typeof parsed.primary === "string" || parsed.primary === null || parsed.primary === undefined)
+      && (typeof parsed.legacy === "string" || parsed.legacy === null || parsed.legacy === undefined)) {
+      return {
+        primary: typeof parsed.primary === "string" ? parsed.primary : null,
+        legacy: typeof parsed.legacy === "string" ? parsed.legacy : null,
+      };
+    }
+  } catch {
+    // Native cursors are opaque strings. Older callers may pass one directly.
+  }
+  return { primary: value, legacy: value };
+}
+
+function nextCursorFrom(value: unknown) {
+  const next = value && typeof value === "object" && !Array.isArray(value)
+    ? (value as Record<string, unknown>).nextCursor
+    : undefined;
+  return typeof next === "string" && next ? next : null;
+}
+
+function encodeMergedHistoryCursor(value: MergedHistoryCursor) {
+  return value.primary || value.legacy ? JSON.stringify(value) : null;
+}
 
 function forcedExecutionParams(operation: AgentOperation, params: JsonObject): JsonObject {
   if (THREAD_CONFIGURATION_OPERATIONS.has(operation)) {
@@ -59,16 +101,18 @@ export interface CodexBackendRuntime {
   respond(id: number | string, result: JsonObject): Promise<void>;
   subscribe(listener: (message: JsonRpcMessage) => void): () => void;
   close(): Promise<void>;
-  closeForHandoff?(): Promise<void>;
 }
 
 export class CodexBackend implements AgentBackend {
   readonly provider = "codex" as const;
   private readonly activeSessions = new Map<string, string>();
+  private readonly legacyHistorySessionIds = new Set<string>();
+  private readonly legacyClientSessionIds = new Set<string>();
 
   constructor(
     private readonly runtime: CodexBackendRuntime,
     private readonly titleGenerator?: CodexTitleGenerator,
+    private readonly legacyHistoryRuntime?: CodexBackendRuntime,
   ) {}
 
   async request(operation: AgentOperation, params: JsonObject, context: AgentRequestContext) {
@@ -78,8 +122,19 @@ export class CodexBackend implements AgentBackend {
     const method = METHODS[operation];
     if (!method) throw new Error(`Codex 不支持该操作：${operation}`);
     const providerParams = providerRequestParams(operation, params);
+    if ((operation === "listSessions" || operation === "searchSessions") && this.legacyHistoryRuntime) {
+      return this.requestMergedHistory(method, providerParams, context, operation);
+    }
+    let selectedRuntime = this.runtimeFor(operation, providerParams, context);
     try {
-      const result = await this.runtime.request(method, providerParams, context, operation);
+      let result: unknown;
+      try {
+        result = await selectedRuntime.request(method, providerParams, context, operation);
+      } catch (error) {
+        if (!this.shouldRetryResumeOnLegacy(operation, providerParams, context, selectedRuntime, error)) throw error;
+        selectedRuntime = this.legacyHistoryRuntime as CodexBackendRuntime;
+        result = await selectedRuntime.request(method, providerParams, context, operation);
+      }
       if ((operation === "startSession" || operation === "resumeSession") && context.sessionId) {
         const payload = result && typeof result === "object" && !Array.isArray(result)
           ? result as { thread?: unknown; threadId?: unknown }
@@ -92,6 +147,7 @@ export class CodexBackend implements AgentBackend {
           : typeof payload.threadId === "string" ? payload.threadId : context.nativeSessionId;
         if (nativeSessionId) this.activeSessions.set(context.sessionId, nativeSessionId);
       }
+      this.rememberRuntimeOwnership(operation, selectedRuntime, providerParams, context, result);
       return result;
     } catch (error) {
       const payload = decodeCodexRpcError(error);
@@ -102,17 +158,24 @@ export class CodexBackend implements AgentBackend {
 
   respondToInteraction(ref: InteractionRef, result: JsonObject) {
     if (ref.provider !== this.provider || ref.requestId === undefined) throw new Error("Codex 交互引用无效。");
-    return this.runtime.respond(ref.requestId, result);
+    const runtime = this.legacyHistoryRuntime && this.legacyClientSessionIds.has(ref.sessionId) ? this.legacyHistoryRuntime : this.runtime;
+    return runtime.respond(ref.requestId, result);
   }
 
   subscribeEvents(listener: (event: AgentEventEnvelope) => void) {
-    return this.runtime.subscribe((message) => listener({
+    const publish = (message: JsonRpcMessage) => listener({
       provider: this.provider,
       requestId: message.id,
       receivedAt: Date.now(),
       type: message.method || "codex/unknown",
       payload: message.params ?? message.result ?? message.error ?? {},
-    }));
+    });
+    const unsubscribePrimary = this.runtime.subscribe(publish);
+    const unsubscribeLegacy = this.legacyHistoryRuntime?.subscribe(publish);
+    return () => {
+      unsubscribePrimary();
+      unsubscribeLegacy?.();
+    };
   }
 
   async getCapabilities() {
@@ -122,19 +185,18 @@ export class CodexBackend implements AgentBackend {
   async closeSession(context: AgentRequestContext) {
     if (context.sessionId) this.titleGenerator?.cancel(context.sessionId);
     if (context.nativeSessionId) {
-      await this.runtime.request("thread/unsubscribe", { threadId: context.nativeSessionId }, context, "closeSession");
+      await this.runtimeFor("closeSession", {}, context).request("thread/unsubscribe", { threadId: context.nativeSessionId }, context, "closeSession");
     }
-    if (context.sessionId) this.activeSessions.delete(context.sessionId);
-  }
-
-  async prepareTerminalSession(context: AgentRequestContext) {
-    await (this.runtime.closeForHandoff || this.runtime.close).call(this.runtime);
-    this.activeSessions.clear();
+    if (context.sessionId) {
+      this.activeSessions.delete(context.sessionId);
+      this.legacyClientSessionIds.delete(context.sessionId);
+    }
   }
 
   async close() {
-    await Promise.all([this.titleGenerator?.close() || Promise.resolve(), this.runtime.close()]);
+    await Promise.all([this.titleGenerator?.close() || Promise.resolve(), this.runtime.close(), this.legacyHistoryRuntime?.close() || Promise.resolve()]);
     this.activeSessions.clear();
+    this.legacyClientSessionIds.clear();
   }
 
   private async generateSessionTitle(params: JsonObject, context: AgentRequestContext) {
@@ -143,7 +205,8 @@ export class CodexBackend implements AgentBackend {
     const conversation = typeof params.conversation === "string" ? params.conversation : "";
     if (!threadId || !cwd) throw new Error("Codex 标题请求缺少会话归属。");
 
-    const read = await this.runtime.request("thread/read", { threadId, includeTurns: false }, context, "generateSessionTitle");
+    const runtime = this.runtimeFor("generateSessionTitle", { threadId, cwd }, context);
+    const read = await runtime.request("thread/read", { threadId, includeTurns: false }, context, "generateSessionTitle");
     const thread = read && typeof read === "object" && !Array.isArray(read) && "thread" in read
       ? (read as { thread?: unknown }).thread
       : undefined;
@@ -154,7 +217,7 @@ export class CodexBackend implements AgentBackend {
     if (!this.titleGenerator || !conversation.trim()) return { title: "", source: "fallback" };
 
     const generated = await this.titleGenerator.generate({ sessionId: context.sessionId || threadId, cwd, conversation });
-    const reread = await this.runtime.request("thread/read", { threadId, includeTurns: false }, context, "generateSessionTitle");
+    const reread = await runtime.request("thread/read", { threadId, includeTurns: false }, context, "generateSessionTitle");
     const latestThread = reread && typeof reread === "object" && !Array.isArray(reread) && "thread" in reread
       ? (reread as { thread?: unknown }).thread
       : undefined;
@@ -162,8 +225,92 @@ export class CodexBackend implements AgentBackend {
       ? (latestThread as { name: string }).name.trim().slice(0, 200)
       : "";
     if (latestName && latestName !== "新会话") return { title: latestName, source: "native" };
-    await this.runtime.request("thread/name/set", { threadId, name: generated }, context, "generateSessionTitle");
+    await runtime.request("thread/name/set", { threadId, name: generated }, context, "generateSessionTitle");
     return { title: generated, source: "generated" };
   }
 
+  private runtimeFor(operation: AgentOperation, params: JsonObject, context: AgentRequestContext) {
+    if (this.legacyHistoryRuntime && DEFAULT_HOME_RESOURCE_OPERATIONS.has(operation)) return this.legacyHistoryRuntime;
+    if (!this.legacyHistoryRuntime || !THREAD_BOUND_OPERATIONS.has(operation)) return this.runtime;
+    if (context.sessionId && this.legacyClientSessionIds.has(context.sessionId)) return this.legacyHistoryRuntime;
+    const nativeSessionId = typeof params.threadId === "string" ? params.threadId : context.nativeSessionId;
+    return nativeSessionId && this.legacyHistorySessionIds.has(nativeSessionId) ? this.legacyHistoryRuntime : this.runtime;
+  }
+
+  private shouldRetryResumeOnLegacy(
+    operation: AgentOperation,
+    params: JsonObject,
+    context: AgentRequestContext,
+    selectedRuntime: CodexBackendRuntime,
+    error: unknown,
+  ) {
+    if (operation !== "resumeSession" || !this.legacyHistoryRuntime || selectedRuntime !== this.runtime) return false;
+    const nativeSessionId = typeof params.threadId === "string" ? params.threadId : context.nativeSessionId;
+    if (!nativeSessionId) return false;
+    const payload = decodeCodexRpcError(error);
+    return payload?.code === -32600 && /(?:no rollout found|thread not found)/i.test(payload.message);
+  }
+
+  private rememberRuntimeOwnership(operation: AgentOperation, runtime: CodexBackendRuntime, params: JsonObject, context: AgentRequestContext, result: unknown) {
+    if (!this.legacyHistoryRuntime || !THREAD_BOUND_OPERATIONS.has(operation)) return;
+    const payload = result && typeof result === "object" && !Array.isArray(result) ? result as Record<string, unknown> : {};
+    const thread = payload.thread && typeof payload.thread === "object" && !Array.isArray(payload.thread) ? payload.thread as Record<string, unknown> : {};
+    const nativeSessionId = typeof thread.id === "string"
+      ? thread.id
+      : typeof payload.threadId === "string"
+        ? payload.threadId
+        : typeof params.threadId === "string" ? params.threadId : context.nativeSessionId;
+    if (runtime === this.legacyHistoryRuntime) {
+      if (nativeSessionId) this.legacyHistorySessionIds.add(nativeSessionId);
+      if (context.sessionId) this.legacyClientSessionIds.add(context.sessionId);
+    } else if (context.sessionId) {
+      this.legacyClientSessionIds.delete(context.sessionId);
+    }
+  }
+
+  private async requestMergedHistory(method: string, params: JsonObject, context: AgentRequestContext, operation: AgentOperation) {
+    if (!this.legacyHistoryRuntime) return this.runtime.request(method, params, context, operation);
+    const cursor = decodeMergedHistoryCursor(params.cursor);
+    const requestParams = (value: string | null): JsonObject => ({ ...params, cursor: value });
+    const results = await Promise.allSettled([
+      this.runtime.request(method, requestParams(cursor.primary), context, operation),
+      this.legacyHistoryRuntime.request(method, requestParams(cursor.legacy), context, operation),
+    ]);
+    const successful = results.flatMap((result) => result.status === "fulfilled" ? [result.value] : []);
+    if (!successful.length) {
+      const failed = results.find((result) => result.status === "rejected");
+      throw failed && failed.status === "rejected" ? failed.reason : new Error("Codex 历史读取失败。");
+    }
+    const entries = new Map<string, Record<string, unknown>>();
+    for (const value of successful) {
+      const data = value && typeof value === "object" && !Array.isArray(value) && Array.isArray((value as Record<string, unknown>).data)
+        ? (value as Record<string, unknown>).data as unknown[] : [];
+      for (const item of data) {
+        if (!item || typeof item !== "object" || Array.isArray(item)) continue;
+        const record = item as Record<string, unknown>;
+        const id = typeof record.id === "string" ? record.id : typeof record.sessionId === "string" ? record.sessionId : "";
+        if (id) entries.set(id, record);
+      }
+    }
+    const limit = Math.min(Math.max(Number(params.limit) || 100, 1), 100);
+    const data = [...entries.values()]
+      .sort((left, right) => Number(right.updatedAt || right.recencyAt || 0) - Number(left.updatedAt || left.recencyAt || 0))
+      .slice(0, limit);
+    const legacyResult = results[1];
+    if (legacyResult.status === "fulfilled" && legacyResult.value && typeof legacyResult.value === "object" && !Array.isArray(legacyResult.value)) {
+      const legacyData = Array.isArray((legacyResult.value as Record<string, unknown>).data) ? (legacyResult.value as Record<string, unknown>).data as unknown[] : [];
+      for (const item of legacyData) {
+        if (!item || typeof item !== "object" || Array.isArray(item)) continue;
+        const record = item as Record<string, unknown>;
+        const id = typeof record.id === "string" ? record.id : typeof record.sessionId === "string" ? record.sessionId : "";
+        if (id) this.legacyHistorySessionIds.add(id);
+      }
+    }
+    const primaryResult = results[0];
+    const next = {
+      primary: primaryResult.status === "fulfilled" ? nextCursorFrom(primaryResult.value) : cursor.primary,
+      legacy: legacyResult.status === "fulfilled" ? nextCursorFrom(legacyResult.value) : cursor.legacy,
+    } satisfies MergedHistoryCursor;
+    return { data, nextCursor: encodeMergedHistoryCursor(next) };
+  }
 }

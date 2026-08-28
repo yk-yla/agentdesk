@@ -1,6 +1,6 @@
 import type { AgentEventEnvelope, AgentOperation, AgentProvider } from "../../shared/agentProtocol";
 import type { JsonObject } from "../../shared/protocol";
-import type { ModelOption, SessionState } from "../domain";
+import type { CollaborationMode, ModelOption, SessionState } from "../domain";
 import {
   adaptCodexEvent,
   applyServerMessage as applyCodexEvent,
@@ -44,7 +44,7 @@ export interface RoutedAgentEvent {
   launchProvider?: AgentProvider;
   turnStatus?: string;
   committedClientId?: string;
-  settings?: { model?: string; effort?: string };
+  settings?: { model?: string; effort?: string; collaborationMode?: CollaborationMode };
   lateResponse?: { operation?: AgentOperation; result?: unknown; error?: unknown };
   batched: boolean;
   lifecycle: boolean;

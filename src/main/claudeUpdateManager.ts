@@ -41,8 +41,6 @@ export interface ClaudeUpdateManagerDependencies {
   userDataPath(): string;
   fetch(url: string, init?: RequestInit): Promise<Response>;
   shutdownQueries(): Promise<void>;
-  shutdownTerminals?(): Promise<void>;
-  setTerminalProviderBlocked?(provider: "claude", blocked: boolean): void;
   emitStatus(status: ClaudeRuntimeStatus): void;
   managedExecutablePath?: () => string;
   readSdkVersion?: () => string;
@@ -229,17 +227,13 @@ export class ClaudeUpdateManager {
     if (installSource === "unknown") return this.setStatus({ phase: "notInstalled", message: "未检测到 Claude Code，请先安装。" });
     if (!CLI_VERSION_PATTERN.test(version)) return this.check();
     this.busy = true;
-    let terminalUpdateBlocked = false;
     try {
-      this.dependencies.setTerminalProviderBlocked?.("claude", true);
-      terminalUpdateBlocked = true;
       if (installSource === "npm") return await this.updateViaNpm(version);
       if (installSource === "winget") return await this.updateViaWinget(version);
       return await this.updateViaManaged(version, allowUnverified);
     } catch (error) {
       return this.setStatus({ phase: "error", message: this.friendlyErrorMessage(error) });
     } finally {
-      if (terminalUpdateBlocked) this.dependencies.setTerminalProviderBlocked?.("claude", false);
       this.busy = false;
     }
   }
@@ -269,7 +263,6 @@ export class ClaudeUpdateManager {
 
   private async updateViaNpm(version: string) {
     this.setStatus({ phase: "updating", message: `正在通过 npm 更新 Claude Code 到 ${version}。` });
-    await this.dependencies.shutdownTerminals?.();
     await this.dependencies.shutdownQueries();
     const platform = this.platform();
     const env = this.environment();
@@ -286,7 +279,6 @@ export class ClaudeUpdateManager {
 
   private async updateViaWinget(version: string) {
     this.setStatus({ phase: "updating", message: `正在通过 winget 更新 Claude Code 到 ${version}。` });
-    await this.dependencies.shutdownTerminals?.();
     await this.dependencies.shutdownQueries();
     await this.runExternalCommand("winget.exe", ["upgrade", "Anthropic.ClaudeCode", "--silent", "--accept-source-agreements"], 10 * 60_000);
     this.resetInstallSource();
@@ -321,13 +313,11 @@ export class ClaudeUpdateManager {
       }
       if (this.pendingUpdate.dryRun) {
         const verified = this.pendingUpdate.signatureValid;
-        await this.dependencies.shutdownTerminals?.();
         await this.dependencies.shutdownQueries();
         this.pendingUpdate = null;
         return this.setStatus({ phase: "updated", integrityVerified: verified, message: verified ? "C-09 官方签名样本验证通过，未执行安装。" : "C-09 未验证签名样本已完成二次确认，未执行安装。" });
       }
       this.setStatus({ phase: "updating", integrityVerified: this.pendingUpdate.signatureValid, integritySigner: this.pendingUpdate.signer, integrityStatus: this.pendingUpdate.signatureStatus, message: "正在停止 Claude 会话并替换受管二进制。" });
-      await this.dependencies.shutdownTerminals?.();
       await this.dependencies.shutdownQueries();
       const target = this.managedPath();
       const installed = await replaceClaudeExecutable(this.pendingUpdate.executable, target, async () => {

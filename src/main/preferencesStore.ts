@@ -1,6 +1,6 @@
 import { mkdirSync, readFileSync, statSync } from "node:fs";
 import path from "node:path";
-import { DEFAULT_BASE_FONT_SIZE, DEFAULT_PRESENTATION_MODE, MAX_BASE_FONT_SIZE, MIN_BASE_FONT_SIZE, type ClaudeModelCache, type ClaudeModelCacheModel, type CompactionRecord, type DesktopPreferences, type ExternalTerminalSettings, type PresentationMode, type ThemeId } from "../shared/protocol";
+import { DEFAULT_BASE_FONT_SIZE, MAX_BASE_FONT_SIZE, MIN_BASE_FONT_SIZE, type ClaudeModelCache, type ClaudeModelCacheModel, type CompactionRecord, type DesktopPreferences, type ExternalTerminalSettings, type SessionNoticeDismissalRecord, type ThemeId } from "../shared/protocol";
 import { DEFAULT_EXTERNAL_TERMINAL_KIND, externalTerminalKindForSettings, externalTerminalSettingsForPreset } from "../shared/externalTerminalPresets";
 import { normalizeFavoriteSessionSummaries } from "../shared/favoriteSessions";
 import { writeTextFileAtomicAsync } from "./atomicFile";
@@ -13,6 +13,9 @@ const CLAUDE_MODEL_CACHE_TTL_MS = 14 * 24 * 60 * 60 * 1000;
 const MAX_COMPACTION_COUNT_ENTRIES = 512;
 const MAX_COMPACTION_EVENT_IDS = 64;
 const MAX_RECENT_COMMAND_USAGE_ENTRIES = 512;
+const MAX_SESSION_NOTICE_SESSIONS = 512;
+const MAX_SESSION_NOTICE_KEYS = 128;
+const MAX_SESSION_NOTICE_KEY_LENGTH = 160;
 
 export const DEFAULT_PREFERENCES: DesktopPreferences = {
   lastWorkspace: "",
@@ -25,11 +28,10 @@ export const DEFAULT_PREFERENCES: DesktopPreferences = {
   favoriteSessionSummaries: {},
   modelContextWindows: {},
   lastReasoningEfforts: {},
-  lastPresentationModes: { codex: DEFAULT_PRESENTATION_MODE, claude: DEFAULT_PRESENTATION_MODE },
-  lastCodexPresentationMode: DEFAULT_PRESENTATION_MODE,
   recentCommandUsage: {},
   compactionCounts: {},
   codexCompactionCounts: {},
+  dismissedSessionNotices: {},
   theme: "github-light",
   externalTerminal: externalTerminalSettingsForPreset(DEFAULT_EXTERNAL_TERMINAL_KIND),
 };
@@ -76,21 +78,6 @@ export function normalizeLastReasoningEfforts(value: unknown): NonNullable<Deskt
   }));
 }
 
-export function normalizeLastPresentationModes(value: unknown): NonNullable<DesktopPreferences["lastPresentationModes"]> {
-  const record = value && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : {};
-  return Object.fromEntries((['codex', 'claude'] as const).map((provider) => {
-    const mode = record[provider];
-    return [provider, mode === "terminal" ? "terminal" : DEFAULT_PRESENTATION_MODE] as const;
-  })) as Record<"codex" | "claude", PresentationMode>;
-}
-
-export function normalizeLastCodexPresentationMode(value: unknown, legacy?: unknown): PresentationMode {
-  if (value === "terminal") return "terminal";
-  if (value === "workbench") return "workbench";
-  const legacyRecord = legacy && typeof legacy === "object" && !Array.isArray(legacy) ? legacy as Record<string, unknown> : {};
-  return legacyRecord.codex === "terminal" ? "terminal" : DEFAULT_PRESENTATION_MODE;
-}
-
 export function normalizeRecentCommandUsage(value: unknown): NonNullable<DesktopPreferences["recentCommandUsage"]> {
   if (!value || typeof value !== "object" || Array.isArray(value)) return {};
   return Object.fromEntries(Object.entries(value as Record<string, unknown>)
@@ -114,6 +101,22 @@ export function normalizeCompactionCounts(value: unknown): NonNullable<DesktopPr
     .filter(([key, record]) => key.length > 0 && key.length <= 512 && record.count > 0 && record.count <= 10_000_000)
     .sort((left, right) => right[1].updatedAt - left[1].updatedAt)
     .slice(0, MAX_COMPACTION_COUNT_ENTRIES));
+}
+
+export function normalizeDismissedSessionNotices(value: unknown): NonNullable<DesktopPreferences["dismissedSessionNotices"]> {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return {};
+  return Object.fromEntries(Object.entries(value as Record<string, unknown>)
+    .map(([sessionKey, raw]) => {
+      const record = raw && typeof raw === "object" && !Array.isArray(raw) ? raw as Record<string, unknown> : {};
+      const keys = Array.isArray(record.keys)
+        ? [...new Set(record.keys.filter((key): key is string => typeof key === "string" && key.length > 0 && key.length <= MAX_SESSION_NOTICE_KEY_LENGTH))].slice(-MAX_SESSION_NOTICE_KEYS)
+        : [];
+      const updatedAt = typeof record.updatedAt === "number" && Number.isSafeInteger(record.updatedAt) && record.updatedAt > 0 ? record.updatedAt : 0;
+      return [sessionKey, { keys, updatedAt } satisfies SessionNoticeDismissalRecord] as const;
+    })
+    .filter(([sessionKey, record]) => sessionKey.length > 0 && sessionKey.length <= 512 && record.keys.length > 0 && record.updatedAt > 0)
+    .sort((left, right) => right[1].updatedAt - left[1].updatedAt)
+    .slice(0, MAX_SESSION_NOTICE_SESSIONS));
 }
 
 /** 旧名称保留给 IPC 和已有调用方，实际使用同一套 Provider 无关归一化。 */
@@ -186,14 +189,13 @@ export function normalizePreferences(value: unknown): DesktopPreferences {
     modelContextWindows: normalizeModelContextWindows(parsed.modelContextWindows),
     ...(claudeModelCache ? { claudeModelCache } : {}),
     lastReasoningEfforts: normalizeLastReasoningEfforts(parsed.lastReasoningEfforts),
-    lastPresentationModes: normalizeLastPresentationModes(parsed.lastPresentationModes),
-    lastCodexPresentationMode: normalizeLastCodexPresentationMode(parsed.lastCodexPresentationMode, parsed.lastPresentationModes),
     recentCommandUsage: normalizeRecentCommandUsage(parsed.recentCommandUsage),
     compactionCounts: normalizeCompactionCounts({
       ...normalizeCompactionCounts(parsed.codexCompactionCounts),
       ...normalizeCompactionCounts(parsed.compactionCounts),
     }),
     codexCompactionCounts: normalizeCompactionCounts(parsed.codexCompactionCounts),
+    dismissedSessionNotices: normalizeDismissedSessionNotices(parsed.dismissedSessionNotices),
     externalTerminal: normalizeExternalTerminal(parsed.externalTerminal),
   };
   if (parsed.workspaceState && typeof parsed.workspaceState === "object" && !Array.isArray(parsed.workspaceState)) {

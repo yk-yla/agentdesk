@@ -167,10 +167,6 @@ export interface RetryState {
 export interface SessionState {
   id: string;
   provider: AgentProvider;
-  presentationMode: "workbench" | "terminal";
-  terminalSuspended?: boolean;
-  /** 内置终端的临时活动状态，不参与会话恢复。 */
-  terminalWorking?: boolean;
   /** 正在从 Provider 读取历史，避免把临时空状态画成新会话。 */
   historyLoading?: boolean;
   /** 正在向更早位置翻页读取历史。 */
@@ -335,7 +331,7 @@ export function formatElapsed(startedAt: number | null, now: number) {
 export function emptySession(id: string, cwd: string, model = "", effort = "", provider: AgentProvider = "codex") : SessionState {
   const now = Date.now();
   return {
-    id, provider, presentationMode: "workbench", queryGeneration: 0, capabilities: { ...EMPTY_AGENT_CAPABILITIES }, threadId: null, cwd, title: "新会话", titleOrigin: "placeholder", createdAt: now, updatedAt: now, messages: [], activities: [],
+    id, provider, queryGeneration: 0, capabilities: { ...EMPTY_AGENT_CAPABILITIES }, threadId: null, cwd, title: "新会话", titleOrigin: "placeholder", createdAt: now, updatedAt: now, messages: [], activities: [],
     model, effort, collaborationMode: "default", historyLoading: false, status: "idle", statusLabel: "就绪", activeTurnId: null, startedAt: null, errorText: "", retryState: null, pendingApprovals: [], goal: null, plan: null, subagents: [],
     tokenUsage: { used: 0, total: null }, compactionCount: 0, compactionEventIds: [], detailsOpen: false, detailView: "activity",
   };

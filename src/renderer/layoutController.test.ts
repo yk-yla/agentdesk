@@ -11,7 +11,6 @@ function createHarness(initialLayout: LayoutState = { panes: [{ id: "pane-1", ta
     s3: emptySession("s3", "D:\\three"),
   };
   const released: string[] = [];
-  const prepared: { sessionId: string; provider: string | undefined; cwd: string }[] = [];
   const closeFailures = new Set<string>();
   let created = 0;
   let contextClosed = 0;
@@ -30,14 +29,12 @@ function createHarness(initialLayout: LayoutState = { panes: [{ id: "pane-1", ta
     closeSession: async (sessionId) => { if (closeFailures.has(sessionId)) throw new Error("close failed"); },
     releaseSession: (sessionId) => { released.push(sessionId); delete sessions[sessionId]; },
     closeContextMenu: () => { contextClosed += 1; },
-    prepareSession: (sessionId, provider, cwd) => { prepared.push({ sessionId, provider, cwd }); },
     now: () => 100,
   });
   return {
     controller,
     sessions,
     released,
-    prepared,
     closeFailures,
     get layout() { return layout; },
     get contextClosed() { return contextClosed; },
@@ -151,19 +148,6 @@ describe("LayoutController", () => {
     assert.equal(harness.sessions[created].provider, "claude");
   });
 
-  it("prepares the session created for a split pane", () => {
-    const harness = createHarness();
-    harness.sessions.s1.provider = "claude";
-
-    harness.controller.splitPane("pane-1");
-
-    assert.deepEqual(harness.prepared, [{
-      sessionId: harness.layout.panes[1].activeTabId,
-      provider: "claude",
-      cwd: "D:\\one",
-    }]);
-  });
-
   it("does not create a third pane through split-drop", () => {
     const harness = createHarness({
       panes: [
@@ -211,12 +195,4 @@ describe("LayoutController", () => {
     assert.equal(harness.sessions["created-1"].provider, "claude");
   });
 
-  it("prepares the replacement created for a closed final tab", async () => {
-    const harness = createHarness();
-    harness.sessions.s1.provider = "claude";
-
-    assert.equal(await harness.controller.closeActiveTab(), true);
-
-    assert.deepEqual(harness.prepared, [{ sessionId: "created-1", provider: "claude", cwd: "D:\\one" }]);
-  });
 });

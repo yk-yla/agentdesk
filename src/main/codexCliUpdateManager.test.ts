@@ -26,7 +26,6 @@ describe("CodexCliUpdateManager", () => {
     const notifications: string[] = [];
     let installed = "1.0.0";
     let restarts = 0;
-    const terminalGates: boolean[] = [];
     try {
       const manager = new CodexCliUpdateManager({
         processSupervisor: new ProcessSupervisor(async () => undefined),
@@ -39,7 +38,6 @@ describe("CodexCliUpdateManager", () => {
         isQuitting: () => false,
         emitStatus: (status) => statuses.push(status),
         notify: (title) => notifications.push(title),
-        setTerminalProviderBlocked: (_provider, blocked) => terminalGates.push(blocked),
         environment: {},
         operations: {
           readInstalledVersion: async () => installed,
@@ -53,7 +51,6 @@ describe("CodexCliUpdateManager", () => {
       assert.equal((await manager.update()).phase, "upToDate");
       assert.equal(restarts, 1);
       assert.deepEqual(notifications, ["Codex CLI 已更新"]);
-      assert.deepEqual(terminalGates, [true, false]);
       assert.equal(manager.active, false);
       manager.dispose();
     } finally {
@@ -99,6 +96,47 @@ describe("CodexCliUpdateManager", () => {
       assert.equal(closeCount, 1);
       assert.equal(installCount, 1);
       assert.deepEqual(terminated, [9001, 9004]);
+      manager.dispose();
+    } finally {
+      rmSync(directory, { recursive: true, force: true });
+    }
+  });
+
+  it("closes every AgentDesk-owned app-server before updating", async () => {
+    const directory = mkdtempSync(path.join(tmpdir(), "agentdesk-codex-owned-servers-"));
+    let primaryCloses = 0;
+    let historyCloses = 0;
+    let installed = "1.0.0";
+    try {
+      const manager = new CodexCliUpdateManager({
+        processSupervisor: new ProcessSupervisor(async () => undefined),
+        appServer: {
+          isRunning: true,
+          close: async () => { primaryCloses += 1; },
+          ensureStarted: async () => undefined,
+        },
+        additionalAppServers: [{
+          isRunning: true,
+          close: async () => { historyCloses += 1; },
+          ensureStarted: async () => undefined,
+        }],
+        userDataPath: () => directory,
+        isQuitting: () => false,
+        emitStatus: () => undefined,
+        notify: () => undefined,
+        environment: {},
+        operations: {
+          readInstalledVersion: async () => installed,
+          readLatestVersion: async () => "1.1.0",
+          installVersion: async (version) => { installed = version; },
+          readAppServerProcesses: async () => [],
+        },
+      });
+
+      await manager.check(true);
+      assert.equal((await manager.update()).phase, "upToDate");
+      assert.equal(primaryCloses, 1);
+      assert.equal(historyCloses, 1);
       manager.dispose();
     } finally {
       rmSync(directory, { recursive: true, force: true });

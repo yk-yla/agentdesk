@@ -21,7 +21,6 @@ export default defineConfig(({ mode }) => {
         output: {
           manualChunks: {
             "react-vendor": ["react", "react-dom"],
-            "xterm": ["@xterm/xterm", "@xterm/addon-fit"],
           },
         },
       },

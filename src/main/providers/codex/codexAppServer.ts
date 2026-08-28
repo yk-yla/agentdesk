@@ -38,21 +38,8 @@ const REQUEST_TIMEOUTS_MS: Record<string, number> = {
   "review/start": 60_000,
 };
 
-/** The app-server is intentionally replaced when switching to the terminal. */
-class CodexAppServerHandoffError extends Error {
-  readonly code = "handoff";
-
-  constructor() {
-    super("Codex app-server 正在切换交互模式，请稍候重试。");
-    this.name = "CodexAppServerHandoffError";
-  }
-}
-
-function isHandoffError(error: unknown): error is CodexAppServerHandoffError {
-  return error instanceof CodexAppServerHandoffError;
-}
-
 export interface CodexAppServerOptions {
+  diagnosticLabel?: string;
   command(): string;
   cwd(): string;
   appVersion(): string;
@@ -80,8 +67,9 @@ export class CodexAppServer implements CodexBackendRuntime {
   private child: ChildProcessWithoutNullStreams | null = null;
   private stopPromise: Promise<void> | null = null;
   private startPromise: Promise<void> | null = null;
-  private handoffChild: ChildProcessWithoutNullStreams | null = null;
   private requestId = 1;
+  private generation = 0;
+  private readonly childGenerations = new WeakMap<ChildProcessWithoutNullStreams, number>();
   private readonly requests = new RpcRequestRegistry<ChildProcessWithoutNullStreams>(MAX_TIMED_OUT_REQUESTS);
   private readonly listeners = new Set<(message: JsonRpcMessage) => void>();
 
@@ -101,20 +89,9 @@ export class CodexAppServer implements CodexBackendRuntime {
   }
 
   async request(method: string, params: JsonObject, context: AgentRequestContext) {
-    // A terminal handoff deliberately stops the current app-server. A request
-    // that was already in flight can therefore lose its child between
-    // ensureStarted() and sendRequest(). Reconnect once instead of exposing
-    // the expected handoff as a provider failure to the renderer.
-    for (let attempt = 0; attempt < 2; attempt += 1) {
-      try {
-        await this.ensureStarted();
-        if (this.options.isRequestBlocked()) throw new Error("Codex CLI 正在更新，请稍后重试。");
-        return await this.sendRequest(method, params, context);
-      } catch (error) {
-        if (!isHandoffError(error) || attempt > 0) throw error;
-      }
-    }
-    throw new Error("Codex app-server 重连失败。");
+    await this.ensureStarted();
+    if (this.options.isRequestBlocked()) throw new Error("Codex CLI 正在更新，请稍后重试。");
+    return this.sendRequest(method, params, context);
   }
 
   async respond(id: number | string, result: JsonObject) {
@@ -143,7 +120,14 @@ export class CodexAppServer implements CodexBackendRuntime {
         shell: false,
         stdio: ["pipe", "pipe", "pipe"],
       });
+      const generation = ++this.generation;
+      this.childGenerations.set(child, generation);
       this.child = child;
+      this.options.logger?.log("info", "codex.app_server.spawned", {
+        instance: this.options.diagnosticLabel || "default",
+        generation,
+        appServerProcessId: child.pid,
+      });
       this.attachStreams(child);
       this.attachLifecycle(child, startPromise);
 
@@ -154,6 +138,11 @@ export class CodexAppServer implements CodexBackendRuntime {
         }, {}, child);
         if (this.child !== child) throw new Error("Codex app-server stopped during initialization.");
         this.write({ method: "initialized", params: {} }, child);
+        this.options.logger?.log("info", "codex.app_server.ready", {
+          instance: this.options.diagnosticLabel || "default",
+          generation,
+          appServerProcessId: child.pid,
+        });
         this.publish({ method: "client/ready", params: { workspace: this.options.cwd() } });
       } catch (error) {
         await this.stopChild(child);
@@ -170,24 +159,18 @@ export class CodexAppServer implements CodexBackendRuntime {
   close() {
     if (this.stopPromise) return this.stopPromise;
     const child = this.child;
-    if (!child) return Promise.resolve();
-    return this.stopRunningChild(child);
-  }
-
-  closeForHandoff(): Promise<void> {
-    const child = this.child;
-    // ensureStarted() assigns startPromise before its first microtask spawns
-    // the child. Waiting for that promise prevents a late spawn from surviving
-    // the handoff and racing the next workbench request.
     if (!child) {
+      // A request can start the server between the initial state check and
+      // the first spawn microtask. Wait for that start to settle, then close
+      // the child it created so shutdown cannot leave a late process behind.
       const pendingStart = this.startPromise;
       if (!pendingStart) return Promise.resolve();
-      return pendingStart.then(() => this.closeForHandoff(), () => this.closeForHandoff());
+      return pendingStart.then(() => {
+        const startedChild = this.child;
+        return startedChild ? this.stopRunningChild(startedChild) : undefined;
+      }, () => undefined);
     }
-    this.handoffChild = child;
-    return this.close().finally(() => {
-      if (this.handoffChild === child) this.handoffChild = null;
-    });
+    return this.stopRunningChild(child);
   }
 
   private write(message: JsonRpcMessage, child = this.child) {
@@ -205,7 +188,16 @@ export class CodexAppServer implements CodexBackendRuntime {
         message: `${method} 请求在 ${Math.round(timeoutMs / 1000)} 秒内未响应。`,
         data: { kind: "requestTimeout", backgroundMayContinue: true },
       })));
-      this.options.logger?.log("debug", "codex.rpc.sent", { requestId: context.requestId, rpcId: id, method, params, sessionId: context.sessionId });
+      this.options.logger?.log("debug", "codex.rpc.sent", {
+        requestId: context.requestId,
+        rpcId: id,
+        method,
+        params,
+        sessionId: context.sessionId,
+        instance: this.options.diagnosticLabel || "default",
+        generation: this.childGenerations.get(child),
+        appServerProcessId: child.pid,
+      });
       try {
         this.write({ id, method, params }, child);
       } catch (error) {
@@ -232,12 +224,28 @@ export class CodexAppServer implements CodexBackendRuntime {
       return;
     }
     if (message.error) {
-      this.options.logger?.log("error", "codex.rpc.failed", { requestId: tracked.request.requestId, rpcId: message.id, method: tracked.request.method, error: message.error });
+      this.options.logger?.log("error", "codex.rpc.failed", {
+        requestId: tracked.request.requestId,
+        rpcId: message.id,
+        method: tracked.request.method,
+        instance: this.options.diagnosticLabel || "default",
+        generation: this.childGenerations.get(child),
+        appServerProcessId: child.pid,
+        error: message.error,
+      });
       tracked.request.reject(new Error(encodeCodexRpcError({
         method: tracked.request.method, code: message.error.code, message: message.error.message, data: message.error.data,
       })));
     } else {
-      this.options.logger?.log("debug", "codex.rpc.completed", { requestId: tracked.request.requestId, rpcId: message.id, method: tracked.request.method, result: inspected.result });
+      this.options.logger?.log("debug", "codex.rpc.completed", {
+        requestId: tracked.request.requestId,
+        rpcId: message.id,
+        method: tracked.request.method,
+        instance: this.options.diagnosticLabel || "default",
+        generation: this.childGenerations.get(child),
+        appServerProcessId: child.pid,
+        result: inspected.result,
+      });
       tracked.request.resolve(inspected.result);
     }
   }
@@ -288,7 +296,7 @@ export class CodexAppServer implements CodexBackendRuntime {
 
   private attachLifecycle(child: ChildProcessWithoutNullStreams, startPromise: Promise<void>) {
     let terminated = false;
-    const handleTermination = (error: Error, code?: number | null) => {
+    const handleTermination = (error: Error, code?: number | null, signal?: NodeJS.Signals | null, source = "exit") => {
       if (terminated) return;
       terminated = true;
       const wasActive = this.child === child;
@@ -296,13 +304,24 @@ export class CodexAppServer implements CodexBackendRuntime {
       child.stderr.removeAllListeners();
       if (wasActive) this.child = null;
       if (this.startPromise === startPromise) this.startPromise = null;
-      this.requests.reject(this.handoffChild === child ? new CodexAppServerHandoffError() : error, child);
-      if (wasActive && this.handoffChild !== child && !this.options.isQuitting() && !this.options.isExitNotificationSuppressed()) {
+      this.requests.reject(error, child);
+      this.options.logger?.log(wasActive && !this.options.isQuitting() ? "warn" : "info", "codex.app_server.exited", {
+        instance: this.options.diagnosticLabel || "default",
+        generation: this.childGenerations.get(child),
+        appServerProcessId: child.pid,
+        source,
+        code,
+        signal,
+        wasActive,
+        quitting: this.options.isQuitting(),
+        error: { name: error.name, message: error.message },
+      });
+      if (wasActive && !this.options.isQuitting() && !this.options.isExitNotificationSuppressed()) {
         this.publish({ method: "client/server-exited", params: { code } });
       }
     };
-    child.once("error", (error) => handleTermination(error));
-    child.once("exit", (code) => handleTermination(new Error(`Codex app-server exited with code ${code ?? "unknown"}.`), code));
+    child.once("error", (error) => handleTermination(error, null, null, "error"));
+    child.once("exit", (code, signal) => handleTermination(new Error(`Codex app-server exited with code ${code ?? "unknown"}.`), code, signal, "exit"));
   }
 
   private stopChild(child: ChildProcessWithoutNullStreams): Promise<void> {

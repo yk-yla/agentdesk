@@ -1,11 +1,10 @@
 import type { AgentOperation, AgentProvider, AgentRequestContext, InteractionRef } from "../../shared/agentProtocol";
 import type { DesktopPreferences, JsonObject } from "../../shared/protocol";
-import type { TerminalInputRequest, TerminalResizeRequest, TerminalSessionCommand, TerminalSessionRequest } from "../../shared/terminalProtocol";
 import type { AppLogger } from "../logger";
 import { logErrorDetails } from "../logger";
 import { randomUUID } from "node:crypto";
 import { normalizeFavoriteSessionSummaries } from "../../shared/favoriteSessions";
-import { normalizeBaseFontSize, normalizeClaudeModelCache, normalizeCompactionCounts, normalizeCodexCompactionCounts, normalizeExternalTerminal, normalizeLastPresentationModes, normalizeLastReasoningEfforts, normalizeModelContextWindows, normalizeRecentCommandUsage, normalizeSidebarWidth, normalizeTheme } from "../preferencesStore";
+import { normalizeBaseFontSize, normalizeClaudeModelCache, normalizeCompactionCounts, normalizeCodexCompactionCounts, normalizeDismissedSessionNotices, normalizeExternalTerminal, normalizeLastReasoningEfforts, normalizeModelContextWindows, normalizeRecentCommandUsage, normalizeSidebarWidth, normalizeTheme } from "../preferencesStore";
 
 const AGENT_PROVIDERS = new Set<AgentProvider>(["codex", "claude"]);
 const AGENT_OPERATIONS = new Set<AgentOperation>([
@@ -51,7 +50,6 @@ interface DesktopIpcServices {
     openLocalPath(filePath: unknown): unknown;
     openExternal(url: unknown): unknown;
     openExternalTerminal(input: unknown): unknown;
-    getExternalTerminalStatus(input: unknown): unknown;
   };
   showNotification(input: unknown): unknown;
   window: {
@@ -78,13 +76,6 @@ interface DesktopIpcServices {
   agent: {
     request(request: ValidatedAgentRequest): unknown;
     respond(response: { ref: InteractionRef; result: JsonObject }): unknown;
-  };
-  terminal?: {
-    start(request: TerminalSessionRequest): unknown;
-    write(request: TerminalInputRequest): unknown;
-    resize(request: TerminalResizeRequest): unknown;
-    interrupt(request: TerminalSessionCommand): unknown;
-    close(request: TerminalSessionCommand): unknown;
   };
   development?: {
     holdClaudeWorkerRequests(): unknown;
@@ -130,11 +121,10 @@ export function sanitizePreferencesPatch(value: unknown): Partial<DesktopPrefere
       return cache ? { claudeModelCache: cache } : {};
     })() : {}),
     ...(objectRecord(patch.lastReasoningEfforts) ? { lastReasoningEfforts: normalizeLastReasoningEfforts(patch.lastReasoningEfforts) } : {}),
-    ...(objectRecord(patch.lastPresentationModes) ? { lastPresentationModes: normalizeLastPresentationModes(patch.lastPresentationModes) } : {}),
-    ...(typeof patch.lastCodexPresentationMode === "string" ? { lastCodexPresentationMode: patch.lastCodexPresentationMode === "terminal" ? "terminal" as const : "workbench" as const } : {}),
     ...(objectRecord(patch.recentCommandUsage) ? { recentCommandUsage: normalizeRecentCommandUsage(patch.recentCommandUsage) } : {}),
     ...(objectRecord(patch.compactionCounts) ? { compactionCounts: normalizeCompactionCounts(patch.compactionCounts) } : {}),
     ...(objectRecord(patch.codexCompactionCounts) ? { codexCompactionCounts: normalizeCodexCompactionCounts(patch.codexCompactionCounts) } : {}),
+    ...(objectRecord(patch.dismissedSessionNotices) ? { dismissedSessionNotices: normalizeDismissedSessionNotices(patch.dismissedSessionNotices) } : {}),
     ...(objectRecord(patch.workspaceState) ? { workspaceState: patch.workspaceState as JsonObject } : {}),
     ...(objectRecord(patch.externalTerminal) ? { externalTerminal: normalizeExternalTerminal(patch.externalTerminal) } : {}),
   };
@@ -200,59 +190,6 @@ export function validateWorkspaceSnapshotSubmission(value: unknown) {
   return { requestId: submission.requestId, workspaceState: workspaceState as JsonObject };
 }
 
-function terminalSessionId(value: unknown) {
-  if (typeof value !== "string" || !/^[A-Za-z0-9._:-]{1,160}$/.test(value)) throw new Error("终端会话 ID 无效。");
-  return value;
-}
-
-function terminalGeneration(value: unknown, optional = false) {
-  if (optional && value === undefined) return undefined;
-  if (!Number.isSafeInteger(value) || Number(value) < 1) throw new Error("终端会话代次无效。");
-  return Number(value);
-}
-
-export function validateTerminalStart(value: unknown): TerminalSessionRequest {
-  const request = objectRecord(value);
-  if (!request || !AGENT_PROVIDERS.has(request.provider as AgentProvider) || typeof request.cwd !== "string" || !request.cwd || request.cwd.length > 32_768) {
-    throw new Error("终端启动参数无效。");
-  }
-  const nativeSessionId = typeof request.nativeSessionId === "string" && request.nativeSessionId.length <= 256 ? request.nativeSessionId : undefined;
-  if (request.resume === true && !nativeSessionId) throw new Error("终端恢复请求缺少原生会话 ID。");
-  return {
-    provider: request.provider as AgentProvider,
-    sessionId: terminalSessionId(request.sessionId),
-    cwd: request.cwd,
-    ...(nativeSessionId ? { nativeSessionId } : {}),
-    ...(Number.isSafeInteger(request.cols) ? { cols: Number(request.cols) } : {}),
-    ...(Number.isSafeInteger(request.rows) ? { rows: Number(request.rows) } : {}),
-    ...(request.resume === true ? { resume: true } : {}),
-  };
-}
-
-export function validateTerminalInput(value: unknown): TerminalInputRequest {
-  const request = objectRecord(value);
-  if (!request || typeof request.data !== "string" || Buffer.byteLength(request.data, "utf8") > 64 * 1024) throw new Error("终端输入无效或过大。");
-  return { sessionId: terminalSessionId(request.sessionId), generation: terminalGeneration(request.generation) as number, data: request.data };
-}
-
-export function validateTerminalResize(value: unknown): TerminalResizeRequest {
-  const request = objectRecord(value);
-  if (!request || !Number.isSafeInteger(request.cols) || !Number.isSafeInteger(request.rows)) throw new Error("终端尺寸无效。");
-  return {
-    sessionId: terminalSessionId(request.sessionId),
-    generation: terminalGeneration(request.generation) as number,
-    cols: Number(request.cols),
-    rows: Number(request.rows),
-  };
-}
-
-export function validateTerminalCommand(value: unknown): TerminalSessionCommand {
-  const request = objectRecord(value);
-  if (!request) throw new Error("终端命令无效。");
-  const generation = terminalGeneration(request.generation, true);
-  return { sessionId: terminalSessionId(request.sessionId), ...(generation ? { generation } : {}) };
-}
-
 export function registerDesktopIpc(ipc: IpcRegistrar, services: DesktopIpcServices) {
   const rawHandle = ipc.handle.bind(ipc);
   ipc = {
@@ -299,7 +236,6 @@ export function registerDesktopIpc(ipc: IpcRegistrar, services: DesktopIpcServic
   ipc.handle("agentdesk:open-local-path", (_event, filePath: unknown) => services.files.openLocalPath(filePath));
   ipc.handle("agentdesk:open-external", (_event, url: unknown) => services.files.openExternal(url));
   ipc.handle("agentdesk:open-external-terminal", (_event, input: unknown) => services.files.openExternalTerminal(input));
-  ipc.handle("agentdesk:external-terminal-status", (_event, input: unknown) => services.files.getExternalTerminalStatus(input));
   ipc.handle("agentdesk:show-notification", (_event, input: unknown) => services.showNotification(input));
   ipc.handle("agentdesk:window-state", () => services.window.state());
   ipc.handle("agentdesk:window-minimize", () => services.window.minimize());
@@ -316,27 +252,6 @@ export function registerDesktopIpc(ipc: IpcRegistrar, services: DesktopIpcServic
   ipc.handle("claude:update-install", (_event, allowUnverified: unknown) => services.claude.installUpdate(allowUnverified === true));
   ipc.handle("agent:request", (_event, request: unknown) => services.agent.request(validateAgentRequest(request)));
   ipc.handle("agent:respond", (_event, response: unknown) => services.agent.respond(validateAgentResponse(response)));
-  ipc.handle("terminal:start", (_event, request: unknown) => {
-    if (!services.terminal) throw new Error("内置终端服务不可用。");
-    return services.terminal.start(validateTerminalStart(request));
-  });
-  ipc.handle("terminal:write", (_event, request: unknown) => {
-    if (!services.terminal) throw new Error("内置终端服务不可用。");
-    return services.terminal.write(validateTerminalInput(request));
-  });
-  ipc.handle("terminal:resize", (_event, request: unknown) => {
-    if (!services.terminal) throw new Error("内置终端服务不可用。");
-    return services.terminal.resize(validateTerminalResize(request));
-  });
-  ipc.handle("terminal:interrupt", (_event, request: unknown) => {
-    if (!services.terminal) throw new Error("内置终端服务不可用。");
-    return services.terminal.interrupt(validateTerminalCommand(request));
-  });
-  ipc.handle("terminal:close", (_event, request: unknown) => {
-    if (!services.terminal) throw new Error("内置终端服务不可用。");
-    return services.terminal.close(validateTerminalCommand(request));
-  });
-
   if (!services.development) return;
   ipc.handle("agentdesk:dev-claude-worker-hold-requests", () => services.development?.holdClaudeWorkerRequests());
   ipc.handle("agentdesk:dev-claude-worker-fatal", () => services.development?.injectClaudeWorkerFatal());

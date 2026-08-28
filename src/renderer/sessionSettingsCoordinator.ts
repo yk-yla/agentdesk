@@ -1,6 +1,9 @@
+import type { CollaborationMode } from "./domain";
+
 export interface SessionSettings {
   model: string;
   effort: string;
+  collaborationMode: CollaborationMode;
 }
 
 interface SettingsEntry {

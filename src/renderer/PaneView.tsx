@@ -1,5 +1,5 @@
-import { CircleDot, CornerDownRight, ListChecks, MoreHorizontal, PanelRight, Play, RefreshCw, Square, Target, Terminal, X } from "lucide-react";
-import { lazy, memo, Suspense, useCallback, useEffect, useLayoutEffect, useMemo, useRef, type DragEvent } from "react";
+import { CircleDot, CornerDownRight, ListChecks, PanelRight, Play, RefreshCw, Square, Terminal, X } from "lucide-react";
+import { lazy, memo, Suspense, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type DragEvent } from "react";
 import type { AgentBridge, JsonObject } from "../shared/protocol";
 import Composer from "./Composer";
 import { findModelOption, formatCount, type Activity, type CollaborationMode, type ImageAttachment, type ModelOption, type PaneState, type PendingSteerMessage, type QueuedMessage, type SessionState, type SkillOption } from "./domain";
@@ -10,13 +10,14 @@ import { findQuestionAnchorIndex, QUESTION_ANCHOR_SELECTOR, QUESTION_SCROLL_TOP_
 import ServerRequestPanel from "./ServerRequestPanel";
 import { activitiesForMainConversation } from "./activityPresentation";
 import type { CommandUsage } from "./commandSuggestions";
-import TerminalPane from "./TerminalPane";
-import type { ClaudeTerminalSettings } from "./terminalSettings";
+import ConversationSearch from "./conversationSearchPanel";
+import { findConversationSearchMatches } from "./conversationSearch";
+import { activityNoticeKey, completedGoalNoticeKey, errorNoticeKey, isActivityNoticeDismissed } from "./sessionNoticeDismissal";
 
 const DetailsPanel = lazy(() => import("./DetailsPanel"));
 
 const NO_VISIBLE_ACTIVITIES: Activity[] = [];
-const NAVIGATION_BLOCKING_SELECTOR = '[aria-modal="true"], [role="menu"], .image-lightbox, .command-suggestions, .composer-more[open]';
+const NAVIGATION_BLOCKING_SELECTOR = '[aria-modal="true"], [role="menu"], .image-lightbox, .command-suggestions';
 
 function questionNavigationBlocked(event: KeyboardEvent) {
   const target = event.target;
@@ -40,13 +41,15 @@ export interface PaneViewProps {
   onFocusPane: (paneId: string) => void;
   onMoveTab: (sessionId: string, targetPaneId: string, target?: { paneId: string; sessionId: string; position: "before" | "after" }, split?: "horizontal" | "vertical") => void;
   onSetSessionSetting: (sessionId: string, field: "model" | "effort", value: string) => void;
-  onSetCollaborationMode: (sessionId: string, mode: CollaborationMode) => void;
+  onSetCollaborationMode: (sessionId: string, mode: CollaborationMode) => void | Promise<void>;
   onCompact: (sessionId: string) => void;
   onToggleDetails: (sessionId: string) => void;
   onSetDetailView: (sessionId: string, view: "activity" | "raw" | "goal" | "plan" | "agents") => void;
   onStartGoal: (sessionId: string, objective: string) => void;
   onStopGoal: (sessionId: string) => void;
   onClearError: (sessionId: string) => void;
+  dismissedNoticeKeys: readonly string[];
+  onDismissNotice: (sessionId: string, noticeKeys: string | readonly string[]) => void;
   onRetryReadOnly: (sessionId: string) => void;
   onRefresh: (sessionId: string) => void;
   onLoadEarlier: (sessionId: string) => void;
@@ -61,12 +64,6 @@ export interface PaneViewProps {
   onRemoveImage: (sessionId: string, index: number) => void;
   onRemoveQueuedMessage: (sessionId: string, queuedId: string) => void;
   onChooseDirectory: (sessionId: string) => void;
-  onModeChange: (sessionId: string, mode: "workbench" | "terminal") => void;
-  onResumeTerminal: (sessionId: string) => void;
-  onTerminalError: (sessionId: string, message: string) => void;
-  onTerminalActivity: (sessionId: string, working: boolean) => void;
-  onTerminalSettings: (sessionId: string, settings: ClaudeTerminalSettings) => void;
-  onIsSessionRetained: (sessionId: string) => boolean;
 }
 
 /**
@@ -76,13 +73,12 @@ export interface PaneViewProps {
 function PaneView(props: PaneViewProps) {
   const { pane, session, models, attachments, bridge } = props;
   const conversationRef = useRef<HTMLDivElement>(null);
-  const composerMoreRef = useRef<HTMLDetailsElement>(null);
+  const conversationSearchInputRef = useRef<HTMLInputElement>(null);
   const followLatestRef = useRef(true);
   const questionNavigationScrollRef = useRef(false);
   const questionNavigationFrameRef = useRef<number | null>(null);
   const scrollStatesRef = useRef(new Map<string, { top: number; atBottom: boolean }>());
   const restoringSessionRef = useRef<string | null>(null);
-  const previousPresentationModeRef = useRef(session.presentationMode);
   const model = useMemo(() => findModelOption(models, session.model), [models, session.model]);
   const claudeModel = useMemo(() => models.find((entry) => entry.id === session.model), [models, session.model]);
   const claudeModelLabel = session.resolvedModel
@@ -95,10 +91,46 @@ function PaneView(props: PaneViewProps) {
     const visible = activitiesForMainConversation(session.activities);
     return visible.length ? visible : NO_VISIBLE_ACTIVITIES;
   }, [session.activities]);
-  const emptySession = session.messages.length === 0 && visibleActivities.length === 0;
+  const [locallyDismissedNoticeKeys, setLocallyDismissedNoticeKeys] = useState<Set<string>>(() => new Set());
+  const dismissedNoticeKeys = useMemo(
+    () => new Set([...props.dismissedNoticeKeys, ...locallyDismissedNoticeKeys]),
+    [locallyDismissedNoticeKeys, props.dismissedNoticeKeys],
+  );
+  const dismissNotices = useCallback((noticeKeys: readonly string[]) => {
+    setLocallyDismissedNoticeKeys((current) => {
+      if (noticeKeys.every((noticeKey) => current.has(noticeKey))) return current;
+      const next = new Set(current);
+      for (const noticeKey of noticeKeys) next.add(noticeKey);
+      return next;
+    });
+    props.onDismissNotice(session.id, noticeKeys);
+  }, [props.onDismissNotice, session.id]);
+  const dismissNotice = useCallback((noticeKey: string) => dismissNotices([noticeKey]), [dismissNotices]);
+  const emptySession = session.messages.length === 0 && visibleActivities.every((activity) => isActivityNoticeDismissed(activity, dismissedNoticeKeys));
   const latestMessageLength = session.messages[session.messages.length - 1]?.text.length ?? 0;
   const latestActivityLength = session.activities[session.activities.length - 1]?.output?.length ?? 0;
   const activeGoal = session.goal?.status === "active" ? session.goal : null;
+  const completedGoalKey = session.goal?.status === "complete"
+    ? completedGoalNoticeKey(session.goal)
+    : null;
+  const visibleGoal = completedGoalKey && dismissedNoticeKeys.has(completedGoalKey)
+    ? null
+    : session.goal;
+  const currentErrorNoticeKey = session.errorText ? errorNoticeKey(session.errorText) : null;
+  const [conversationSearchOpen, setConversationSearchOpen] = useState(false);
+  const [conversationSearchQuery, setConversationSearchQuery] = useState("");
+  const [conversationSearchIndex, setConversationSearchIndex] = useState(0);
+  const conversationSearchMatches = useMemo(
+    () => findConversationSearchMatches(session.messages, conversationSearchQuery),
+    [conversationSearchQuery, session.messages],
+  );
+  const activeConversationSearchMatch = conversationSearchMatches[conversationSearchIndex] || null;
+
+  useEffect(() => {
+    setConversationSearchIndex((current) => conversationSearchMatches.length
+      ? Math.min(current, conversationSearchMatches.length - 1)
+      : 0);
+  }, [conversationSearchMatches.length]);
 
   const openGoalDetails = useCallback(() => {
     if (!session.detailsOpen) props.onToggleDetails(session.id);
@@ -106,24 +138,25 @@ function PaneView(props: PaneViewProps) {
   }, [props.onSetDetailView, props.onToggleDetails, session.detailsOpen, session.id]);
 
   useEffect(() => {
-    const closeMoreMenuOnOutsideMouseDown = (event: MouseEvent) => {
-      const details = composerMoreRef.current;
+    if (!session.detailsOpen) return undefined;
+    const closeDetailsOnOutsidePointerDown = (event: PointerEvent) => {
       const target = event.target;
-      if (!details?.open || !(target instanceof Node) || details.contains(target)) return;
-      details.removeAttribute("open");
+      if (!(target instanceof Element)) return;
+      const panel = target.closest<HTMLElement>(".pane-details");
+      const trigger = target.closest<HTMLElement>("[data-details-trigger]");
+      const triggerPane = trigger?.closest<HTMLElement>("[data-pane-session]");
+      if (panel?.dataset.detailsSession === session.id || triggerPane?.dataset.paneSession === session.id) return;
+      props.onToggleDetails(session.id);
     };
-    window.addEventListener("mousedown", closeMoreMenuOnOutsideMouseDown);
-    return () => window.removeEventListener("mousedown", closeMoreMenuOnOutsideMouseDown);
-  }, []);
+    window.addEventListener("pointerdown", closeDetailsOnOutsidePointerDown);
+    return () => window.removeEventListener("pointerdown", closeDetailsOnOutsidePointerDown);
+  }, [props.onToggleDetails, session.detailsOpen, session.id]);
 
   useLayoutEffect(() => {
-    const previousPresentationMode = previousPresentationModeRef.current;
-    previousPresentationModeRef.current = session.presentationMode;
     const conversation = conversationRef.current;
     if (!conversation) return undefined;
-    const returningFromTerminal = previousPresentationMode === "terminal" && session.presentationMode === "workbench";
-    const saved = returningFromTerminal ? undefined : scrollStatesRef.current.get(session.id);
-    const atBottom = returningFromTerminal || (saved?.atBottom ?? true);
+    const saved = scrollStatesRef.current.get(session.id);
+    const atBottom = saved?.atBottom ?? true;
     followLatestRef.current = atBottom;
     restoringSessionRef.current = session.id;
     conversation.scrollTop = saved && !saved.atBottom
@@ -137,7 +170,7 @@ function PaneView(props: PaneViewProps) {
       });
     });
     return () => window.cancelAnimationFrame(frame);
-  }, [session.id, session.presentationMode]);
+  }, [session.id]);
 
   useLayoutEffect(() => {
     if (!followLatestRef.current) return undefined;
@@ -146,7 +179,7 @@ function PaneView(props: PaneViewProps) {
     conversation.scrollTop = conversation.scrollHeight;
     scrollStatesRef.current.set(session.id, { top: conversation.scrollTop, atBottom: true });
     return undefined;
-  }, [session.id, session.presentationMode, session.messages.length, latestMessageLength, session.activities.length, latestActivityLength]);
+  }, [session.id, session.messages.length, latestMessageLength, session.activities.length, latestActivityLength]);
 
   const jumpToQuestion = useCallback((direction: QuestionNavigationDirection, loadAttempts = 0): boolean => {
     const conversation = conversationRef.current;
@@ -198,6 +231,69 @@ function PaneView(props: PaneViewProps) {
     };
   }, [jumpToQuestion, props.isActivePane]);
 
+  useEffect(() => {
+    if (!props.isActivePane) return undefined;
+    const handleConversationSearchShortcut = (event: KeyboardEvent) => {
+      if (!((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === "f") || event.altKey) return;
+      if (session.detailsOpen) return;
+      if (document.querySelector('[aria-modal="true"]')) return;
+      event.preventDefault();
+      event.stopPropagation();
+      setConversationSearchOpen(true);
+    };
+    window.addEventListener("keydown", handleConversationSearchShortcut, true);
+    return () => window.removeEventListener("keydown", handleConversationSearchShortcut, true);
+  }, [props.isActivePane, session.detailsOpen]);
+
+  useEffect(() => {
+    if (!conversationSearchOpen) return undefined;
+    const handleConversationSearchClose = (event: KeyboardEvent) => {
+      if (event.key !== "Escape" || event.defaultPrevented) return;
+      if (document.querySelector('[aria-modal="true"]')) return;
+      event.preventDefault();
+      setConversationSearchOpen(false);
+    };
+    window.addEventListener("keydown", handleConversationSearchClose);
+    return () => window.removeEventListener("keydown", handleConversationSearchClose);
+  }, [conversationSearchOpen]);
+
+  useEffect(() => {
+    if (session.detailsOpen) setConversationSearchOpen(false);
+  }, [session.detailsOpen]);
+
+  useEffect(() => {
+    if (!conversationSearchOpen || !activeConversationSearchMatch) return undefined;
+    let secondFrame: number | null = null;
+    const frame = window.requestAnimationFrame(() => {
+      secondFrame = window.requestAnimationFrame(() => {
+        const target = conversationRef.current?.querySelector<HTMLElement>(`[data-search-active="true"]`);
+        target?.scrollIntoView({ block: "center", behavior: "smooth" });
+      });
+    });
+    return () => {
+      window.cancelAnimationFrame(frame);
+      if (secondFrame !== null) window.cancelAnimationFrame(secondFrame);
+    };
+  }, [activeConversationSearchMatch, conversationSearchOpen, conversationSearchQuery, session.messages.length]);
+
+  const openConversationSearch = useCallback(() => {
+    setConversationSearchOpen(true);
+  }, []);
+
+  const closeConversationSearch = useCallback(() => {
+    setConversationSearchOpen(false);
+  }, []);
+
+  const updateConversationSearchQuery = useCallback((value: string) => {
+    setConversationSearchQuery(value);
+    setConversationSearchIndex(0);
+  }, []);
+
+  const moveConversationSearch = useCallback((direction: 1 | -1) => {
+    if (!conversationSearchMatches.length) return;
+    setConversationSearchIndex((current) => (current + direction + conversationSearchMatches.length) % conversationSearchMatches.length);
+  }, [conversationSearchMatches.length]);
+
   const handleDrop = (event: DragEvent<HTMLElement>) => {
     const tabId = event.dataTransfer.getData("text/tab");
     if (!tabId) return;
@@ -208,6 +304,30 @@ function PaneView(props: PaneViewProps) {
   };
 
   const composerToolbar = useMemo(() => <div className="pane-controls">
+    {session.capabilities.plans !== "unsupported" ? <div
+      className={`collaboration-mode-switch ${session.collaborationMode === "plan" ? "plan-selected" : "default-selected"}`}
+      role="group"
+      aria-label="工作模式"
+    >
+      <button
+        type="button"
+        className={session.collaborationMode === "default" ? "selected" : ""}
+        aria-pressed={session.collaborationMode === "default"}
+        aria-label="执行模式"
+        disabled={session.readOnly || session.status === "working" || !supports("plans")}
+        onClick={() => { void props.onSetCollaborationMode(session.id, "default"); }}
+        title={session.status === "working" ? "任务运行中不能切换模式" : "执行模式：直接分析并完成任务"}
+      ><Play size={14} /></button>
+      <button
+        type="button"
+        className={session.collaborationMode === "plan" ? "selected" : ""}
+        aria-pressed={session.collaborationMode === "plan"}
+        aria-label="计划模式"
+        disabled={session.readOnly || session.status === "working" || !supports("plans")}
+        onClick={() => { void props.onSetCollaborationMode(session.id, "plan"); }}
+        title={session.status === "working" ? "任务运行中不能切换模式" : "计划模式：先制定方案，再根据你的确认执行"}
+      ><ListChecks size={14} /></button>
+    </div> : null}
     {session.capabilities.models !== "unsupported" ? session.provider === "claude" ? <span
       className="readonly-control readonly-model"
       aria-label={`当前模型：${claudeModelLabel}`}
@@ -241,58 +361,36 @@ function PaneView(props: PaneViewProps) {
     {session.capabilities.compact !== "unsupported" ? <button className="compact-count" disabled={!supports("compact") || session.readOnly} onClick={() => props.onCompact(session.id)} title={temporarilyUnavailable("compact") ? "发送首条消息后可压缩上下文" : "手动压缩上下文"}>压缩 {session.compactionCount}</button> : null}
     {session.provider === "claude"
       ? <button className="detail-toggle" disabled={session.statusLabel === "正在打开外部终端"} onClick={() => props.onOpenExternalTerminal(session.id)} title="在外部终端中打开"><Terminal size={15} /><span>在终端打开</span></button>
-      : <button className={`detail-toggle ${session.detailsOpen ? "selected" : ""}`} onClick={() => props.onToggleDetails(session.id)} title="查看详情"><PanelRight size={15} /><span>详情</span></button>}
-    <details ref={composerMoreRef} className="composer-more">
-      <summary title="更多会话操作" aria-label="更多会话操作"><MoreHorizontal size={16} /></summary>
-      <div className="composer-more-menu">
-        {session.capabilities.contextUsage !== "unsupported" ? <span className="composer-more-status">上下文 {formatCount(session.tokenUsage.used)}/{session.tokenUsage.total ? formatCount(session.tokenUsage.total) : "?"}</span> : null}
-        <button type="button" disabled={session.readOnly} className={session.collaborationMode === "default" ? "selected" : ""} onClick={(event) => { props.onSetCollaborationMode(session.id, "default"); event.currentTarget.closest("details")?.removeAttribute("open"); }}><Play size={14} /><span>执行模式</span></button>
-        {supports("plans") ? <button type="button" disabled={session.readOnly} className={session.collaborationMode === "plan" ? "selected" : ""} onClick={(event) => { props.onSetCollaborationMode(session.id, "plan"); event.currentTarget.closest("details")?.removeAttribute("open"); }}><ListChecks size={14} /><span>计划模式</span></button> : null}
-        {session.capabilities.compact !== "unsupported" ? <button type="button" disabled={!supports("compact") || session.readOnly} onClick={(event) => { props.onCompact(session.id); event.currentTarget.closest("details")?.removeAttribute("open"); }}><RefreshCw size={14} /><span>压缩上下文 ({session.compactionCount})</span></button> : null}
-        {session.provider !== "claude" ? <button type="button" className={session.detailsOpen ? "selected" : ""} onClick={(event) => { props.onToggleDetails(session.id); event.currentTarget.closest("details")?.removeAttribute("open"); }}><PanelRight size={14} /><span>详情</span></button> : null}
-        {supports("goals") ? <button type="button" className={session.detailsOpen && session.detailView === "goal" ? "selected" : ""} onClick={(event) => { if (!session.detailsOpen) props.onToggleDetails(session.id); props.onSetDetailView(session.id, "goal"); event.currentTarget.closest("details")?.removeAttribute("open"); }}><Target size={14} /><span>目标</span></button> : null}
-      </div>
-    </details>
+      : <button className={`detail-toggle ${session.detailsOpen ? "selected" : ""}`} data-details-trigger={session.id} onClick={() => props.onToggleDetails(session.id)} title="查看详情"><PanelRight size={15} /><span>详情</span></button>}
   </div>, [
-    claudeModelLabel, efforts, model?.displayName, models, props.onCompact, props.onSetCollaborationMode, props.onSetDetailView,
+    claudeModelLabel, efforts, model?.displayName, models, props.onCompact, props.onSetCollaborationMode,
     props.onSetSessionSetting, props.onToggleDetails, session.collaborationMode,
-    session.compactionCount, session.detailView, session.detailsOpen, session.effort, session.id, session.model, session.provider, session.readOnly,
-    session.resolvedModel, session.statusLabel,
+    session.capabilities, session.compactionCount, session.detailsOpen, session.effort, session.id, session.model, session.provider, session.readOnly,
+    session.resolvedModel, session.status, session.statusLabel,
     session.tokenUsage.total, session.tokenUsage.used,
   ]);
-
-  if (session.presentationMode === "terminal") {
-    return (
-      <section
-        className={`main-panel pane-panel terminal-pane-panel${props.isActivePane ? " active-pane" : ""}${props.isActiveTab ? "" : " inactive-tab"}`}
-        aria-hidden={!props.isActiveTab}
-        onMouseDown={() => props.onFocusPane(pane.id)}
-      >
-        <TerminalPane
-          key={session.id}
-          session={session}
-          bridge={bridge}
-          isActive={props.isActivePane}
-          onModeChange={(mode) => props.onModeChange(session.id, mode)}
-          onResume={() => props.onResumeTerminal(session.id)}
-          onError={(message) => props.onTerminalError(session.id, message)}
-          onClearError={() => props.onClearError(session.id)}
-          onTerminalActivity={(working) => props.onTerminalActivity(session.id, working)}
-          onSettings={(settings) => props.onTerminalSettings(session.id, settings)}
-          isSessionRetained={() => props.onIsSessionRetained(session.id)}
-        />
-      </section>
-    );
-  }
 
   return (
     <section
       className={`main-panel pane-panel ${props.isActivePane ? "active-pane" : ""}${emptySession ? " empty-pane" : ""}${props.isActiveTab ? "" : " inactive-tab"}`}
+      data-pane-session={session.id}
       aria-hidden={!props.isActiveTab}
       onMouseDown={() => props.onFocusPane(pane.id)}
       onDragOver={(event) => event.preventDefault()}
       onDrop={handleDrop}
     >
+      {!session.detailsOpen ? <ConversationSearch
+        open={conversationSearchOpen}
+        query={conversationSearchQuery}
+        matchCount={conversationSearchMatches.length}
+        activeMatchIndex={activeConversationSearchMatch ? conversationSearchIndex : 0}
+        inputRef={conversationSearchInputRef}
+        onOpen={openConversationSearch}
+        onClose={closeConversationSearch}
+        onQueryChange={updateConversationSearchQuery}
+        onPrevious={() => moveConversationSearch(-1)}
+        onNext={() => moveConversationSearch(1)}
+      /> : null}
       <div
         className="conversation"
         aria-live="polite"
@@ -319,9 +417,16 @@ function PaneView(props: PaneViewProps) {
           bridge={bridge}
           cwd={session.cwd}
           provider={session.provider}
+          searchTerm={conversationSearchOpen ? conversationSearchQuery : ""}
+          activeSearchMessageId={conversationSearchOpen ? activeConversationSearchMatch?.messageId || null : null}
+          activeSearchOccurrence={conversationSearchOpen ? activeConversationSearchMatch?.occurrence ?? null : null}
+          searchTargetMessageIndex={conversationSearchOpen ? activeConversationSearchMatch?.messageIndex ?? null : null}
           canLoadEarlier={session.provider === "claude" && session.historyHasMoreBefore === true}
           loadingEarlier={session.historyLoadingEarlier === true}
           onLoadEarlier={session.provider === "claude" ? () => props.onLoadEarlier(session.id) : undefined}
+          dismissedNoticeKeys={dismissedNoticeKeys}
+          onDismissNotice={dismissNotice}
+          onDismissNotices={dismissNotices}
         />
         {session.historyLoading ? <div className="history-loading-overlay" role="status" aria-busy="true">
           <RefreshCw className="history-loading-icon spin" size={16} />
@@ -330,18 +435,21 @@ function PaneView(props: PaneViewProps) {
       </div>
 
       <div className="composer-area">
-        {session.readOnly ? <div className="read-only-banner" role="status"><CircleDot size={15} /><span>{session.provider === "claude" ? <>Claude Code 会话由外部终端控制，当前为只读模式。{session.statusLabel !== "就绪" ? `（${session.statusLabel}）` : ""}</> : "该会话正被其他程序使用，当前为只读模式。"}</span>{session.provider === "claude" ? <><button type="button" disabled={session.statusLabel === "正在打开外部终端"} onClick={() => props.onOpenExternalTerminal(session.id)} title="在外部终端中打开"><Terminal size={13} />在终端中打开</button><button type="button" onClick={() => props.onRefresh(session.id)} disabled={session.historyLoading} title="重新读取外部终端中的最新消息"><RefreshCw size={13} />刷新</button></> : <><button type="button" onClick={() => props.onToggleDetails(session.id)}>{session.detailsOpen ? "关闭详情" : "查看详情"}</button><button type="button" onClick={() => props.onRetryReadOnly(session.id)}>重新尝试编辑</button></>}</div> : null}
-        {session.errorText ? <div className="error-banner" role="alert"><CircleDot size={15} /><span>{session.errorText}</span><button className="bare-button" onClick={() => props.onClearError(session.id)} title="关闭" aria-label="关闭错误提示"><X size={14} /></button></div> : null}
+        {session.readOnly ? <div className="read-only-banner" role="status"><CircleDot size={15} /><span>{session.provider === "claude" ? <>Claude Code 会话由外部终端控制，当前为只读模式。{session.statusLabel !== "就绪" ? `（${session.statusLabel}）` : ""}</> : "该会话正被其他程序使用，当前为只读模式。"}</span>{session.provider === "claude" ? <><button type="button" disabled={session.statusLabel === "正在打开外部终端"} onClick={() => props.onOpenExternalTerminal(session.id)} title="在外部终端中打开"><Terminal size={13} />在终端中打开</button><button type="button" onClick={() => props.onRefresh(session.id)} disabled={session.historyLoading} title="重新读取外部终端中的最新消息"><RefreshCw size={13} />刷新</button></> : <><button type="button" data-details-trigger={session.id} onClick={() => props.onToggleDetails(session.id)}>{session.detailsOpen ? "关闭详情" : "查看详情"}</button><button type="button" onClick={() => props.onRetryReadOnly(session.id)}>重新尝试编辑</button></>}</div> : null}
+        {session.errorText && currentErrorNoticeKey && !dismissedNoticeKeys.has(currentErrorNoticeKey) ? <div className="error-banner" role="alert"><CircleDot size={15} /><span>{session.errorText}</span><button className="bare-button" onClick={() => { dismissNotice(currentErrorNoticeKey); props.onClearError(session.id); }} title="关闭" aria-label="关闭错误提示"><X size={14} /></button></div> : null}
         {session.pendingApprovals[0] && !session.readOnly ? <div className="server-request-wrap"><ServerRequestPanel key={`${session.pendingApprovals[0].requestId}:${session.pendingApprovals[0].interactionId || ""}:${session.pendingApprovals[0].queryGeneration || 0}`} request={session.pendingApprovals[0]} bridge={bridge} onRespond={(result) => props.onRespondApproval(session.id, result)} />{session.pendingApprovals.length > 1 ? <span className="server-request-count">另有 {session.pendingApprovals.length - 1} 个请求等待处理</span> : null}</div> : null}
-        {session.goal ? <GoalExecutionStrip
-          goal={session.goal}
+        {visibleGoal ? <GoalExecutionStrip
+          goal={visibleGoal}
           working={session.status === "working"}
           readOnly={Boolean(session.readOnly)}
           stage={session.retryState ? `正在重试，第 ${session.retryState.attempt} 次：${session.retryState.message}` : session.statusLabel}
           onOpenDetails={openGoalDetails}
           onStop={() => props.onStopGoal(session.id)}
+          onDismiss={() => {
+            if (completedGoalKey) dismissNotice(completedGoalKey);
+          }}
         /> : null}
-        {session.status === "working" && !activeGoal ? <div className={`working-strip${session.retryState ? " retrying" : ""}${session.readOnly ? " read-only-working" : ""}`}>{session.retryState && !session.readOnly ? <RefreshCw className="retry-icon spin" size={14} /> : <span className="working-dot" />}<div className="working-copy"><span>{session.readOnly ? "其他程序正在执行此会话" : session.retryState ? `正在重试… 第 ${session.retryState.attempt} 次` : session.statusLabel}{!session.readOnly ? <> (<ElapsedTimer startedAt={session.startedAt} /> · Esc 停止)</> : null}</span></div>{!session.readOnly ? <button className="stop-button" onClick={() => props.onInterrupt(session.id)} title="停止任务"><Square size={13} fill="currentColor" /><span>停止</span></button> : null}{session.retryState && !session.readOnly ? <span className="retry-detail"><CornerDownRight size={12} />{session.retryState.message}{session.retryState.additionalDetails ? `：${session.retryState.additionalDetails}` : ""}</span> : null}</div> : null}
+        {session.status === "working" && !activeGoal ? <div className={`working-strip${session.retryState ? " retrying" : ""}${session.readOnly ? " read-only-working" : ""}`}>{session.retryState && !session.readOnly ? <RefreshCw className="retry-icon spin" size={14} /> : <span className="working-dot" />}<div className="working-copy"><span>{session.readOnly ? "其他程序正在执行此会话" : session.retryState ? `正在重试… 第 ${session.retryState.attempt} 次` : session.statusLabel}{!session.readOnly ? <> (<ElapsedTimer startedAt={session.startedAt} />)</> : null}</span></div>{!session.readOnly ? <button className="stop-button" onClick={() => props.onInterrupt(session.id)} title="停止任务"><Square size={13} fill="currentColor" /><span>停止</span></button> : null}{session.retryState && !session.readOnly ? <span className="retry-detail"><CornerDownRight size={12} />{session.retryState.message}{session.retryState.additionalDetails ? `：${session.retryState.additionalDetails}` : ""}</span> : null}</div> : null}
         {!session.readOnly ? <Composer
           key={`${session.id}-${props.draftRevision}`}
           sessionId={session.id}
@@ -355,7 +463,7 @@ function PaneView(props: PaneViewProps) {
           queuedMessages={props.queuedMessages}
           pendingSteers={props.pendingSteers}
           working={session.status === "working"}
-          placeholder={activeGoal ? "可继续补充指令或询问目标进度" : undefined}
+          placeholder={activeGoal ? "可继续补充指令或询问目标进度" : session.collaborationMode === "plan" ? "描述需要规划的任务" : undefined}
           copyImage={bridge.copyImage}
           getDraft={props.getDraft}
           onDraftChange={props.onDraftChange}
@@ -370,7 +478,7 @@ function PaneView(props: PaneViewProps) {
       </div>
 
       {session.provider !== "claude" && session.detailsOpen ? (
-        <Suspense fallback={<aside className="details-panel pane-details lazy-panel-loading" aria-busy="true">正在打开详情</aside>}>
+        <Suspense fallback={<aside className="details-panel pane-details lazy-panel-loading" data-details-session={session.id} aria-busy="true">正在打开详情</aside>}>
           <DetailsPanel
             key={session.id}
             sessionId={session.id}
@@ -378,7 +486,6 @@ function PaneView(props: PaneViewProps) {
             activities={session.activities}
             compactionCount={session.compactionCount}
             detailView={session.detailView}
-            onClose={props.onToggleDetails}
             onSelectView={props.onSetDetailView}
             goal={session.goal}
             plan={session.plan}
@@ -388,6 +495,8 @@ function PaneView(props: PaneViewProps) {
             readOnly={Boolean(session.readOnly)}
             onStartGoal={props.onStartGoal}
             onStopGoal={props.onStopGoal}
+            dismissedNoticeKeys={dismissedNoticeKeys}
+            onDismissNotice={dismissNotice}
           />
         </Suspense>
       ) : null}

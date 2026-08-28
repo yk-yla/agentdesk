@@ -148,7 +148,7 @@ describe("ProviderEventController", () => {
     assert.equal(harness.sessions.session.compactionCount, 1);
   });
 
-  it("ignores terminal side effects from an older Query generation", () => {
+  it("ignores late side effects from an older Query generation", () => {
     const session = Object.assign(emptySession("session", "D:\\work"), {
       threadId: "thread",
       queryGeneration: 2,
@@ -230,7 +230,7 @@ describe("ProviderEventController", () => {
     assert.deepEqual(harness.titleRefreshes, [{ sessionId: "session", status: "completed" }]);
   });
 
-  it("does not disconnect the Provider for a non-terminal Codex client error", () => {
+  it("does not disconnect the Provider for a non-fatal Codex client error", () => {
     const harness = createHarness();
 
     harness.controller.handleEnvelope(event("client/error", { threadId: "thread", message: "request failed" }));

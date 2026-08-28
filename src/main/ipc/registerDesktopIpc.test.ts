@@ -1,20 +1,8 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
-import { sanitizePreferencesPatch, validateAgentRequest, validateAgentResponse, validateClientLog, validateTerminalCommand, validateTerminalInput, validateTerminalResize, validateTerminalStart, validateWorkspaceSnapshotSubmission } from "./registerDesktopIpc";
+import { sanitizePreferencesPatch, validateAgentRequest, validateAgentResponse, validateClientLog, validateWorkspaceSnapshotSubmission } from "./registerDesktopIpc";
 
 describe("desktop IPC validation", () => {
-  it("validates bounded terminal operations", () => {
-    assert.deepEqual(validateTerminalStart({ provider: "claude", sessionId: "session-1", cwd: "C:\\work", cols: 80, rows: 24 }), {
-      provider: "claude", sessionId: "session-1", cwd: "C:\\work", cols: 80, rows: 24,
-    });
-    assert.deepEqual(validateTerminalInput({ sessionId: "session-1", generation: 2, data: "abc" }), { sessionId: "session-1", generation: 2, data: "abc" });
-    assert.deepEqual(validateTerminalResize({ sessionId: "session-1", generation: 2, cols: 100, rows: 30 }), { sessionId: "session-1", generation: 2, cols: 100, rows: 30 });
-    assert.deepEqual(validateTerminalCommand({ sessionId: "session-1" }), { sessionId: "session-1" });
-    assert.throws(() => validateTerminalStart({ provider: "codex", sessionId: "bad id", cwd: "C:\\work" }), /会话 ID/);
-    assert.throws(() => validateTerminalStart({ provider: "codex", sessionId: "session-1", cwd: "C:\\work", resume: true }), /原生会话 ID/);
-    assert.throws(() => validateTerminalInput({ sessionId: "session-1", generation: 0, data: "abc" }), /代次/);
-    assert.throws(() => validateTerminalInput({ sessionId: "session-1", generation: 1, data: "x".repeat(70 * 1024) }), /过大/);
-  });
   it("sanitizes preference patches without trusting renderer types", () => {
     const updatedAt = Date.now();
     assert.deepEqual(sanitizePreferencesPatch(null), {});
@@ -28,6 +16,7 @@ describe("desktop IPC validation", () => {
       pinnedSessions: ["codex:thread-1", 2, "", "claude:thread-2"],
       codexCompactionCounts: { "codex:thread-1": { count: 12, eventIds: ["compact-1", 2], updatedAt: 100 } },
       compactionCounts: { "claude:thread-2": { count: 8, eventIds: ["claude-compact-1", 2], updatedAt: 200 } },
+      dismissedSessionNotices: { "codex:thread-1": { keys: ["activity:one", 2], updatedAt: 300 }, invalid: { keys: [], updatedAt: 400 } },
       workspaceState: [],
       ignored: true,
     }), {
@@ -40,6 +29,7 @@ describe("desktop IPC validation", () => {
       pinnedSessions: ["codex:thread-1", "claude:thread-2"],
       codexCompactionCounts: { "codex:thread-1": { count: 12, eventIds: ["compact-1"], updatedAt: 100 } },
       compactionCounts: { "claude:thread-2": { count: 8, eventIds: ["claude-compact-1"], updatedAt: 200 } },
+      dismissedSessionNotices: { "codex:thread-1": { keys: ["activity:one"], updatedAt: 300 } },
     });
     assert.deepEqual(sanitizePreferencesPatch({ theme: "dracula" }), {});
   });

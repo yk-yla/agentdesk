@@ -12,7 +12,6 @@ $buildRoot = [IO.Path]::GetFullPath((Join-Path $repoRoot "build"))
 $profile = Join-Path $buildRoot "package-smoke-profile-$PID"
 $claudeConfig = Join-Path $buildRoot "package-smoke-claude-$PID"
 $codexFixture = Join-Path $scriptRoot "codex-app-server-fixture.cmd"
-$terminalFixture = Join-Path $scriptRoot "terminal-cli-fixture.cmd"
 $logRoot = Join-Path $repoRoot "build\logs"
 $stdoutLog = Join-Path $logRoot "electron-package-regression-$PID.stdout.log"
 $stderrLog = Join-Path $logRoot "electron-package-regression-$PID.stderr.log"
@@ -156,17 +155,12 @@ try {
   if (-not (Test-Path -LiteralPath $codexFixture -PathType Leaf)) {
     throw "找不到 Codex 打包回归夹具：$codexFixture"
   }
-  if (-not (Test-Path -LiteralPath $terminalFixture -PathType Leaf)) {
-    throw "找不到终端打包回归夹具：$terminalFixture"
-  }
   New-Item -ItemType Directory -Path $profile, $logRoot -Force | Out-Null
   New-ClaudeHistoryFixture $claudeConfig $repoRoot
   $applicationArguments = @("--user-data-dir=$profile", "--remote-debugging-port=$Port", "--cwd=$repoRoot")
   $applicationEnvironment = @{
     CLAUDE_CONFIG_DIR = $claudeConfig
-    CLAUDE_CODE_EXECUTABLE = $terminalFixture
     CODEX_DESKTOP_CLI = $codexFixture
-    CODEX_TERMINAL_CLI = $terminalFixture
   }
   $applicationProcess = Start-Process -FilePath $executable -ArgumentList $applicationArguments -Environment $applicationEnvironment -WindowStyle Hidden -RedirectStandardOutput $stdoutLog -RedirectStandardError $stderrLog -PassThru
 
@@ -201,7 +195,6 @@ try {
   Write-Output "打包版单实例锁可用。"
 
   Invoke-PlaywrightChecked @("-s=$session", "run-code", "--filename=$(Join-Path $scriptRoot 'electron-packaged-smoke.js')")
-  Invoke-PlaywrightChecked @("-s=$session", "run-code", "--filename=$(Join-Path $scriptRoot 'electron-packaged-terminal-smoke.js')")
 
   $console = & $PlaywrightWrapper "-s=$session" "console" "error" 2>&1
   $console | Write-Output
