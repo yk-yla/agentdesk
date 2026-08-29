@@ -68,6 +68,8 @@
     "main/workspaceGrantStore.test.ts",
     "main/providers/codex/CodexBackend.ts",
     "main/providers/codex/CodexBackend.test.ts",
+    "main/providers/codex/codexHistoryIndex.ts",
+    "main/providers/codex/codexHistoryIndex.test.ts",
     "main/providers/codex/codexImagePersistence.ts",
     "main/providers/codex/codexImagePersistence.test.ts",
     "main/providers/claude/**/*.ts",

@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 import { decodeCodexRpcError, encodeCodexRpcError, type JsonRpcMessage } from "../../../shared/protocol";
 import { CodexBackend, type CodexBackendRuntime } from "./CodexBackend";
+import type { CodexHistoryIndex } from "./codexHistoryIndex";
 
 function runtime(overrides: Partial<CodexBackendRuntime> = {}): CodexBackendRuntime {
   return {
@@ -125,6 +126,38 @@ describe("CodexBackend", () => {
     const second = await backend.request("listSessions", { allWorkspaces: true, cursor, limit: 10 }, {});
     assert.deepEqual(calls, ["primary:primary-next", "legacy:legacy-next"]);
     assert.equal((second as { nextCursor: string | null }).nextCursor, null);
+  });
+
+  it("preserves thread/search wrappers while merging history runtimes", async () => {
+    const primary = runtime({
+      request: async (method) => method === "thread/search"
+        ? { data: [{ thread: { id: "primary-search", cwd: "D:\\work", name: "primary" }, snippet: "primary hit" }], nextCursor: null }
+        : { data: [] },
+    });
+    const legacy = runtime({
+      request: async (method) => method === "thread/search"
+        ? { data: [{ thread: { id: "legacy-search", cwd: "D:\\work", name: "legacy" }, snippet: "legacy hit" }], nextCursor: null }
+        : { data: [] },
+    });
+    const backend = new CodexBackend(primary, undefined, legacy);
+
+    const result = await backend.request("searchSessions", { searchTerm: "hit", cwd: "D:\\work", limit: 10 }, { canonicalCwd: "D:\\work" }) as { data: Array<{ thread: { id: string }; snippet: string }> };
+    assert.deepEqual(result.data.map((entry) => `${entry.thread.id}:${entry.snippet}`).sort(), ["legacy-search:legacy hit", "primary-search:primary hit"]);
+  });
+
+  it("returns local history when app-server search is unavailable", async () => {
+    let receivedParams: Record<string, unknown> | undefined;
+    const historyIndex = {
+      search: async () => ({
+        data: [{ thread: { id: "local-search", cwd: "D:\\work" }, snippet: "local hit" }],
+        nextCursor: null,
+      }),
+    } as unknown as CodexHistoryIndex;
+    const backend = new CodexBackend(runtime({ request: async (_method, params) => { receivedParams = params; throw new Error("app-server unavailable"); } }), undefined, undefined, historyIndex);
+
+    const result = await backend.request("searchSessions", { searchTerm: "hit", cwd: "D:\\work", limit: 10 }, { canonicalCwd: "D:\\work" }) as { data: Array<{ thread: { id: string }; snippet: string }> };
+    assert.deepEqual(result.data.map((entry) => `${entry.thread.id}:${entry.snippet}`), ["local-search:local hit"]);
+    assert.equal(receivedParams?.cursor, undefined);
   });
 
   it("routes legacy history reads to the default Codex home even with a client session context", async () => {

@@ -20,6 +20,7 @@ import { CodexBackend } from "./providers/codex/CodexBackend";
 import { CodexTitleGenerator } from "./providers/codex/codexTitleGenerator";
 import { CodexAppServer } from "./providers/codex/codexAppServer";
 import { CodexImagePersistence } from "./providers/codex/codexImagePersistence";
+import { CodexHistoryIndex } from "./providers/codex/codexHistoryIndex";
 import { ClaudeBackend } from "./providers/claude/ClaudeBackend";
 import { managedClaudeExecutablePath } from "./providers/claude/claudeUpdater";
 import { resolveExecutableFromPath } from "./executablePath";
@@ -457,6 +458,7 @@ async function closeAllBackendsForExit() {
       }
       await runShutdownSteps([
         { name: "Provider", run: () => backendManager.close() },
+        { name: "Codex 历史索引", run: () => codexHistoryIndex.close() },
         { name: "已跟踪进程", run: () => processSupervisor.terminateAll() },
         { name: "Claude 网关夹具", run: () => closeClaudeGatewayFixture() },
       ]);
@@ -814,6 +816,13 @@ const codexAppServer = new CodexAppServer({
   },
 });
 
+const codexHistoryIndex = new CodexHistoryIndex({
+  roots: [path.join(globalCodexHome, "sessions"), path.join(agentDeskCodexHome, "sessions")],
+  storagePath: () => path.join(app.getPath("userData"), "codex-history-index.json"),
+  isWorkspaceAuthorized: (cwd) => isAuthorizedWorkspacePath(cwd),
+  logger: appLogger,
+});
+
 // The bridge owns the default Codex home. Keep AgentDesk's writable state
 // isolated, but read legacy history through a separate app-server instance.
 const legacyCodexAppServer = new CodexAppServer({
@@ -835,7 +844,7 @@ const legacyCodexAppServer = new CodexAppServer({
 });
 
 let claudeBackend: ClaudeBackend;
-const backendManager = createBackendRegistry([new CodexBackend(codexAppServer, codexTitleGenerator, legacyCodexAppServer), (claudeBackend = new ClaudeBackend())], appLogger, (cwd) => isAuthorizedWorkspacePath(cwd), nativeSessionOwnership);
+const backendManager = createBackendRegistry([new CodexBackend(codexAppServer, codexTitleGenerator, legacyCodexAppServer, codexHistoryIndex), (claudeBackend = new ClaudeBackend())], appLogger, (cwd) => isAuthorizedWorkspacePath(cwd), nativeSessionOwnership);
 claudeUpdateManager = new ClaudeUpdateManager({
   appPath: () => app.getAppPath(),
   userDataPath: () => app.getPath("userData"),
@@ -893,6 +902,7 @@ if (hasLock) {
     await grantAuthorizedWorkspacePath(workspacePath);
     await rememberWorkspace(workspacePath);
     appLogger.log("info", "workspace.selected", { workspace: workspacePath, explicit: Boolean(explicitWorkspace), restored: false });
+    codexHistoryIndex.start();
     registerDesktopIpc(ipcMain, {
       logger: appLogger,
       workspace: {
