@@ -3,7 +3,7 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { describe, it } from "node:test";
-import { ClaudeUpdateManager, downloadClaudeArchive, isTrustedClaudeDownloadUrl, officialClaudeDownloadUrl } from "./claudeUpdateManager";
+import { ClaudeUpdateManager, downloadClaudeArchive, isTrustedClaudeDownloadUrl, latestClaudeDownloadUrl, officialClaudeDownloadUrl } from "./claudeUpdateManager";
 
 describe("ClaudeUpdateManager", () => {
   it("accepts only HTTPS release hosts used by the managed updater", () => {
@@ -83,6 +83,32 @@ describe("ClaudeUpdateManager", () => {
       });
       assert.equal(source, "official");
       assert.deepEqual(calls, [officialClaudeDownloadUrl("1.2.3")]);
+      assert.deepEqual([...readFileSync(target)], [80, 75, 3, 4]);
+    } finally {
+      rmSync(directory, { recursive: true, force: true });
+    }
+  });
+
+  it("supports the proxy-first latest archive used by native Claude installs", async () => {
+    const directory = mkdtempSync(path.join(tmpdir(), "agentdesk-claude-latest-download-"));
+    const target = path.join(directory, "claude.zip");
+    const latestUrl = latestClaudeDownloadUrl();
+    const proxyUrl = `https://gh-proxy.com/${latestUrl}`;
+    const calls: string[] = [];
+    try {
+      const source = await downloadClaudeArchive({
+        target,
+        version: "1.2.3",
+        officialUrl: latestUrl,
+        proxyUrl,
+        proxyFirst: true,
+        fetch: async (url) => {
+          calls.push(url);
+          return new Response(new Uint8Array([80, 75, 3, 4]), { status: 200 });
+        },
+      });
+      assert.equal(source, "proxy");
+      assert.deepEqual(calls, [proxyUrl]);
       assert.deepEqual([...readFileSync(target)], [80, 75, 3, 4]);
     } finally {
       rmSync(directory, { recursive: true, force: true });
@@ -177,6 +203,8 @@ describe("ClaudeUpdateManager", () => {
       writeFileSync(managed, "MZ-old", "utf8");
       mkdirSync(pendingDirectory, { recursive: true });
       writeFileSync(extracted, "MZ-new", "utf8");
+      const archive = path.join(pendingDirectory, "claude.zip");
+      writeFileSync(archive, "PK\u0003\u0004", "binary");
       const manager = new ClaudeUpdateManager({
         appPath: () => directory,
         userDataPath: () => directory,
@@ -202,6 +230,8 @@ describe("ClaudeUpdateManager", () => {
       const status = await manager.update(false);
       assert.equal(status.phase, "updated");
       assert.match(status.message, /代理回退/);
+      assert.equal(existsSync(archive), false);
+      assert.equal(existsSync(pendingDirectory), false);
     } finally {
       rmSync(directory, { recursive: true, force: true });
     }

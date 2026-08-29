@@ -69,6 +69,10 @@ export function officialClaudeDownloadUrl(version: string) {
   return `https://github.com/anthropics/claude-code/releases/download/v${version}/${CLAUDE_ASSET_NAME}`;
 }
 
+export function latestClaudeDownloadUrl() {
+  return `https://github.com/anthropics/claude-code/releases/latest/download/${CLAUDE_ASSET_NAME}`;
+}
+
 function defaultProxyDownloadUrl(officialUrl: string) {
   return `https://gh-proxy.com/${officialUrl}`;
 }
@@ -107,11 +111,16 @@ export async function downloadClaudeArchive(input: {
   target: string;
   version: string;
   fetch: ClaudeUpdateManagerDependencies["fetch"];
+  officialUrl?: string;
   proxyUrl?: string | null;
+  proxyFirst?: boolean;
 }): Promise<ClaudeDownloadSource> {
-  const officialUrl = officialClaudeDownloadUrl(input.version);
-  const sources: Array<{ source: ClaudeDownloadSource; url: string }> = [{ source: "official", url: officialUrl }];
-  if (input.proxyUrl) sources.push({ source: "proxy", url: input.proxyUrl });
+  const officialUrl = input.officialUrl || officialClaudeDownloadUrl(input.version);
+  const officialSource = { source: "official" as const, url: officialUrl };
+  const proxySource = input.proxyUrl ? { source: "proxy" as const, url: input.proxyUrl } : null;
+  const sources: Array<{ source: ClaudeDownloadSource; url: string }> = input.proxyFirst && proxySource
+    ? [proxySource, officialSource]
+    : [officialSource, ...(proxySource ? [proxySource] : [])];
   const failures: string[] = [];
   for (const candidate of sources) {
     await fsPromises.rm(input.target, { force: true }).catch(() => undefined);
@@ -263,7 +272,7 @@ export class ClaudeUpdateManager {
       if (await this.isCliInUse()) throw new Error("Claude Code 正在被会话使用，请先关闭相关会话后再更新。");
       if (installSource === "npm") return await this.updateViaNpm(version);
       if (installSource === "winget") return await this.updateViaWinget(version);
-      if (installSource === "native") return await this.updateViaNative(version);
+      if (installSource === "native") return await this.updateViaNative(version, allowUnverified);
       return await this.updateViaManaged(version, allowUnverified);
     } catch (error) {
       return this.setStatus({ phase: "error", message: this.friendlyErrorMessage(error) });
@@ -311,16 +320,9 @@ export class ClaudeUpdateManager {
     return this.setStatus({ phase: "updated", binaryVersion: installedVersion || version, latestVersion: version, checkedAt: Date.now(), message: `Claude Code 已通过 npm 更新到 ${installedVersion || version}。` });
   }
 
-  private async updateViaNative(version: string) {
-    const executable = this.snapshot?.executablePath || "claude.exe";
-    const isShim = /\.(?:cmd|bat)$/i.test(executable);
-    const command = isShim ? this.environment().ComSpec || "cmd.exe" : executable;
-    const args = isShim ? ["/d", "/s", "/c", `""${executable}" update"`] : ["update"];
-    this.setStatus({ phase: "updating", message: `正在通过 Claude Code 自身更新到 ${version}。` });
-    await this.runExternalCommand(command, args, 30 * 60_000);
-    const installedVersion = this.refreshSnapshotVersion();
-    if (installedVersion !== version) throw new Error(`更新后版本 ${installedVersion || "未知"} 与预期 ${version} 不一致。`);
-    return this.setStatus({ phase: "updated", binaryVersion: installedVersion, latestVersion: installedVersion, checkedAt: Date.now(), message: `Claude Code 已更新到 ${installedVersion}。` });
+  private async updateViaNative(version: string, allowUnverified: boolean) {
+    const target = this.snapshot?.executablePath || resolveExecutableFromPath("claude.exe") || "claude.exe";
+    return this.updateViaArchive(version, allowUnverified, target, "native");
   }
 
   private async isCliInUse() {
@@ -344,6 +346,10 @@ export class ClaudeUpdateManager {
   }
 
   private async updateViaManaged(version: string, allowUnverified: boolean) {
+    return this.updateViaArchive(version, allowUnverified, this.managedPath(), "managed");
+  }
+
+  private async updateViaArchive(version: string, allowUnverified: boolean, targetPath: string, mode: "managed" | "native") {
     let updateDirectory: string | null = null;
     try {
       if (!this.pendingUpdate || this.pendingUpdate.version !== version) {
@@ -354,14 +360,23 @@ export class ClaudeUpdateManager {
         await fsPromises.mkdir(directory, { recursive: true });
         const zipPath = path.join(directory, "claude.zip");
         const executable = path.join(directory, "claude.exe");
-        this.setStatus({ phase: "updating", message: `正在下载 Claude Code ${version}。` });
-        const officialUrl = officialClaudeDownloadUrl(version);
+        this.setStatus({ phase: "updating", message: mode === "native" ? `正在通过 gh-proxy 下载 Claude Code ${version}。` : `正在下载 Claude Code ${version}。` });
+        const officialUrl = mode === "native" ? latestClaudeDownloadUrl() : officialClaudeDownloadUrl(version);
         const configuredProxy = this.dependencies.proxyDownloadUrl
           ? this.dependencies.proxyDownloadUrl(officialUrl, version)
           : defaultProxyDownloadUrl(officialUrl);
-        const downloadSource = await downloadClaudeArchive({ target: zipPath, version, fetch: this.dependencies.fetch, proxyUrl: configuredProxy });
-        this.setStatus({ phase: "updating", message: downloadSource === "proxy" ? "Claude 官方源不可用，已通过代理回退下载，正在验证完整性和签名。" : "Claude 官方下载完成，正在验证完整性和签名。" });
+        const downloadSource = await downloadClaudeArchive({
+          target: zipPath,
+          version,
+          fetch: this.dependencies.fetch,
+          officialUrl,
+          proxyUrl: configuredProxy,
+          ...(mode === "native" ? { proxyFirst: true } : {}),
+        });
+        this.setStatus({ phase: "updating", message: downloadSource === "proxy" ? "已通过 gh-proxy 下载，正在验证完整性和签名。" : "Claude 官方下载完成，正在验证完整性和签名。" });
         const inspection = await inspectAndExtractClaudeZip(zipPath, executable);
+        // 解压和签名检查完成后不再需要压缩包，避免在二次确认或异常退出时留下大文件。
+        await fsPromises.rm(zipPath, { force: true });
         this.pendingUpdate = { directory, executable, version, signatureValid: inspection.signatureValid, signer: inspection.signer, signatureStatus: inspection.signatureStatus, downloadSource };
       }
       if (!this.pendingUpdate.signatureValid && !allowUnverified) {
@@ -374,11 +389,10 @@ export class ClaudeUpdateManager {
         this.pendingUpdate = null;
         return this.setStatus({ phase: "updated", integrityVerified: verified, message: verified ? "C-09 官方签名样本验证通过，未执行安装。" : "C-09 未验证签名样本已完成二次确认，未执行安装。" });
       }
-      this.setStatus({ phase: "updating", integrityVerified: this.pendingUpdate.signatureValid, integritySigner: this.pendingUpdate.signer, integrityStatus: this.pendingUpdate.signatureStatus, message: "正在停止 Claude 会话并替换受管二进制。" });
+      this.setStatus({ phase: "updating", integrityVerified: this.pendingUpdate.signatureValid, integritySigner: this.pendingUpdate.signer, integrityStatus: this.pendingUpdate.signatureStatus, message: mode === "native" ? "正在停止 Claude 会话并替换 Claude Code。" : "正在停止 Claude 会话并替换受管二进制。" });
       await this.dependencies.shutdownQueries();
-      const target = this.managedPath();
-      const installed = await replaceClaudeExecutable(this.pendingUpdate.executable, target, async () => {
-        const installedVersion = this.readBinaryVersion(target);
+      const installed = await replaceClaudeExecutable(this.pendingUpdate.executable, targetPath, async () => {
+        const installedVersion = this.readBinaryVersion(targetPath);
         if (installedVersion !== version) throw new Error(`更新后版本 ${installedVersion || "未知"} 与预期 ${version} 不一致。`);
         return installedVersion;
       });
@@ -387,7 +401,7 @@ export class ClaudeUpdateManager {
       this.pendingUpdate = null;
       this.resetInstallSource();
       if (this.snapshot) this.snapshot = { ...this.snapshot, currentVersion: installed.version };
-      return this.setStatus({ phase: "updated", binaryVersion: installed.version, latestVersion: installed.version, checkedAt: Date.now(), message: `Claude Code 已更新到 ${installed.version}${downloadSource === "proxy" ? "（代理回退）" : "（GitHub 官方源）"}。` });
+      return this.setStatus({ phase: "updated", binaryVersion: installed.version, latestVersion: installed.version, checkedAt: Date.now(), message: `Claude Code 已更新到 ${installed.version}${downloadSource === "proxy" ? "（代理回退，gh-proxy）" : "（GitHub 官方源）"}。` });
     } catch (error) {
       const failedDirectory = this.pendingUpdate?.directory || updateDirectory;
       if (failedDirectory) await fsPromises.rm(failedDirectory, { recursive: true, force: true }).catch(() => undefined);
