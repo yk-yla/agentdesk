@@ -1,6 +1,8 @@
 import { Download, FileDown, RefreshCw, X } from "lucide-react";
 import { memo, useEffect, useState } from "react";
 import type { ClaudeRuntimeStatus, CodexCliUpdateStatus, DesktopUpdateStatus, DiagnosticExport } from "../shared/protocol";
+import { LIGHTWEIGHT_NOTICE_DURATION_MS } from "./sessionErrorNotice";
+import { useAutoDismissNotice } from "./useAutoDismissNotice";
 
 interface Props {
   status: DesktopUpdateStatus;
@@ -48,10 +50,15 @@ function UpdateSettingsBase({ status, cliStatus, claudeStatus, onCheck, onDownlo
   const [cliBusy, setCliBusy] = useState(false);
   const [claudeBusy, setClaudeBusy] = useState(false);
   const [diagnosticsBusy, setDiagnosticsBusy] = useState(false);
-  const [diagnosticsMessage, setDiagnosticsMessage] = useState("");
+  const [diagnosticsNotice, setDiagnosticsNotice] = useState<{ kind: "success" | "error"; message: string } | null>(null);
   const [dismissedAppErrorKey, setDismissedAppErrorKey] = useState("");
   const [dismissedCliErrorKey, setDismissedCliErrorKey] = useState("");
   const [dismissedClaudeErrorKey, setDismissedClaudeErrorKey] = useState("");
+  const diagnosticsAutoDismissProps = useAutoDismissNotice(
+    diagnosticsNotice?.kind === "success" ? diagnosticsNotice.message : null,
+    diagnosticsNotice?.kind === "success" ? LIGHTWEIGHT_NOTICE_DURATION_MS : null,
+    () => setDiagnosticsNotice(null),
+  );
 
   useEffect(() => { if (status.phase !== "error") setDismissedAppErrorKey(""); }, [status.phase]);
   useEffect(() => { if (cliStatus.phase !== "error") setDismissedCliErrorKey(""); }, [cliStatus.phase]);
@@ -78,11 +85,11 @@ function UpdateSettingsBase({ status, cliStatus, claudeStatus, onCheck, onDownlo
   };
   const exportDiagnostics = async () => {
     if (diagnosticsBusy) return;
-    setDiagnosticsBusy(true); setDiagnosticsMessage("");
+    setDiagnosticsBusy(true); setDiagnosticsNotice(null);
     try {
       const result = await onExportDiagnostics();
-      if (result) setDiagnosticsMessage(`已导出：${result.path}`);
-    } catch (reason) { setDiagnosticsMessage(reason instanceof Error ? reason.message : "导出失败，请重试"); }
+      if (result) setDiagnosticsNotice({ kind: "success", message: `已导出：${result.path}` });
+    } catch (reason) { setDiagnosticsNotice({ kind: "error", message: reason instanceof Error ? reason.message : "导出失败，请重试" }); }
     finally { setDiagnosticsBusy(false); }
   };
 
@@ -115,7 +122,7 @@ function UpdateSettingsBase({ status, cliStatus, claudeStatus, onCheck, onDownlo
     </section>
     <details className="diagnostics-details">
       <summary>故障排查</summary>
-      <div className="diagnostics-section"><button className="diagnostics-link" onClick={() => void exportDiagnostics()} disabled={diagnosticsBusy}><FileDown size={13} />{diagnosticsBusy ? "导出中" : "导出诊断日志"}</button>{diagnosticsMessage ? <><div className="diagnostics-message" title={diagnosticsMessage}>{diagnosticsMessage}</div><button type="button" className="bare-button" onClick={() => setDiagnosticsMessage("")} title="关闭提示" aria-label="关闭提示"><X size={13} /></button></> : null}</div>
+      <div className="diagnostics-section"><button className="diagnostics-link" onClick={() => void exportDiagnostics()} disabled={diagnosticsBusy}><FileDown size={13} />{diagnosticsBusy ? "导出中" : "导出诊断日志"}</button>{diagnosticsNotice ? <><div className="diagnostics-message" title={diagnosticsNotice.message} {...diagnosticsAutoDismissProps}>{diagnosticsNotice.message}</div><button type="button" className="bare-button" onClick={() => setDiagnosticsNotice(null)} title="关闭提示" aria-label="关闭提示"><X size={13} /></button></> : null}</div>
     </details>
   </div>;
 }

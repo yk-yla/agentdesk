@@ -43,6 +43,7 @@ interface DesktopIpcServices {
     readClipboardText(): unknown;
     writeClipboardText(text: unknown): unknown;
     copyImage(dataUrl: unknown): unknown;
+    authorizePastedFile(filePath: unknown): unknown;
     saveTextFile(input: unknown): unknown;
     exportDiagnostics(): unknown;
     createHandoff(input: unknown): unknown;
@@ -229,6 +230,7 @@ export function registerDesktopIpc(ipc: IpcRegistrar, services: DesktopIpcServic
   ipc.handle("agentdesk:read-clipboard-text", () => services.files.readClipboardText());
   ipc.handle("agentdesk:write-clipboard-text", (_event, text: unknown) => services.files.writeClipboardText(text));
   ipc.handle("agentdesk:copy-image", (_event, dataUrl: unknown) => services.files.copyImage(dataUrl));
+  ipc.handle("agentdesk:authorize-pasted-file", (_event, filePath: unknown) => services.files.authorizePastedFile(filePath));
   ipc.handle("agentdesk:save-text-file", (_event, input: unknown) => services.files.saveTextFile(input));
   ipc.handle("agentdesk:export-diagnostics", () => services.files.exportDiagnostics());
   ipc.handle("agentdesk:create-handoff", (_event, input: unknown) => services.files.createHandoff(input));

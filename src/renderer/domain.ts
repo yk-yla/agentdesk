@@ -164,6 +164,15 @@ export interface RetryState {
   previousStatusLabel: string;
 }
 
+export type SessionNoticeLifetime = "transient" | "untilResolved" | "manual";
+
+export interface SessionErrorNotice {
+  message: string;
+  lifetime: SessionNoticeLifetime;
+  durationMs?: number;
+  createdAt: number;
+}
+
 export interface SessionState {
   id: string;
   provider: AgentProvider;
@@ -199,6 +208,7 @@ export interface SessionState {
   activeTurnId: string | null;
   startedAt: number | null;
   errorText: string;
+  errorNotice?: SessionErrorNotice;
   retryState: RetryState | null;
   pendingApprovals: PendingApproval[];
   goal: SessionGoal | null;

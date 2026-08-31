@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 import type { DesktopPreferences } from "../shared/protocol";
-import { activityNoticeKey, addDismissedSessionNotice, addDismissedSessionNotices, errorNoticeKey, isActivityNoticeDismissed, legacyActivityNoticeKey } from "./sessionNoticeDismissal";
+import { activityNoticeKey, addDismissedSessionNotice, addDismissedSessionNotices, errorNoticeKey, goalNoticeKey, isActivityNoticeDismissed, isActivityNoticeDismissible, isGoalNoticeDismissible, isSubagentNoticeDismissible, legacyActivityNoticeKey } from "./sessionNoticeDismissal";
 
 describe("session notice dismissal", () => {
   it("creates stable keys without retaining full notice text", () => {
@@ -13,6 +13,28 @@ describe("session notice dismissal", () => {
     assert.equal(isActivityNoticeDismissed(updatedActivity, new Set([legacyActivityNoticeKey(activity)])), false);
     assert.equal(errorNoticeKey("请求失败"), errorNoticeKey("请求失败"));
     assert.equal(errorNoticeKey("请求失败").includes("请求失败"), false);
+  });
+
+  it("allows terminal notices to be dismissed while active states remain actionable", () => {
+    const goal = { threadId: "thread-1", updatedAt: 10, objective: "完成任务", status: "paused" as const };
+    assert.equal(goalNoticeKey(goal), goalNoticeKey({ ...goal }));
+    assert.equal(goalNoticeKey(goal).includes(goal.objective), false);
+    assert.equal(isGoalNoticeDismissible({ status: "active" }), false);
+    for (const status of ["paused", "blocked", "usageLimited", "budgetLimited", "complete"] as const) {
+      assert.equal(isGoalNoticeDismissible({ status }), true, `goal:${status}`);
+    }
+
+    assert.equal(isActivityNoticeDismissible({ status: "inProgress" }), false);
+    for (const status of ["completed", "failed", "declined", "interrupted"] as const) {
+      assert.equal(isActivityNoticeDismissible({ status }), true, `activity:${status}`);
+    }
+
+    for (const status of ["pendingInit", "running"] as const) {
+      assert.equal(isSubagentNoticeDismissible({ status }), false, `subagent:${status}`);
+    }
+    for (const status of ["interrupted", "completed", "errored", "shutdown", "notFound"] as const) {
+      assert.equal(isSubagentNoticeDismissible({ status }), true, `subagent:${status}`);
+    }
   });
 
   it("deduplicates keys and bounds sessions and notices", () => {

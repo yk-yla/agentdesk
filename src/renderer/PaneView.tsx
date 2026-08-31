@@ -12,7 +12,9 @@ import { activitiesForMainConversation } from "./activityPresentation";
 import type { CommandUsage } from "./commandSuggestions";
 import ConversationSearch from "./conversationSearchPanel";
 import { findConversationSearchMatches } from "./conversationSearch";
-import { activityNoticeKey, completedGoalNoticeKey, errorNoticeKey, isActivityNoticeDismissed } from "./sessionNoticeDismissal";
+import { activityNoticeKey, goalNoticeKey, isActivityNoticeDismissed, isGoalNoticeDismissible } from "./sessionNoticeDismissal";
+import { sessionErrorAutoDismissMs, sessionErrorNoticeIdentity } from "./sessionErrorNotice";
+import { useAutoDismissNotice } from "./useAutoDismissNotice";
 
 const DetailsPanel = lazy(() => import("./DetailsPanel"));
 
@@ -47,7 +49,7 @@ export interface PaneViewProps {
   onSetDetailView: (sessionId: string, view: "activity" | "raw" | "goal" | "plan" | "agents") => void;
   onStartGoal: (sessionId: string, objective: string) => void;
   onStopGoal: (sessionId: string) => void;
-  onClearError: (sessionId: string) => void;
+  onClearError: (sessionId: string, expectedNoticeIdentity?: string) => void;
   dismissedNoticeKeys: readonly string[];
   onDismissNotice: (sessionId: string, noticeKeys: string | readonly string[]) => void;
   onRetryReadOnly: (sessionId: string) => void;
@@ -60,7 +62,7 @@ export interface PaneViewProps {
   onDraftChange: (sessionId: string, value: string) => void;
   onSend: (sessionId: string, text: string, mode?: "submit" | "queue") => void;
   onCycleEffort: (sessionId: string, direction: 1 | -1) => void;
-  onAddImages: (sessionId: string, files: File[]) => void;
+  onAddFiles: (sessionId: string, files: File[]) => Promise<string[]>;
   onRemoveImage: (sessionId: string, index: number) => void;
   onRemoveQueuedMessage: (sessionId: string, queuedId: string) => void;
   onChooseDirectory: (sessionId: string) => void;
@@ -110,13 +112,17 @@ function PaneView(props: PaneViewProps) {
   const latestMessageLength = session.messages[session.messages.length - 1]?.text.length ?? 0;
   const latestActivityLength = session.activities[session.activities.length - 1]?.output?.length ?? 0;
   const activeGoal = session.goal?.status === "active" ? session.goal : null;
-  const completedGoalKey = session.goal?.status === "complete"
-    ? completedGoalNoticeKey(session.goal)
+  const goalNotice = session.goal && isGoalNoticeDismissible(session.goal)
+    ? goalNoticeKey(session.goal)
     : null;
-  const visibleGoal = completedGoalKey && dismissedNoticeKeys.has(completedGoalKey)
+  const visibleGoal = goalNotice && dismissedNoticeKeys.has(goalNotice)
     ? null
     : session.goal;
-  const currentErrorNoticeKey = session.errorText ? errorNoticeKey(session.errorText) : null;
+  const currentErrorNoticeIdentity = sessionErrorNoticeIdentity(session);
+  const clearCurrentError = useCallback(() => {
+    props.onClearError(session.id, currentErrorNoticeIdentity || undefined);
+  }, [currentErrorNoticeIdentity, props.onClearError, session.id]);
+  const errorAutoDismissProps = useAutoDismissNotice(currentErrorNoticeIdentity, props.isActiveTab ? sessionErrorAutoDismissMs(session) : null, clearCurrentError);
   const [conversationSearchOpen, setConversationSearchOpen] = useState(false);
   const [conversationSearchQuery, setConversationSearchQuery] = useState("");
   const [conversationSearchIndex, setConversationSearchIndex] = useState(0);
@@ -436,7 +442,7 @@ function PaneView(props: PaneViewProps) {
 
       <div className="composer-area">
         {session.readOnly ? <div className="read-only-banner" role="status"><CircleDot size={15} /><span>{session.provider === "claude" ? <>Claude Code 会话由外部终端控制，当前为只读模式。{session.statusLabel !== "就绪" ? `（${session.statusLabel}）` : ""}</> : "该会话正被其他程序使用，当前为只读模式。"}</span>{session.provider === "claude" ? <><button type="button" disabled={session.statusLabel === "正在打开外部终端"} onClick={() => props.onOpenExternalTerminal(session.id)} title="在外部终端中打开"><Terminal size={13} />在终端中打开</button><button type="button" onClick={() => props.onRefresh(session.id)} disabled={session.historyLoading} title="重新读取外部终端中的最新消息"><RefreshCw size={13} />刷新</button></> : <><button type="button" data-details-trigger={session.id} onClick={() => props.onToggleDetails(session.id)}>{session.detailsOpen ? "关闭详情" : "查看详情"}</button><button type="button" onClick={() => props.onRetryReadOnly(session.id)}>重新尝试编辑</button></>}</div> : null}
-        {session.errorText && currentErrorNoticeKey && !dismissedNoticeKeys.has(currentErrorNoticeKey) ? <div className="error-banner" role="alert"><CircleDot size={15} /><span>{session.errorText}</span><button className="bare-button" onClick={() => { dismissNotice(currentErrorNoticeKey); props.onClearError(session.id); }} title="关闭" aria-label="关闭错误提示"><X size={14} /></button></div> : null}
+        {session.errorText ? <div className="error-banner" role="alert" {...errorAutoDismissProps}><CircleDot size={15} /><span>{session.errorText}</span><button className="bare-button" onClick={clearCurrentError} title="关闭" aria-label="关闭错误提示"><X size={14} /></button></div> : null}
         {session.pendingApprovals[0] && !session.readOnly ? <div className="server-request-wrap"><ServerRequestPanel key={`${session.pendingApprovals[0].requestId}:${session.pendingApprovals[0].interactionId || ""}:${session.pendingApprovals[0].queryGeneration || 0}`} request={session.pendingApprovals[0]} bridge={bridge} onRespond={(result) => props.onRespondApproval(session.id, result)} />{session.pendingApprovals.length > 1 ? <span className="server-request-count">另有 {session.pendingApprovals.length - 1} 个请求等待处理</span> : null}</div> : null}
         {visibleGoal ? <GoalExecutionStrip
           goal={visibleGoal}
@@ -446,10 +452,10 @@ function PaneView(props: PaneViewProps) {
           onOpenDetails={openGoalDetails}
           onStop={() => props.onStopGoal(session.id)}
           onDismiss={() => {
-            if (completedGoalKey) dismissNotice(completedGoalKey);
+            if (goalNotice) dismissNotice(goalNotice);
           }}
         /> : null}
-        {session.status === "working" && !activeGoal ? <div className={`working-strip${session.retryState ? " retrying" : ""}${session.readOnly ? " read-only-working" : ""}`}>{session.retryState && !session.readOnly ? <RefreshCw className="retry-icon spin" size={14} /> : <span className="working-dot" />}<div className="working-copy"><span>{session.readOnly ? "其他程序正在执行此会话" : session.retryState ? `正在重试… 第 ${session.retryState.attempt} 次` : session.statusLabel}{!session.readOnly ? <> (<ElapsedTimer startedAt={session.startedAt} />)</> : null}</span></div>{!session.readOnly ? <button className="stop-button" onClick={() => props.onInterrupt(session.id)} title="停止任务"><Square size={13} fill="currentColor" /><span>停止</span></button> : null}{session.retryState && !session.readOnly ? <span className="retry-detail"><CornerDownRight size={12} />{session.retryState.message}{session.retryState.additionalDetails ? `：${session.retryState.additionalDetails}` : ""}</span> : null}</div> : null}
+        {session.status === "working" && !activeGoal ? <div className={`working-strip${session.retryState ? " retrying" : ""}${session.readOnly ? " read-only-working" : ""}`}>{session.retryState && !session.readOnly ? <RefreshCw className="retry-icon spin" size={14} /> : <span className="working-dot" />}<div className="working-copy"><span>{session.readOnly ? "其他程序正在执行此会话" : session.retryState ? `正在重试… 第 ${session.retryState.attempt} 次` : session.statusLabel}{!session.readOnly ? <> (<ElapsedTimer startedAt={session.startedAt} />)</> : null}</span></div>{!session.readOnly ? <button className="stop-button" onClick={() => { if (window.confirm("确认停止当前任务吗？")) props.onInterrupt(session.id); }} title="停止任务"><Square size={13} fill="currentColor" /><span>停止</span></button> : null}{session.retryState && !session.readOnly ? <span className="retry-detail"><CornerDownRight size={12} />{session.retryState.message}{session.retryState.additionalDetails ? `：${session.retryState.additionalDetails}` : ""}</span> : null}</div> : null}
         {!session.readOnly ? <Composer
           key={`${session.id}-${props.draftRevision}`}
           sessionId={session.id}
@@ -469,7 +475,7 @@ function PaneView(props: PaneViewProps) {
           onDraftChange={props.onDraftChange}
           onSend={props.onSend}
           onCycleEffort={props.onCycleEffort}
-          onAddImages={props.onAddImages}
+          onAddFiles={props.onAddFiles}
           onRemoveImage={props.onRemoveImage}
           onRemoveQueuedMessage={props.onRemoveQueuedMessage}
           onChooseDirectory={props.onChooseDirectory}

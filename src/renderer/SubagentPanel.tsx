@@ -1,7 +1,7 @@
 import { Bot, Check, CircleDot, LoaderCircle, X } from "lucide-react";
 import { memo } from "react";
 import type { SubagentState } from "./domain";
-import { subagentNoticeKey } from "./sessionNoticeDismissal";
+import { isSubagentNoticeDismissible, subagentNoticeKey } from "./sessionNoticeDismissal";
 
 interface Props {
   subagents: SubagentState[];
@@ -25,7 +25,7 @@ function SubagentPanel({ subagents, dismissedNoticeKeys, onDismissNotice }: Prop
           {agent.prompt ? <div className="subagent-prompt">{agent.prompt}</div> : null}
           {agent.message ? <pre className="subagent-message">{agent.message}</pre> : null}
           <div className="subagent-meta">{agent.model || "默认模型"}{agent.effort ? ` · ${agent.effort}` : ""}</div>
-          {agent.status === "errored" ? <button type="button" className="bare-button subagent-dismiss" onClick={() => onDismissNotice(subagentNoticeKey(agent))} title="关闭错误提示" aria-label="关闭错误提示"><X size={13} /></button> : null}
+          {isSubagentNoticeDismissible(agent) ? <button type="button" className="bare-button subagent-dismiss" onClick={() => onDismissNotice(subagentNoticeKey(agent))} title="关闭子 Agent 提示" aria-label="关闭子 Agent 提示"><X size={13} /></button> : null}
         </article>
       ))}
     </div>

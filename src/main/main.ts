@@ -15,7 +15,7 @@ import { writeTextFileAtomicAsync } from "./atomicFile";
 import { DesktopNotificationRetention, normalizeDesktopNotification } from "./desktopNotification";
 import { createExternalTerminalLaunchPlan, expandExternalTerminalArgs } from "./externalTerminalLauncher";
 import { CoalescingAsyncTask } from "./asyncOperation";
-import { canonicalPath, isWithinDirectory, resolveLocalPathOpenRequest } from "./localPathPolicy";
+import { canonicalPath, isWithinDirectory, resolveLocalPathOpenRequest, resolvePastedFilePath } from "./localPathPolicy";
 import { CodexBackend } from "./providers/codex/CodexBackend";
 import { CodexTitleGenerator } from "./providers/codex/codexTitleGenerator";
 import { CodexAppServer } from "./providers/codex/codexAppServer";
@@ -38,7 +38,7 @@ import { buildDiagnosticBundle } from "./diagnostics";
 import { requestedProviderFromArgs, requestedWorkspaceFromArgs, startupWorkspace } from "./workspaceArgs";
 import { WorkspaceAuthorizationRegistry, type WorkspaceAuthorizationSource } from "./workspaceAuthorizationRegistry";
 import { WorkspaceGrantStore } from "./workspaceGrantStore";
-import { ensureCodexHomeLinks } from "./codexHome";
+import { ensureCodexHomeLinks, ensureCodexSkillLinks } from "./codexHome";
 import { parseClipboardImageDataUrl } from "./clipboardImageData";
 import { isClipboardImageSizeAllowed } from "../shared/imagePolicy";
 import { WorkspaceSnapshotCoordinator } from "./workspaceSnapshotCoordinator";
@@ -124,6 +124,24 @@ function readCodexDefaults(): CodexDefaults {
 const preferencesStore = new PreferencesStore(() => path.join(app.getPath("userData"), "preferences.json"));
 const workspaceGrantStore = new WorkspaceGrantStore(() => path.join(app.getPath("userData"), "workspace-grants.json"), MAX_AUTHORIZED_WORKSPACE_PATHS);
 const appLogger = new FileLogger(() => path.join(app.getPath("userData"), "logs"));
+const syncCodexSkillLinks = () => {
+  try {
+    const results = ensureCodexSkillLinks(globalCodexHome, agentDeskCodexHome);
+    for (const result of results) {
+      if (result.status === "error" || result.status === "occupied") {
+        appLogger.log("warn", "codex.skills.link_unavailable", {
+          name: result.name,
+          status: result.status,
+          error: result.error,
+        });
+      }
+    }
+  } catch (error) {
+    // Skills are optional; a link failure must not prevent Codex itself from starting.
+    appLogger.log("warn", "codex.skills.sync_failed", { error: logErrorDetails(error) });
+  }
+};
+syncCodexSkillLinks();
 for (const result of codexHomeLinkResults) {
   if (result.status === "occupied" || result.status === "error") {
     appLogger.log("warn", "codex.home_link_unavailable", {
@@ -249,8 +267,8 @@ function requireAuthorizedWorkspacePath(directory: string) {
 function externalTerminalEnvironment() {
   const env: NodeJS.ProcessEnv = { ...process.env };
   // AgentDesk may itself run with NO_COLOR/TERM=dumb (for example when it is
-  // launched by a headless bridge). Do not pass those host settings to the
-  // interactive Claude terminal, otherwise Claude disables its coloured UI.
+  // launched by a headless bridge). Do not pass those host settings to an
+  // interactive Provider terminal, otherwise its coloured UI may be disabled.
   delete env.NO_COLOR;
   env.TERM = "xterm-256color";
   env.COLORTERM = "truecolor";
@@ -261,17 +279,22 @@ function externalTerminalEnvironment() {
   return env;
 }
 
-function validateExternalTerminalInput(input: unknown): Required<Pick<ExternalTerminalOpenRequest, "cwd" | "sessionId">> & { resume: boolean; initialPrompt: string } {
+function validateExternalTerminalInput(input: unknown): Required<Pick<ExternalTerminalOpenRequest, "cwd" | "sessionId" | "provider">> & { resume: boolean; initialPrompt: string } {
   if (!input || typeof input !== "object" || Array.isArray(input)) throw new Error("外部终端参数无效。");
   const record = input as Record<string, unknown>;
   const cwd = requireAuthorizedWorkspacePath(typeof record.cwd === "string" ? record.cwd : "");
   const sessionId = typeof record.sessionId === "string" ? record.sessionId : "";
+  const providerValue = record.provider ?? "claude";
+  if (providerValue !== "codex" && providerValue !== "claude") throw new Error("外部终端 Provider 无效。");
+  const provider = providerValue;
   const resume = record.resume === true;
   const initialPrompt = typeof record.initialPrompt === "string" ? record.initialPrompt.trim() : "";
-  if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(sessionId)) throw new Error("Claude 会话 ID 无效。");
-  if (Buffer.byteLength(initialPrompt, "utf8") > 8 * 1024) throw new Error("Claude 初始提示过大。");
-  if (resume && initialPrompt) throw new Error("恢复 Claude 会话时不能同时发送初始提示。");
-  return { cwd, sessionId, resume, initialPrompt };
+  // Codex app-server uses UUIDv7 IDs, while Claude currently emits UUIDv4.
+  // Validate the UUID shape and variant without rejecting a provider's version.
+  if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(sessionId)) throw new Error(`${provider === "codex" ? "Codex" : "Claude"} 会话 ID 无效。`);
+  if (Buffer.byteLength(initialPrompt, "utf8") > 8 * 1024) throw new Error("外部终端初始提示过大。");
+  if (resume && initialPrompt) throw new Error("恢复会话时不能同时发送初始提示。");
+  return { cwd, sessionId, provider, resume, initialPrompt };
 }
 
 function configuredExternalTerminalExecutable(value: string) {
@@ -342,17 +365,19 @@ async function refreshExternalTerminalExecutableCache(settings = preferencesStor
 }
 
 function openConfiguredExternalTerminal(input: unknown): Promise<{ state: "open"; source: "agentdesk" }> {
-  const { cwd, sessionId, resume, initialPrompt } = validateExternalTerminalInput(input);
+  const { cwd, sessionId, provider, resume, initialPrompt } = validateExternalTerminalInput(input);
   const settings = normalizeExternalTerminal(preferencesStore.read().externalTerminal);
   const requestedExecutable = settings.executable.trim();
   const cache = readExternalTerminalExecutableCache();
   if (!cache || cache.requestedExecutable !== requestedExecutable) throw new Error("终端配置正在检测，请稍后再试。");
   if (!cache.available || !cache.executable) throw new Error("找不到外部终端程序，请在设置中填写可执行文件路径。");
   const executable = cache.executable;
-  if (!claudeRuntimeSnapshot.executablePath || !cliExecutableExists(claudeRuntimeSnapshot.executablePath)) throw new Error("启动时记录的 Claude Code 文件已不存在，请重启 AgentDesk 使安装信息刷新。");
-  if (!settings.argsTemplate.includes("{sessionId}")) throw new Error("外部终端参数模板必须包含 {sessionId}，否则无法绑定到当前 Claude 会话。");
-  appLogger.log("info", "external_terminal.open_requested", { executable: requestedExecutable, cwd, resume, sessionIdPresent: true, initialPromptPresent: Boolean(initialPrompt) });
-  const args = expandExternalTerminalArgs(settings, executable, { cwd, sessionId, resume: resume === true, initialPrompt, cliExecutable: claudeRuntimeSnapshot.executablePath });
+  const runtimeSnapshot = provider === "codex" ? codexRuntimeSnapshot : claudeRuntimeSnapshot;
+  const providerName = provider === "codex" ? "Codex CLI" : "Claude Code";
+  if (!runtimeSnapshot.executablePath || !cliExecutableExists(runtimeSnapshot.executablePath)) throw new Error(`启动时记录的 ${providerName} 文件已不存在，请重启 AgentDesk 使安装信息刷新。`);
+  if (!settings.argsTemplate.includes("{sessionId}")) throw new Error("外部终端参数模板必须包含 {sessionId}，否则无法绑定到当前会话。");
+  appLogger.log("info", "external_terminal.open_requested", { provider, executable: requestedExecutable, cwd, resume, sessionIdPresent: true, initialPromptPresent: Boolean(initialPrompt) });
+  const args = expandExternalTerminalArgs(settings, executable, { provider, cwd, sessionId, resume: resume === true, initialPrompt, cliExecutable: runtimeSnapshot.executablePath });
   if (!args.length) throw new Error("外部终端参数模板不能为空。");
   const launchPlan = createExternalTerminalLaunchPlan(settings, executable, args, cwd);
   return new Promise((resolve, reject) => {
@@ -370,11 +395,11 @@ function openConfiguredExternalTerminal(input: unknown): Promise<{ state: "open"
       if (settled) return;
       settled = true;
       if (error) {
-        appLogger.log("error", "external_terminal.open_failed", { executable: requestedExecutable, cwd, error: logErrorDetails(error) });
+        appLogger.log("error", "external_terminal.open_failed", { provider, executable: requestedExecutable, cwd, error: logErrorDetails(error) });
         reject(error);
         return;
       }
-      appLogger.log("info", "external_terminal.started", { executable: requestedExecutable, cwd, launchMode: launchPlan.mode });
+      appLogger.log("info", "external_terminal.started", { provider, executable: requestedExecutable, cwd, launchMode: launchPlan.mode });
       resolve({ state: "open", source: "agentdesk" });
     };
     if (visibleConsole) {
@@ -406,6 +431,12 @@ function registerAuthorizedLocalPath(filePath: string) {
     if (!oldest) break;
     authorizedLocalPaths.delete(oldest);
   }
+}
+
+function authorizePastedFile(filePath: unknown) {
+  const resolved = resolvePastedFilePath(filePath);
+  registerAuthorizedLocalPath(resolved);
+  return resolved;
 }
 
 function registerAuthorizedClaudeImagePath(filePath: string) {
@@ -802,6 +833,7 @@ const codexImagePersistence = new CodexImagePersistence({
 const codexAppServer = new CodexAppServer({
   diagnosticLabel: "primary",
   command: codexCommand,
+  prepare: syncCodexSkillLinks,
   cwd: () => workspacePath,
   appVersion: () => app.getVersion(),
   isRequestBlocked: () => codexCliUpdateManager?.active || false,
@@ -844,7 +876,7 @@ const legacyCodexAppServer = new CodexAppServer({
 });
 
 let claudeBackend: ClaudeBackend;
-const backendManager = createBackendRegistry([new CodexBackend(codexAppServer, codexTitleGenerator, legacyCodexAppServer, codexHistoryIndex), (claudeBackend = new ClaudeBackend())], appLogger, (cwd) => isAuthorizedWorkspacePath(cwd), nativeSessionOwnership);
+const backendManager = createBackendRegistry([new CodexBackend(codexAppServer, codexTitleGenerator, legacyCodexAppServer, codexHistoryIndex, syncCodexSkillLinks), (claudeBackend = new ClaudeBackend())], appLogger, (cwd) => isAuthorizedWorkspacePath(cwd), nativeSessionOwnership);
 claudeUpdateManager = new ClaudeUpdateManager({
   appPath: () => app.getAppPath(),
   userDataPath: () => app.getPath("userData"),
@@ -941,6 +973,7 @@ if (hasLock) {
           if (typeof dataUrl !== "string") throw new Error("待复制图片无效。");
           copyImageToClipboard(dataUrl);
         },
+        authorizePastedFile,
         saveTextFile: (input) => {
           if (!input || typeof input !== "object" || Array.isArray(input) || typeof (input as { content?: unknown }).content !== "string") throw new Error("导出内容无效。");
           const value = input as { content: string; suggestedName?: unknown };

@@ -137,6 +137,7 @@ export interface ExternalTerminalSettings {
 export interface ExternalTerminalOpenRequest {
   cwd: string;
   sessionId: string;
+  provider?: AgentProvider;
   resume?: boolean;
   initialPrompt?: string;
 }
@@ -278,6 +279,7 @@ export interface CodexBridge {
   readClipboardText(): Promise<string>;
   writeClipboardText(text: string): Promise<void>;
   copyImage(dataUrl: string): Promise<void>;
+  getPastedFilePath(file: unknown): Promise<string | null>;
   saveTextFile(content: string, suggestedName?: string): Promise<SavedTextFile | null>;
   createHandoffPackage(input: { cwd: string; title: string; threadId: string; content: string }): Promise<HandoffPackage>;
   readLocalImage(filePath: string): Promise<string | null>;

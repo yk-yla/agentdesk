@@ -3,7 +3,7 @@ import { mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from "node
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { describe, it } from "node:test";
-import { isExecutableLocalPath, isWithinDirectory, resolveLocalPathOpenRequest } from "./localPathPolicy";
+import { isExecutableLocalPath, isWithinDirectory, resolveLocalPathOpenRequest, resolvePastedFilePath } from "./localPathPolicy";
 
 describe("local path policy", () => {
   it("accepts files inside a root and rejects traversal", () => {
@@ -40,6 +40,25 @@ describe("local path policy", () => {
   it("recognizes executable local file types case-insensitively", () => {
     assert.equal(isExecutableLocalPath("C:\\work\\run.PS1"), true);
     assert.equal(isExecutableLocalPath("C:\\work\\notes.md"), false);
+  });
+
+  it("resolves explicitly pasted files and rejects links or non-files", () => {
+    const parent = mkdtempSync(path.join(tmpdir(), "agentdesk-pasted-file-"));
+    try {
+      const document = path.join(parent, "需求说明.docx");
+      const directory = path.join(parent, "folder");
+      const linked = path.join(parent, "linked.docx");
+      writeFileSync(document, "fixture");
+      mkdirSync(directory);
+      symlinkSync(document, linked, "file");
+
+      assert.equal(resolvePastedFilePath(document), document);
+      assert.throws(() => resolvePastedFilePath(directory), /普通文件/);
+      assert.throws(() => resolvePastedFilePath(linked), /普通文件/);
+      assert.throws(() => resolvePastedFilePath("relative.docx"), /路径无效/);
+    } finally {
+      rmSync(parent, { recursive: true, force: true });
+    }
   });
 
   it("resolves workspace links and accepts one explicitly clicked outside file", () => {

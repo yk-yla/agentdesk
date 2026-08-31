@@ -25,7 +25,7 @@ interface Props {
   onDraftChange: (sessionId: string, value: string) => void;
   onSend: (sessionId: string, text: string, mode?: "submit" | "queue") => void;
   onCycleEffort: (sessionId: string, direction: 1 | -1) => void;
-  onAddImages: (sessionId: string, files: File[]) => void;
+  onAddFiles: (sessionId: string, files: File[]) => Promise<string[]>;
   onRemoveImage: (sessionId: string, index: number) => void;
   onRemoveQueuedMessage: (sessionId: string, queuedId: string) => void;
   onChooseDirectory: (sessionId: string) => void;
@@ -37,7 +37,7 @@ interface Props {
  */
 function ComposerBase({
   sessionId, provider, cwd, threadId, skills, recentCommandUsage, capabilities, attachments, queuedMessages, pendingSteers, working, placeholder, toolbar,
-  copyImage, getDraft, onDraftChange, onSend, onCycleEffort, onAddImages, onRemoveImage,
+  copyImage, getDraft, onDraftChange, onSend, onCycleEffort, onAddFiles, onRemoveImage,
   onRemoveQueuedMessage, onChooseDirectory,
 }: Props) {
   const [value, setValue] = useState(() => getDraft(sessionId));
@@ -63,6 +63,15 @@ function ComposerBase({
   const acceptSuggestion = (suggestion: CommandSuggestion) => {
     const prefix = value.match(/^(\s*)/)?.[1] || "";
     update(`${prefix}/${suggestion.name} `);
+  };
+
+  const handleFiles = async (files: File[]) => {
+    if (!files.length) return;
+    const paths = await onAddFiles(sessionId, files);
+    if (!paths.length) return;
+    const current = getDraft(sessionId);
+    const separator = current && !/\s$/.test(current) ? " " : "";
+    update(`${current}${separator}${paths.join("\n")}`);
   };
 
   const handleKeyDown = (event: KeyboardEvent<HTMLTextAreaElement>) => {
@@ -120,7 +129,7 @@ function ComposerBase({
     event.preventDefault();
     event.stopPropagation();
     setDragging(false);
-    onAddImages(sessionId, files);
+    void handleFiles(files);
   };
 
   return (
@@ -168,7 +177,7 @@ function ComposerBase({
             const files = clipboardFiles.length ? clipboardFiles : Array.from(event.clipboardData.items).map((item) => item.getAsFile()).filter((file): file is File => Boolean(file));
             if (!files.length) return;
             event.preventDefault();
-            onAddImages(sessionId, files);
+            void handleFiles(files);
           }}
           onKeyDown={handleKeyDown}
           onClick={() => {
@@ -180,7 +189,7 @@ function ComposerBase({
           rows={1}
         />
       </form>
-      {dragging ? <div className="image-drop-overlay"><ImagePlus size={18} /><span>松开添加图片</span></div> : null}
+      {dragging ? <div className="image-drop-overlay"><ImagePlus size={18} /><span>松开添加文件</span></div> : null}
       {previewSource ? <ImageLightbox source={previewSource} label="待发送图片预览" copyImage={copyImage} onClose={() => setPreviewSource(null)} /> : null}
     </div>
   );

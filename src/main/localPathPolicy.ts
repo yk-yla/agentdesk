@@ -1,4 +1,4 @@
-import { existsSync, realpathSync, statSync } from "node:fs";
+import { existsSync, lstatSync, realpathSync, statSync } from "node:fs";
 import path from "node:path";
 
 const EXECUTABLE_FILE_EXTENSIONS = new Set([
@@ -24,6 +24,29 @@ export function isWithinDirectory(filePath: string, directory: string) {
 
 export function isExecutableLocalPath(filePath: string) {
   return EXECUTABLE_FILE_EXTENSIONS.has(path.extname(filePath).toLowerCase());
+}
+
+/** Resolve a file supplied by an explicit paste/drop gesture before exposing it to a Provider. */
+export function resolvePastedFilePath(value: unknown) {
+  if (typeof value !== "string" || !value.trim() || value.includes("\0") || /[\r\n]/.test(value)) throw new Error("粘贴文件路径无效。");
+  const requestedPath = value.trim();
+  if (requestedPath.length > 32_768 || !path.isAbsolute(requestedPath)) throw new Error("粘贴文件路径无效。");
+  let stats;
+  try {
+    stats = lstatSync(requestedPath);
+  } catch {
+    throw new Error("粘贴文件不存在。");
+  }
+  if (stats.isSymbolicLink() || !stats.isFile()) throw new Error("粘贴内容必须是普通文件。");
+  const resolvedPath = canonicalPath(requestedPath);
+  try {
+    const resolvedStats = lstatSync(resolvedPath);
+    if (resolvedStats.isSymbolicLink() || !resolvedStats.isFile()) throw new Error("粘贴内容必须是普通文件。");
+  } catch (error) {
+    if (error instanceof Error && error.message === "粘贴内容必须是普通文件。") throw error;
+    throw new Error("粘贴文件不存在。");
+  }
+  return resolvedPath;
 }
 
 interface LocalPathAccessPolicy {

@@ -130,14 +130,13 @@ export class CodexCliUpdateManager {
           checkedAt,
           message: compareVersions(latestVersion, currentVersion) > 0 ? `发现新版本 ${latestVersion}，可立即更新。` : "当前已经是最新版本。",
         });
-      } catch {
+      } catch (error) {
         if (retrying) {
           this.scheduleCheck(CLI_CHECK_INTERVAL_MS);
-          return this.setStatus({ phase: "error", currentVersion, message: "重试失败，请检查网络后手动重试。" });
+          return this.setStatus({ phase: "error", currentVersion, message: this.checkErrorMessage(error, true) });
         }
         this.scheduleCheck(CLI_RETRY_MS, true);
-        const sourceName = this.snapshot?.updateStrategy === "self" ? "GitHub（需要外网环境）" : "npm 仓库";
-        return this.setStatus({ phase: "error", currentVersion, message: `无法连接 ${sourceName}，请检查网络后手动重试。` });
+        return this.setStatus({ phase: "error", currentVersion, message: this.checkErrorMessage(error, false) });
       }
     }).finally(() => {
       this.checkPromise = null;
@@ -434,5 +433,26 @@ export class CodexCliUpdateManager {
     if (/ENOTFOUND|ECONNREFUSED|ECONNRESET|network|net::/i.test(message)) return "无法连接 npm 仓库，请检查网络连接后重试。";
     if (/正在被会话使用|无法确认 Codex|启动时记录|app-server|进程列表|无法读取本机进程/i.test(message)) return message;
     return "更新失败，请稍后重试。";
+  }
+
+  private checkErrorMessage(error: unknown, retrying: boolean) {
+    const message = error instanceof Error ? error.message : String(error || "");
+    const sourceName = this.snapshot?.updateStrategy === "self" ? "GitHub" : "npm";
+    const retryPrefix = retrying ? "重试仍失败：" : "";
+    if (/\b403\b|rate limit|forbidden/i.test(message)) {
+      return sourceName === "GitHub"
+        ? `${retryPrefix}GitHub 暂时拒绝更新查询（HTTP 403，可能触发匿名访问限流），请稍后重试或更换网络。`
+        : `${retryPrefix}npm 源暂时拒绝更新查询（HTTP 403），请检查镜像配置或稍后重试。`;
+    }
+    if (/\b401\b|unauthorized/i.test(message)) {
+      return `${retryPrefix}${sourceName} 更新查询需要授权（HTTP 401），请检查网络代理后重试。`;
+    }
+    if (/timed out|ETIMEDOUT|timeout|超时/i.test(message)) {
+      return `${retryPrefix}${sourceName} 更新查询超时，请检查网络或代理后重试。`;
+    }
+    if (/ENOTFOUND|ECONNREFUSED|ECONNRESET|network|net::|socket|fetch failed/i.test(message)) {
+      return `${retryPrefix}无法连接 ${sourceName} 更新服务，请检查网络或代理后重试。`;
+    }
+    return `${retryPrefix}无法获取 Codex CLI 最新版本，请稍后重试。`;
   }
 }

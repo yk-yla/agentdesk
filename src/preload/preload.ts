@@ -1,4 +1,4 @@
-import { contextBridge, ipcRenderer } from "electron";
+import { contextBridge, ipcRenderer, webUtils } from "electron";
 import type { AgentEventEnvelope, AgentInteractionResponse, AgentOperation, AgentProvider, AgentRequestContext } from "../shared/agentProtocol";
 import type { AgentBridge, ClaudeRuntimeStatus, CodexBridge, CodexCliUpdateStatus, DesktopPreferences, DesktopUpdateStatus, DesktopWindowState, ExternalTerminalOpenRequest, JsonObject, ClientLogEntry } from "../shared/protocol";
 
@@ -41,6 +41,15 @@ const bridge: Omit<CodexBridge, "request" | "respond" | "onMessage"> = {
   },
   copyImage(dataUrl: string) {
     return ipcRenderer.invoke("agentdesk:copy-image", dataUrl);
+  },
+  getPastedFilePath(file: unknown) {
+    let filePath = "";
+    try {
+      filePath = webUtils.getPathForFile(file as Parameters<typeof webUtils.getPathForFile>[0]);
+    } catch {
+      return Promise.resolve(null);
+    }
+    return filePath ? ipcRenderer.invoke("agentdesk:authorize-pasted-file", filePath) : Promise.resolve(null);
   },
   saveTextFile(content: string, suggestedName?: string) {
     return ipcRenderer.invoke("agentdesk:save-text-file", { content, suggestedName });
@@ -157,6 +166,7 @@ const agentBridge: AgentBridge = {
   readClipboardText: bridge.readClipboardText,
   writeClipboardText: bridge.writeClipboardText,
   copyImage: bridge.copyImage,
+  getPastedFilePath: bridge.getPastedFilePath,
   saveTextFile: bridge.saveTextFile,
   createHandoffPackage: bridge.createHandoffPackage,
   readLocalImage: bridge.readLocalImage,

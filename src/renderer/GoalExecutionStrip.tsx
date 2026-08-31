@@ -1,6 +1,7 @@
 import { memo, useEffect, useMemo, useState } from "react";
 import { Square, Target, X } from "lucide-react";
 import { formatCount, type GoalStatus, type SessionGoal } from "./domain";
+import { isGoalNoticeDismissible } from "./sessionNoticeDismissal";
 
 const STATUS_LABEL: Record<GoalStatus, string> = {
   active: "目标执行中",
@@ -79,7 +80,7 @@ function GoalExecutionStripBase({ goal, working, readOnly, stage, onOpenDetails,
         </button>
         <span className="goal-execution-time">已运行 <GoalElapsed goal={goal} /></span>
         {active && !readOnly ? <button type="button" className="goal-execution-stop" onClick={onStop} title="停止目标"><Square size={11} fill="currentColor" /><span>停止</span></button> : null}
-        {goal.status === "complete" ? <button type="button" className="goal-execution-dismiss" onClick={onDismiss} title="关闭已完成目标提示" aria-label="关闭已完成目标提示"><X size={14} /></button> : null}
+        {isGoalNoticeDismissible(goal) ? <button type="button" className="goal-execution-dismiss" onClick={onDismiss} title="关闭目标提示" aria-label="关闭目标提示"><X size={14} /></button> : null}
       </div>
       <div className="goal-execution-meta">
         <span className="goal-execution-stage" title={stageLabel}>当前阶段：{stageLabel}</span>

@@ -226,6 +226,7 @@ export function createMockBridge(): CodexBridge {
     readClipboardText: () => Promise.resolve(""),
     writeClipboardText: () => Promise.resolve(),
     copyImage: () => Promise.resolve(),
+    getPastedFilePath: () => Promise.resolve(null),
     saveTextFile: () => Promise.resolve({ path: "mock://codex-session.md" }),
     createHandoffPackage: () => Promise.resolve({ path: "mock://handoff.md", prompt: "请读取交接材料并继续完成任务。" }),
     readLocalImage: () => Promise.resolve(null),

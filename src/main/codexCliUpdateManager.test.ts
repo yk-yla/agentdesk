@@ -13,6 +13,32 @@ describe("CodexCliUpdateManager", () => {
     assert.equal(compareVersions("v1.2.3", "1.2.3"), 0);
   });
 
+  it("explains GitHub rate limiting when the release query returns 403", async () => {
+    const directory = mkdtempSync(path.join(tmpdir(), "agentdesk-codex-rate-limit-"));
+    try {
+      const manager = new CodexCliUpdateManager({
+        processSupervisor: new ProcessSupervisor(async () => undefined),
+        appServer: { isRunning: false, close: async () => undefined, ensureStarted: async () => undefined },
+        userDataPath: () => directory,
+        isQuitting: () => false,
+        emitStatus: () => undefined,
+        notify: () => undefined,
+        environment: {},
+        runtimeSnapshot: () => ({ provider: "codex", source: "native", executablePath: "C:\\codex.exe", currentVersion: "1.0.0", detectedAt: 1, updateStrategy: "self" }),
+        fetch: async () => new Response(null, { status: 403 }),
+      });
+
+      await manager.initialize();
+      const status = await manager.check(true);
+      assert.equal(status.phase, "error");
+      assert.match(status.message, /HTTP 403/);
+      assert.match(status.message, /匿名访问限流/);
+      manager.dispose();
+    } finally {
+      rmSync(directory, { recursive: true, force: true });
+    }
+  });
+
   it("serializes check and update while restoring the local app-server", async () => {
     const directory = mkdtempSync(path.join(tmpdir(), "agentdesk-codex-update-"));
     const statuses: CodexCliUpdateStatus[] = [];

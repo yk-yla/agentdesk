@@ -38,6 +38,23 @@ describe("external terminal launcher", () => {
     assert.match(args.at(-1) || "", /^& 'C:\\Program Files\\Claude\\claude\.exe' --session-id/);
   });
 
+  it("resumes a Codex session with the Codex executable recorded at startup", () => {
+    const args = expandExternalTerminalArgs({
+      kind: "windows-terminal",
+      executable: "wt.exe",
+      argsTemplate: '-d "{cwd}" powershell.exe -NoExit -Command "claude --session-id {sessionId} {prompt}"',
+    }, "C:\\Apps\\wt.exe", {
+      provider: "codex",
+      cwd: "C:\\work",
+      sessionId: "12345678-1234-4234-8234-123456789abc",
+      resume: true,
+      initialPrompt: "",
+      cliExecutable: "C:\\Program Files\\OpenAI\\Codex\\codex.exe",
+    });
+
+    assert.match(args.at(-1) || "", /^& 'C:\\Program Files\\OpenAI\\Codex\\codex\.exe' resume 12345678-1234-4234-8234-123456789abc\s*$/);
+  });
+
   it("keeps command prompt handoff text as one Claude argument", () => {
     const args = expandExternalTerminalArgs({
       kind: "command-prompt",
@@ -57,6 +74,25 @@ describe("external terminal launcher", () => {
     const promptMatch = command.match(/FromBase64String\('([^']+)'\)/);
     assert.ok(promptMatch);
     assert.equal(Buffer.from(promptMatch[1], "base64").toString("utf8"), "请继续任务。");
+  });
+
+  it("uses Codex resume syntax in command prompt", () => {
+    const args = expandExternalTerminalArgs({
+      kind: "command-prompt",
+      executable: "cmd.exe",
+      argsTemplate: '/k "claude --session-id {sessionId}"',
+    }, "C:\\Windows\\System32\\cmd.exe", {
+      provider: "codex",
+      cwd: "C:\\work",
+      sessionId: "12345678-1234-4234-8234-123456789abc",
+      resume: true,
+      initialPrompt: "",
+      cliExecutable: "C:\\Program Files\\OpenAI\\Codex\\codex.exe",
+    });
+
+    const encodedCommand = args[1].split(" ").at(-1)!;
+    const command = Buffer.from(encodedCommand, "base64").toString("utf16le");
+    assert.match(command, /& 'C:\\Program Files\\OpenAI\\Codex\\codex\.exe' resume '12345678-1234-4234-8234-123456789abc'/);
   });
 
   it("upgrades legacy templates that do not yet have a prompt placeholder", () => {

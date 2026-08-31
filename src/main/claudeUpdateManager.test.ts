@@ -13,6 +13,32 @@ describe("ClaudeUpdateManager", () => {
     assert.equal(isTrustedClaudeDownloadUrl("https://github.com.attacker.example/file"), false);
   });
 
+  it("explains GitHub rate limiting when the release query returns 403", async () => {
+    const directory = mkdtempSync(path.join(tmpdir(), "agentdesk-claude-rate-limit-"));
+    const executable = path.join(directory, "claude.exe");
+    writeFileSync(executable, "fixture", "utf8");
+    try {
+      const manager = new ClaudeUpdateManager({
+        appPath: () => directory,
+        userDataPath: () => directory,
+        fetch: async () => new Response(null, { status: 403 }),
+        shutdownQueries: async () => undefined,
+        emitStatus: () => undefined,
+        managedExecutablePath: () => executable,
+        readSdkVersion: () => "1.0.0",
+        readBinaryVersion: () => "1.0.0",
+        credentialStatus: () => ({ credentialsAvailable: true, credentialSource: "settings", credentialMessage: "ok" }),
+      });
+
+      const status = await manager.check();
+      assert.equal(status.phase, "error");
+      assert.match(status.message, /HTTP 403/);
+      assert.match(status.message, /匿名访问限流/);
+    } finally {
+      rmSync(directory, { recursive: true, force: true });
+    }
+  });
+
   it("checks a managed binary without changing it", async () => {
     const directory = mkdtempSync(path.join(tmpdir(), "agentdesk-claude-update-"));
     const executable = path.join(directory, "claude.exe");

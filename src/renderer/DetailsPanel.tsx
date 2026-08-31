@@ -8,7 +8,7 @@ import GoalPanel from "./GoalPanel";
 import PlanPanel from "./PlanPanel";
 import SubagentPanel from "./SubagentPanel";
 import { formatEventTimestamp } from "./messageTimestamp";
-import { activityNoticeKey, isActivityNoticeDismissed } from "./sessionNoticeDismissal";
+import { activityNoticeKey, isActivityNoticeDismissed, isActivityNoticeDismissible } from "./sessionNoticeDismissal";
 
 const ACTIVITY_INITIAL_COUNT = 20;
 const ACTIVITY_LOAD_COUNT = 10;
@@ -92,7 +92,7 @@ function DetailsPanelBase({ sessionId, title, activities, goal, plan, subagents,
                   <p className="activity-detail">{activity.detail || "正在处理当前任务"}</p>
                   <ActivityOutput output={activity.output || ""} variant="detail" />
                 </div>
-                {activity.status === "failed" || activity.status === "declined" || activity.status === "interrupted" ? <button type="button" className="bare-button activity-dismiss" onClick={() => onDismissNotice(activityNoticeKey(activity))} title="关闭错误提示" aria-label="关闭错误提示"><X size={13} /></button> : null}
+                {isActivityNoticeDismissible(activity) ? <button type="button" className="bare-button activity-dismiss" onClick={() => onDismissNotice(activityNoticeKey(activity))} title="关闭活动提示" aria-label="关闭活动提示"><X size={13} /></button> : null}
               </div>)}
               {hiddenCount > 0 ? <button className="history-more" onClick={() => setVisibleCount((count) => Math.min(count + ACTIVITY_LOAD_COUNT, visibleActivities.length))}>继续下滑加载更早进度 · 剩余 {hiddenCount}</button> : null}
             </>

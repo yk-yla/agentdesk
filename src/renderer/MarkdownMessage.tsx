@@ -6,6 +6,8 @@ import type { ImageAttachment } from "./domain";
 import ImageLightbox from "./ImageLightbox";
 import { classifyLocalLink } from "./localFileLink";
 import type { LocalPathOpenRequest } from "../shared/protocol";
+import { LIGHTWEIGHT_NOTICE_DURATION_MS } from "./sessionErrorNotice";
+import { useAutoDismissNotice } from "./useAutoDismissNotice";
 
 interface Props {
   text: string;
@@ -140,6 +142,7 @@ function CodeBlock({ children }: { children: ReactNode }) {
 function MarkdownMessageBase({ text, images = NO_IMAGES, streaming = false, readLocalImage, copyImage, openLocalPath, openExternal, cwd, searchTerm = "", activeSearchOccurrence = null }: Props) {
   const [previewSource, setPreviewSource] = useState<string | null>(null);
   const [linkError, setLinkError] = useState<string | null>(null);
+  const linkErrorAutoDismissProps = useAutoDismissNotice(linkError, linkError ? LIGHTWEIGHT_NOTICE_DURATION_MS : null, () => setLinkError(null));
   const normalizedSearchTerm = searchTerm.trim().toLocaleLowerCase();
   const markdownRootRef = useRef<HTMLDivElement>(null);
 
@@ -201,7 +204,7 @@ function MarkdownMessageBase({ text, images = NO_IMAGES, streaming = false, read
       {text ? (streaming
         ? <div className="streaming-plain-text">{highlightChildren(text, normalizedSearchTerm)}</div>
         : <ReactMarkdown remarkPlugins={REMARK_PLUGINS} components={components} urlTransform={(value) => value}>{text}</ReactMarkdown>) : null}
-      {linkError ? <div className="markdown-link-error" role="alert"><span>{linkError}</span><button type="button" className="bare-button" onClick={() => setLinkError(null)} title="关闭错误提示" aria-label="关闭错误提示"><X size={13} /></button></div> : null}
+      {linkError ? <div className="markdown-link-error" role="alert" {...linkErrorAutoDismissProps}><span>{linkError}</span><button type="button" className="bare-button" onClick={() => setLinkError(null)} title="关闭错误提示" aria-label="关闭错误提示"><X size={13} /></button></div> : null}
       {previewSource ? <ImageLightbox source={previewSource} label="图片预览" copyImage={copyImage} onClose={() => setPreviewSource(null)} /> : null}
     </div>
   );

@@ -35,16 +35,30 @@ export function isActivityNoticeDismissed(
   return dismissedNoticeKeys.has(activityNoticeKey(activity)) || dismissedNoticeKeys.has(legacyActivityNoticeKey(activity));
 }
 
+export function isActivityNoticeDismissible(activity: Pick<Activity, "status">) {
+  return activity.status !== "inProgress";
+}
+
 export function errorNoticeKey(errorText: string) {
   return noticeFingerprint("error", [errorText]);
 }
 
-export function completedGoalNoticeKey(goal: Pick<SessionGoal, "threadId" | "updatedAt" | "objective" | "status">) {
+export function goalNoticeKey(goal: Pick<SessionGoal, "threadId" | "updatedAt" | "objective" | "status">) {
   return noticeFingerprint("goal", [goal.threadId, goal.updatedAt, goal.objective, goal.status]);
 }
 
+export function isGoalNoticeDismissible(goal: Pick<SessionGoal, "status">) {
+  return goal.status !== "active";
+}
+
+export const completedGoalNoticeKey = goalNoticeKey;
+
 export function subagentNoticeKey(agent: Pick<SubagentState, "threadId" | "status" | "message">) {
   return noticeFingerprint("subagent", [agent.threadId, agent.status, agent.message || ""]);
+}
+
+export function isSubagentNoticeDismissible(agent: Pick<SubagentState, "status">) {
+  return agent.status !== "pendingInit" && agent.status !== "running";
 }
 
 export function addDismissedSessionNotice(

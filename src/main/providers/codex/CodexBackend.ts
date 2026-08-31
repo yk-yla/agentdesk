@@ -41,9 +41,9 @@ const THREAD_BOUND_OPERATIONS = new Set<AgentOperation>([
   "readSession", "resumeSession", "forkSession", "renameSession", "deleteSession", "updateSessionMetadata", "updateSessionSettings",
   "startTurn", "startReview", "generateSessionTitle", "steerTurn", "interruptTurn", "compactSession", "getGoal", "setGoal", "clearGoal", "closeSession",
 ]);
-// Skills are read-only shared Codex resources. Keep them on the default
-// CODEX_HOME so AgentDesk sees the user's global and plugin-provided skills
-// while the primary app-server remains isolated for writable state.
+// The UI skill listing also reads the default Codex home. User skill folders
+// are projected into the isolated home before requests and app-server starts,
+// so the active session sees the same resources without sharing writable state.
 const DEFAULT_HOME_RESOURCE_OPERATIONS = new Set<AgentOperation>(["listSkills"]);
 
 interface MergedHistoryCursor {
@@ -115,9 +115,11 @@ export class CodexBackend implements AgentBackend {
     private readonly titleGenerator?: CodexTitleGenerator,
     private readonly legacyHistoryRuntime?: CodexBackendRuntime,
     private readonly historyIndex?: CodexHistoryIndex,
+    private readonly prepare?: () => void | Promise<void>,
   ) {}
 
   async request(operation: AgentOperation, params: JsonObject, context: AgentRequestContext) {
+    await this.prepare?.();
     if (operation === "getCapabilities") return this.getCapabilities();
     if (operation === "closeSession") return this.closeSession(context);
     if (operation === "generateSessionTitle") return this.generateSessionTitle(params, context);

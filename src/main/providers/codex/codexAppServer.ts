@@ -41,6 +41,7 @@ const REQUEST_TIMEOUTS_MS: Record<string, number> = {
 export interface CodexAppServerOptions {
   diagnosticLabel?: string;
   command(): string;
+  prepare?(): void | Promise<void>;
   cwd(): string;
   appVersion(): string;
   isRequestBlocked(): boolean;
@@ -117,6 +118,7 @@ export class CodexAppServer implements CodexBackendRuntime {
     startPromise = Promise.resolve().then(async () => {
       if (this.stopPromise) await this.stopPromise;
       if (this.options.isRequestBlocked() && !options.allowBlocked) throw new Error("Codex CLI 正在更新，请稍后重试。");
+      await this.options.prepare?.();
       const command = this.options.command().trim();
       if (!command) throw new Error("未在 PATH 或 CODEX_DESKTOP_CLI 中找到 Codex CLI。");
       const spec = spawnSpec(command);

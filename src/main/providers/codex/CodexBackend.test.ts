@@ -15,6 +15,21 @@ function runtime(overrides: Partial<CodexBackendRuntime> = {}): CodexBackendRunt
 }
 
 describe("CodexBackend", () => {
+  it("prepares the isolated home before each Codex request", async () => {
+    const calls: string[] = [];
+    const backend = new CodexBackend(
+      runtime({ request: async (method) => { calls.push(`request:${method}`); return { data: [] }; } }),
+      undefined,
+      undefined,
+      undefined,
+      () => { calls.push("prepare"); },
+    );
+
+    await backend.request("listSkills", { cwds: ["E:\\workspace"] }, { canonicalCwd: "E:\\workspace" });
+
+    assert.deepEqual(calls, ["prepare", "request:skills/list"]);
+  });
+
   it("forces no-approval full-access settings for every Codex thread and turn", async () => {
     let called = "";
     let providerParams = {};

@@ -252,7 +252,7 @@ export class ClaudeUpdateManager {
       });
     } catch (error) {
       this.scheduleCheck(CLAUDE_RETRY_MS);
-      return this.setStatus({ phase: "error", message: this.friendlyErrorMessage(error) });
+      return this.setStatus({ phase: "error", message: this.checkErrorMessage(error) });
     } finally {
       this.busy = false;
     }
@@ -488,6 +488,15 @@ export class ClaudeUpdateManager {
     return this.readBinaryVersion(executable);
   }
 
+  private checkErrorMessage(error: unknown): string {
+    const message = error instanceof Error ? error.message : String(error || "");
+    if (/\b403\b|rate limit|forbidden/i.test(message)) return "GitHub 暂时拒绝更新查询（HTTP 403，可能触发匿名访问限流），请稍后重试或更换网络。";
+    if (/\b401\b|unauthorized/i.test(message)) return "GitHub 更新查询需要授权（HTTP 401），请检查网络代理后重试。";
+    if (/timed out|ETIMEDOUT|timeout|超时/i.test(message)) return "GitHub 更新查询超时，请检查网络或代理后重试。";
+    if (/net::|ENOTFOUND|ECONNREFUSED|ECONNRESET|network|socket|fetch failed/i.test(message)) return "无法连接 GitHub 更新服务，请检查网络或代理后重试。";
+    return "无法获取 Claude Code 最新版本，请稍后重试。";
+  }
+
   private friendlyErrorMessage(error: unknown): string {
     const message = error instanceof Error ? error.message : String(error || "");
     if (/net::|ENOTFOUND|ECONNREFUSED|ECONNRESET|ETIMEDOUT|network|socket|fetch failed/i.test(message)) {
@@ -497,7 +506,13 @@ export class ClaudeUpdateManager {
       if (installSource === "winget") return "无法连接 winget 源，请检查网络连接。";
       return "网络连接失败，请检查网络后重试。";
     }
-    if (/401|403|unauthorized|forbidden|rate limit/i.test(message)) return "更新服务器暂时拒绝请求（可能是访问频率限制），请稍后重试。";
+    if (/\b403\b|rate limit|forbidden/i.test(message)) {
+      const installSource = this.detectInstallSource();
+      if (installSource === "npm") return "npm 源暂时拒绝请求（HTTP 403），请检查镜像配置或稍后重试。";
+      if (installSource === "winget") return "winget 源暂时拒绝请求（HTTP 403），请稍后重试。";
+      return "GitHub 暂时拒绝请求（HTTP 403，可能触发匿名访问限流），请稍后重试或更换网络。";
+    }
+    if (/\b401\b|unauthorized/i.test(message)) return "更新服务需要授权（HTTP 401），请检查网络代理后重试。";
     if (/404|not found/i.test(message)) return "未找到可用的更新版本。";
     if (/timed out|timeout|超时/i.test(message)) return "更新操作超时，请检查网络后重试。";
     return message || "Claude Code 更新失败，请稍后重试。";

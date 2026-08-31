@@ -31,6 +31,7 @@ import { recoverProviderSessions } from "./providerRecovery";
 import { SessionLifecycleController } from "./sessionLifecycleController";
 import { SessionMessageController } from "./sessionMessageController";
 import { SessionTitleController } from "./sessionTitleController";
+import { LIGHTWEIGHT_NOTICE_DURATION_MS, normalizeSessionErrorNotice, sessionErrorNoticeIdentity, sessionErrorNoticePatch, type SessionErrorNoticeOptions } from "./sessionErrorNotice";
 import { nativeSessionKey, ProviderEventController } from "./providerEventController";
 import { applyLocalSessionMetadata, favoriteHistoryEntries, favoriteSessionSummary, HistoryController, isFavoriteSession, mergeHistory, sortHistory, sortHistoryByRecency } from "./historyController";
 import { registerHistoricalWorkspace, restoreHistoricalSession } from "./historicalSessionRestore";
@@ -51,6 +52,7 @@ declare const __CODEX_BROWSER_PREVIEW__: boolean;
 
 const SUPPORTED_IMAGE_TYPES = new Set(["image/png", "image/jpeg", "image/gif", "image/webp"]);
 const MAX_IMAGE_BYTES = 10 * 1024 * 1024;
+const MAX_PASTED_DOCUMENTS = 32;
 const MAX_MODEL_CONTEXT_WINDOW_CACHE_ENTRIES = 256;
 /** 稳定的空数组，避免每次渲染给分栏传入新引用而击穿 memo。 */
 const NO_ATTACHMENTS: ImageAttachment[] = [];
@@ -322,7 +324,8 @@ export default function App() {
   const updateSession = useCallback((id: string, updater: (current: SessionState) => SessionState) => {
     setSessions((current) => {
       if (!current[id]) return current;
-      const next = { ...current, [id]: updater(current[id]) };
+      const nextSession = normalizeSessionErrorNotice(current[id], updater(current[id]));
+      const next = { ...current, [id]: nextSession };
       sessionsRef.current = next;
       return next;
     });
@@ -359,9 +362,10 @@ export default function App() {
     setPendingSteers(record);
   }, []);
 
-  const setError = useCallback((sessionId: string, error: unknown, fallback: string) => {
+  const setError = useCallback((sessionId: string, error: unknown, fallback: string, options?: SessionErrorNoticeOptions) => {
     void bridge.writeLog({ level: "error", event: "renderer.session_error", details: { sessionId, fallback, error: error instanceof Error ? { name: error.name, message: error.message, stack: error.stack } : { message: String(error) } } }).catch(() => undefined);
-    updateSession(sessionId, (current) => ({ ...current, errorText: userFacingErrorMessage(error, fallback) }));
+    const message = userFacingErrorMessage(error, fallback);
+    updateSession(sessionId, (current) => ({ ...current, ...sessionErrorNoticePatch(message, options) }));
   }, [bridge, updateSession]);
 
   const ensureProviderInitialized = useCallback((provider: AgentProvider) => {
@@ -401,7 +405,7 @@ export default function App() {
         const providerName = target === "codex" ? "Codex" : "Claude Code";
         const phaseName = phase === "models" ? "模型列表" : "能力";
         const message = error instanceof Error ? `${providerName} ${phaseName}加载失败：${error.message}` : `${providerName} ${phaseName}加载失败。`;
-        setSessions((current) => Object.fromEntries(Object.entries(current).map(([id, session]) => [id, session.provider === target ? { ...session, errorText: message } : session])));
+        setSessions((current) => Object.fromEntries(Object.entries(current).map(([id, session]) => [id, session.provider === target ? { ...session, ...sessionErrorNoticePatch(message) } : session])));
       },
       setProviderState,
     }, [provider]).finally(() => providerInitializationTasksRef.current.delete(provider));
@@ -963,7 +967,7 @@ export default function App() {
     if (provider === "claude") {
       updateSession(sessionId, (current) => ({ ...current, readOnly: true, statusLabel: "等待外部终端启动", errorText: "" }));
       setHistory((current) => upsertHistoryEntry(current, { id: nativeSessionId!, provider: "claude", cwd: directory, title: "新 Claude 会话" }));
-      void bridge.openExternalTerminal({ cwd: directory, sessionId: nativeSessionId! }).catch((error) => setError(sessionId, error, "打开外部终端失败"));
+      void bridge.openExternalTerminal({ cwd: directory, sessionId: nativeSessionId! }).catch((error) => setError(sessionId, error, "打开外部终端失败", { lifetime: "transient", durationMs: LIGHTWEIGHT_NOTICE_DURATION_MS }));
     }
     trackUiEvent("session.create", { provider, placement: placement ? "tab" : "pane" });
     void agentClient.request(provider, "getCapabilities", {}, { sessionId, canonicalCwd: directory })
@@ -1049,7 +1053,7 @@ export default function App() {
       if (typeof result === "string" && result.trim()) throw new Error(result.trim());
     }).catch((error) => {
       const targetSessionId = sessionId || layoutRef.current.panes.find((entry) => entry.id === layoutRef.current.activePaneId)?.activeTabId;
-      if (targetSessionId) setError(targetSessionId, error, "打开资源管理器失败");
+      if (targetSessionId) setError(targetSessionId, error, "打开资源管理器失败", { lifetime: "transient", durationMs: LIGHTWEIGHT_NOTICE_DURATION_MS });
     });
   }, [bridge, setError]);
 
@@ -1063,7 +1067,7 @@ export default function App() {
     const session = sessionsRef.current[sessionId];
     if (!session) return;
     if (session.provider === "claude") {
-      updateSession(sessionId, (current) => ({ ...current, errorText: "Claude Code 的模型和思考等级请在外部终端中调整。" }));
+      updateSession(sessionId, (current) => ({ ...current, ...sessionErrorNoticePatch("Claude Code 的模型和思考等级请在外部终端中调整。", { lifetime: "transient" }) }));
       return;
     }
     const fallback = settingsForSession(session);
@@ -1120,7 +1124,7 @@ export default function App() {
           effort: confirmed.effort,
           collaborationMode: confirmed.collaborationMode,
           tokenUsage: tokenUsageForModel(current, confirmed.model, preferencesRef.current),
-          errorText: error instanceof Error ? error.message : "设置更新失败",
+          ...sessionErrorNoticePatch(error instanceof Error ? error.message : "设置更新失败", { lifetime: "transient", durationMs: LIGHTWEIGHT_NOTICE_DURATION_MS }),
         }));
       }
     }
@@ -1182,7 +1186,7 @@ export default function App() {
           effort: confirmed.effort,
           collaborationMode: confirmed.collaborationMode,
           tokenUsage: tokenUsageForModel(current, confirmed.model, preferencesRef.current),
-          errorText: error instanceof Error ? error.message : "模式切换失败",
+          ...sessionErrorNoticePatch(error instanceof Error ? error.message : "模式切换失败", { lifetime: "transient", durationMs: LIGHTWEIGHT_NOTICE_DURATION_MS }),
         }));
       }
     }
@@ -1255,7 +1259,7 @@ export default function App() {
             ...current,
             status: "working",
             statusLabel: "会话创建超时，等待后台确认",
-            errorText: "不会重复创建会话；服务返回结果后将自动继续。",
+            ...sessionErrorNoticePatch("不会重复创建会话；服务返回结果后将自动继续。", { lifetime: "untilResolved" }),
           }));
       },
       onStartLateTimeout: () => requestForSession(sessionId, "closeSession", {}).then(() => undefined),
@@ -1442,6 +1446,7 @@ export default function App() {
   const stopGoal = useCallback(async (sessionId: string) => {
     const session = sessionsRef.current[sessionId];
     if (!session?.threadId || !session.goal) return;
+    if (!window.confirm("确认停止当前目标吗？")) return;
     try {
       const response = asRecord(await requestForSession(sessionId, "setGoal", {
         threadId: session.threadId,
@@ -1482,7 +1487,7 @@ export default function App() {
       if (session.threadId) setHistory((current) => sortHistory(current.map((entry) => entry.provider === session.provider && entry.id === session.threadId ? { ...entry, title: name, titleLower: name.toLowerCase() } : entry)));
     } catch (error) {
       sessionTitleRef.current?.reset(sessionId);
-      setError(sessionId, error, "重命名失败");
+      setError(sessionId, error, "重命名失败", { lifetime: "transient", durationMs: LIGHTWEIGHT_NOTICE_DURATION_MS });
     }
   }, [requestForSession, savePreference, setError, updateSession]);
 
@@ -1492,7 +1497,7 @@ export default function App() {
     const session = sessionsRef.current[sessionId];
     setTabContextMenu(null);
     if (!session?.threadId) {
-      if (session) setError(sessionId, new Error("发送第一条消息后才能置顶会话。"), "发送第一条消息后才能置顶会话。");
+      if (session) setError(sessionId, new Error("发送第一条消息后才能置顶会话。"), "发送第一条消息后才能置顶会话。", { lifetime: "transient" });
       return;
     }
     const key = nativeSessionKey(session.provider, session.threadId);
@@ -1505,7 +1510,7 @@ export default function App() {
       await savePreference({ pinnedSessions });
       setHistory((currentHistory) => sortHistory(currentHistory.map((entry) => entry.provider === session.provider && entry.id === session.threadId ? { ...entry, isPinned: !isPinned } : entry)));
     } catch (error) {
-      setError(sessionId, error, "置顶状态更新失败");
+      setError(sessionId, error, "置顶状态更新失败", { lifetime: "transient", durationMs: LIGHTWEIGHT_NOTICE_DURATION_MS });
     }
   }, [savePreference, setError]);
 
@@ -1524,7 +1529,7 @@ export default function App() {
     const session = sessionsRef.current[sessionId];
     setTabContextMenu(null);
     if (!session?.threadId) {
-      if (session) setError(sessionId, new Error("发送第一条消息后才能收藏会话。"), "发送第一条消息后才能收藏会话。");
+      if (session) setError(sessionId, new Error("发送第一条消息后才能收藏会话。"), "发送第一条消息后才能收藏会话。", { lifetime: "transient" });
       return;
     }
     const current = preferencesRef.current.favoriteSessions || [];
@@ -1542,7 +1547,7 @@ export default function App() {
       await savePreference({ favoriteSessions, favoriteSessionSummaries });
       setHistory((currentHistory) => sortHistory(currentHistory.map((entry) => entry.provider === session.provider && entry.id === session.threadId ? { ...entry, isFavorite: !isFavorite } : entry)));
     } catch (error) {
-      setError(sessionId, error, "收藏状态更新失败");
+      setError(sessionId, error, "收藏状态更新失败", { lifetime: "transient", durationMs: LIGHTWEIGHT_NOTICE_DURATION_MS });
     }
   }, [savePreference, setError]);
 
@@ -1550,15 +1555,15 @@ export default function App() {
     const session = sessionsRef.current[sessionId];
     setTabContextMenu(null);
     if (!session?.threadId) {
-      if (session) setError(sessionId, new Error("发送第一条消息后才能创建分支。"), "发送第一条消息后才能创建分支。");
+      if (session) setError(sessionId, new Error("发送第一条消息后才能创建分支。"), "发送第一条消息后才能创建分支。", { lifetime: "transient" });
       return;
     }
     if (session.pendingApprovals.length) {
-      setError(sessionId, new Error("请先处理当前审批，再创建分支。"), "请先处理当前审批，再创建分支。");
+      setError(sessionId, new Error("请先处理当前审批，再创建分支。"), "请先处理当前审批，再创建分支。", { lifetime: "transient" });
       return;
     }
     if (session.status === "working") {
-      setError(sessionId, new Error("请等待当前任务结束后再创建分支。"), "请等待当前任务结束后再创建分支。");
+      setError(sessionId, new Error("请等待当前任务结束后再创建分支。"), "请等待当前任务结束后再创建分支。", { lifetime: "transient" });
       return;
     }
     try {
@@ -1591,17 +1596,16 @@ export default function App() {
     const session = sessionsRef.current[sessionId];
     setTabContextMenu(null);
     if (!session?.threadId) {
-      if (session) setError(sessionId, new Error("当前会话还没有保存到本机历史。"), "当前会话还没有保存到本机历史。");
+      if (session) setError(sessionId, new Error("当前会话还没有保存到本机历史。"), "当前会话还没有保存到本机历史。", { lifetime: "transient" });
       return;
     }
     if (sessionHasActiveWork(session)) {
-      setError(sessionId, new Error("正在运行的会话不可删除，请先停止任务并处理待处理请求。"), "正在运行的会话不可删除");
+      setError(sessionId, new Error("正在运行的会话不可删除，请先停止任务并处理待处理请求。"), "正在运行的会话不可删除", { lifetime: "transient" });
       return;
     }
     const providerTitle = providerDisplayName(session.provider);
     const title = session.title || `${providerTitle} 会话`;
     if (!window.confirm(`确认永久删除这条会话？\n\n${title}\n\n这会从本机 ${providerTitle} 历史中删除会话内容，不可恢复。`)) return;
-    if (!window.confirm("最后确认：真的要永久删除这条本机会话吗？")) return;
     try {
       // The native history must not be deleted while a Query is still alive.
       await closeBackendSession(sessionId);
@@ -1841,7 +1845,7 @@ export default function App() {
           ...current,
           readOnly: true,
           resumed: false,
-          errorText: "该会话正被其他程序使用，当前为只读模式。",
+          ...sessionErrorNoticePatch("该会话正被其他程序使用，当前为只读模式。", { lifetime: "untilResolved" }),
         }));
         applyHistoricalRead(readValue);
       } else {
@@ -1868,7 +1872,7 @@ export default function App() {
       }));
     } catch (error) {
       if (session.provider === "codex" && isCodexActiveWriterConflict(error)) {
-        updateSession(sessionId, (current) => ({ ...current, readOnly: true, errorText: "该会话仍被其他程序使用，当前为只读模式。" }));
+        updateSession(sessionId, (current) => ({ ...current, readOnly: true, ...sessionErrorNoticePatch("该会话仍被其他程序使用，当前为只读模式。", { lifetime: "untilResolved" }) }));
       } else {
         setError(sessionId, error, "恢复会话失败");
       }
@@ -1917,7 +1921,7 @@ export default function App() {
     const session = sessionsRef.current[sessionId];
     if (!session || session.provider !== "claude") return;
     if (!session.threadId) {
-      updateSession(sessionId, (current) => ({ ...current, status: "error", statusLabel: "打开终端失败", errorText: "当前 Claude 会话没有可用的会话 ID，请先刷新会话列表。" }));
+      updateSession(sessionId, (current) => ({ ...current, status: "error", statusLabel: "打开终端失败", ...sessionErrorNoticePatch("当前 Claude 会话没有可用的会话 ID，请先刷新会话列表。", { lifetime: "transient" }) }));
       return;
     }
     const now = Date.now();
@@ -1935,7 +1939,7 @@ export default function App() {
         errorText: "",
       }));
     } catch (error) {
-      setError(sessionId, error, "打开外部 Claude 终端失败");
+      setError(sessionId, error, "打开外部 Claude 终端失败", { lifetime: "transient", durationMs: LIGHTWEIGHT_NOTICE_DURATION_MS });
       updateSession(sessionId, (current) => ({ ...current, status: "error", statusLabel: "打开终端失败" }));
     } finally {
       const current = externalTerminalLaunchesRef.current.get(sessionId);
@@ -1959,16 +1963,20 @@ export default function App() {
       return;
     }
     if (action === "openExternalTerminal") {
-      if (entry.provider !== "claude") {
-        await openHistory(entry);
-        return;
-      }
+      // Older persisted history entries may not carry a Provider field. Since
+      // Codex is the only Provider with this action in those older builds,
+      // normalize the missing value to Codex instead of main-process Claude
+      // compatibility defaults.
+      const provider: AgentProvider = entry.provider === "claude" ? "claude" : "codex";
       try {
         const cwd = await registerHistoricalWorkspace((directory) => bridge.registerWorkspace(directory), entry.cwd);
-        await bridge.openExternalTerminal({ cwd, sessionId: entry.id, resume: true });
-        await openHistory({ ...entry, cwd });
+        await bridge.openExternalTerminal({ provider, cwd, sessionId: entry.id, resume: true });
+        // Claude is read-only in AgentDesk, so keep the matching history tab
+        // visible after launching its terminal. Codex remains owned by the
+        // external CLI to avoid competing writers for the same rollout.
+        if (provider === "claude") await openHistory({ ...entry, provider, cwd });
       } catch (error) {
-        reportError(error, "打开外部 Claude 终端失败");
+        reportError(error, provider === "codex" ? "打开外部 Codex 终端失败" : "打开外部 Claude 终端失败");
       }
       return;
     }
@@ -2082,7 +2090,6 @@ export default function App() {
       } else if (action === "delete") {
         const providerTitle = providerDisplayName(entry.provider);
         if (!window.confirm(`确认永久删除这条会话？\n\n${entry.title}\n\n这会从本机 ${providerTitle} 历史中删除会话内容，不可恢复。`)) return;
-        if (!window.confirm("最后确认：真的要永久删除这条本机会话吗？")) return;
         await agentClient.request(entry.provider, "deleteSession", params, context);
         const aliases = { ...(preferencesRef.current.sessionAliases || {}) };
         const favoriteSessionSummaries = { ...(preferencesRef.current.favoriteSessionSummaries || {}) };
@@ -2109,20 +2116,30 @@ export default function App() {
     }
   }, [addSession, agentClient, bridge, createSessionInDirectory, createSessionState, deleteSession, exportSession, forkSession, handoffSession, layoutController, openHistory, persistCompactionSnapshot, releaseSessionState, renameSession, requestForSession, restoreMessagesToDraft, runMessage, savePreference, sessionMessages, setError, toggleHistoricalPin, toggleSessionFavorite, toggleThreadPin, updateSession]);
 
-  const addImages = useCallback(async (sessionId: string, files: File[]) => {
+  const addFiles = useCallback(async (sessionId: string, files: File[]): Promise<string[]> => {
     const session = sessionsRef.current[sessionId];
-    if (!session || session.capabilities.images !== "supported") {
-      if (session) updateSession(sessionId, (current) => ({ ...current, errorText: session.capabilities.images === "temporarilyUnavailable" ? "图片输入暂不可用。" : "当前 Provider 不支持图片输入。" }));
-      return;
-    }
+    if (!session || session.provider !== "codex") return [];
     const images = files.filter((file) => SUPPORTED_IMAGE_TYPES.has(file.type));
+    const documents = files.filter((file) => !SUPPORTED_IMAGE_TYPES.has(file.type)).slice(0, MAX_PASTED_DOCUMENTS);
+    const documentLimitReached = files.length - images.length > documents.length;
+    const pathResults = await Promise.allSettled(documents.map((file) => bridge.getPastedFilePath(file)));
+    const documentPaths = pathResults.flatMap((result) => result.status === "fulfilled" && result.value ? [result.value] : []);
+    const documentError = documentLimitReached || documentPaths.length !== documents.length;
+    const documentErrorText = documentLimitReached
+      ? `一次最多粘贴 ${MAX_PASTED_DOCUMENTS} 个文件。`
+      : "无法读取文件路径，请直接复制文件或拖入文件。";
+
     if (!images.length) {
-      updateSession(sessionId, (current) => ({ ...current, errorText: "只支持 PNG、JPEG、GIF 或 WebP 图片。" }));
-      return;
+      updateSession(sessionId, (current) => ({ ...current, ...sessionErrorNoticePatch(documentError ? documentErrorText : "", { lifetime: "transient" }) }));
+      return documentPaths;
+    }
+    if (session.capabilities.images !== "supported") {
+      updateSession(sessionId, (current) => ({ ...current, ...sessionErrorNoticePatch(session.capabilities.images === "temporarilyUnavailable" ? "图片输入暂不可用。" : "当前 Provider 不支持图片输入。", { lifetime: "transient" }) }));
+      return documentPaths;
     }
     if (images.some((file) => file.size > MAX_IMAGE_BYTES)) {
-      updateSession(sessionId, (current) => ({ ...current, errorText: "每张图片必须在 10 MB 以内。" }));
-      return;
+      updateSession(sessionId, (current) => ({ ...current, ...sessionErrorNoticePatch("每张图片必须在 10 MB 以内。", { lifetime: "transient" }) }));
+      return documentPaths;
     }
     try {
       const saved = await Promise.all(images.map(async (file) => {
@@ -2135,10 +2152,11 @@ export default function App() {
         return bridge.saveClipboardImage(dataUrl, file.name || "pasted-image");
       }));
       replaceAttachments(sessionId, (current) => [...current, ...saved]);
-      updateSession(sessionId, (current) => ({ ...current, errorText: "" }));
+      updateSession(sessionId, (current) => ({ ...current, ...sessionErrorNoticePatch(documentError ? documentErrorText : "", { lifetime: "transient" }) }));
     } catch (error) {
       setError(sessionId, error, "图片保存失败");
     }
+    return documentPaths;
   }, [bridge, replaceAttachments, setError, updateSession]);
 
   const removeImage = useCallback((sessionId: string, index: number) => {
@@ -2161,8 +2179,10 @@ export default function App() {
     if (view === "goal") void loadGoal(sessionId);
   }, [loadGoal, updateSession]);
 
-  const clearError = useCallback((sessionId: string) => {
-    updateSession(sessionId, (current) => ({ ...current, errorText: "", ...(current.status === "error" && !current.activeTurnId ? { status: "idle" as const, statusLabel: "就绪" } : {}) }));
+  const clearError = useCallback((sessionId: string, expectedNoticeIdentity?: string) => {
+    updateSession(sessionId, (current) => expectedNoticeIdentity && sessionErrorNoticeIdentity(current) !== expectedNoticeIdentity
+      ? current
+      : ({ ...current, ...sessionErrorNoticePatch(""), ...(current.status === "error" && !current.activeTurnId ? { status: "idle" as const, statusLabel: "就绪" } : {}) }));
   }, [updateSession]);
 
   const dismissSessionNotice = useCallback((sessionId: string, noticeKeys: string | readonly string[]) => {
@@ -2304,7 +2324,7 @@ export default function App() {
           initial.titleOrigin = "provider";
           initial.readOnly = true;
           setHistory((current) => upsertHistoryEntry(current, { id: initialClaudeSessionId, provider: "claude", cwd: currentWorkspace, title: initial.title }));
-          void bridge.openExternalTerminal({ cwd: currentWorkspace, sessionId: initialClaudeSessionId }).catch((error) => updateSession("session-1", (current) => ({ ...current, errorText: error instanceof Error ? error.message : "打开外部终端失败" })));
+          void bridge.openExternalTerminal({ cwd: currentWorkspace, sessionId: initialClaudeSessionId }).catch((error) => updateSession("session-1", (current) => ({ ...current, ...sessionErrorNoticePatch(error instanceof Error ? error.message : "打开外部终端失败", { lifetime: "transient", durationMs: LIGHTWEIGHT_NOTICE_DURATION_MS }) })));
         }
         sessionsRef.current = { "session-1": initial };
         setSessions({ "session-1": initial });
@@ -2800,7 +2820,7 @@ export default function App() {
         onDraftChange={onDraftChange}
         onSend={sendMessage}
         onCycleEffort={cycleEffort}
-        onAddImages={addImages}
+        onAddFiles={addFiles}
         onRemoveImage={removeImage}
         onRemoveQueuedMessage={removeQueuedMessage}
         onChooseDirectory={chooseDirectoryForSession}
@@ -2932,7 +2952,7 @@ export default function App() {
       <button type="button" role="menuitem" disabled={!contextLeft.length} onClick={() => closeTabIds(contextPane.id, contextLeft)}><ArrowLeftToLine size={14} /><span>关闭左侧</span></button>
       <div className="context-menu-separator" />
       {contextSession?.capabilities.rename !== "unsupported" ? <button type="button" role="menuitem" disabled={!contextSession || contextSession.capabilities.rename !== "supported"} onClick={() => { if (!contextSession) return; setTabContextMenu(null); setTabRenameName(contextSession.title); setTabRenameTarget({ sessionId: contextSession.id, title: contextSession.title }); }}><Pencil size={14} /><span>重命名</span></button> : null}
-      {contextSession?.capabilities.pin !== "unsupported" ? <button type="button" role="menuitem" disabled={!contextSession || contextSession.capabilities.pin !== "supported"} onClick={() => { if (!contextSession) return; void toggleThreadPin(contextSession.id); }}>{contextHistoryEntry?.isPinned ? <PinOff size={14} /> : <Pin size={14} />}<span>{contextHistoryEntry?.isPinned ? "取消置顶" : "置顶"}</span></button> : null}
+      <button type="button" role="menuitem" disabled={!contextSession} onClick={() => { if (!contextSession) return; void toggleThreadPin(contextSession.id); }}>{contextHistoryEntry?.isPinned ? <PinOff size={14} /> : <Pin size={14} />}<span>{contextHistoryEntry?.isPinned ? "取消置顶" : "置顶"}</span></button>
       <button type="button" role="menuitem" disabled={!contextSession} onClick={() => { if (!contextSession) return; void toggleSessionFavorite(contextSession.id); }}><Star size={14} fill={contextHistoryEntry?.isFavorite ? "currentColor" : "none"} /><span>{contextHistoryEntry?.isFavorite ? "取消收藏" : "收藏"}</span></button>
       <button type="button" role="menuitem" disabled={!contextSession} onClick={() => { if (!contextSession) return; setTabContextMenu(null); void exportSession(contextSession.id); }}><Download size={14} /><span>导出 Markdown</span></button>
       <button type="button" role="menuitem" disabled={!contextSession} onClick={() => { if (!contextSession) return; void handoffSession(contextSession.id, "codex"); }}><ArrowRight size={14} /><span>交接到 Codex</span></button>

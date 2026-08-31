@@ -16,8 +16,11 @@ import {
   isNonSteerableTurn,
   mergeMessages,
 } from "./inputQueue";
+import { sessionErrorNoticePatch, type SessionErrorNoticeOptions } from "./sessionErrorNotice";
 
 type ListUpdater<T> = T[] | ((current: T[]) => T[]);
+
+class TransientInputError extends Error {}
 
 export interface SessionMessageState {
   getSession(sessionId: string): SessionState | undefined;
@@ -70,10 +73,11 @@ export class SessionMessageController {
     return `${prefix}-${this.now()}-${this.inputSequence}`;
   }
 
-  private setError(sessionId: string, error: unknown, fallback: string) {
+  private setError(sessionId: string, error: unknown, fallback: string, options?: SessionErrorNoticeOptions) {
+    const message = error instanceof Error ? error.message : fallback;
     this.options.state.updateSession(sessionId, (current) => ({
       ...current,
-      errorText: error instanceof Error ? error.message : fallback,
+      ...sessionErrorNoticePatch(message, { ...options, now: this.now() }),
     }));
   }
 
@@ -99,7 +103,7 @@ export class SessionMessageController {
     const session = state.getSession(sessionId);
     if (!session) return false;
     if (session.readOnly) {
-      this.setError(sessionId, new Error("当前会话正被其他程序使用，已切换为只读模式。"), "当前会话已切换为只读模式。");
+      this.setError(sessionId, new Error("当前会话正被其他程序使用，已切换为只读模式。"), "当前会话已切换为只读模式。", { lifetime: "untilResolved" });
       return false;
     }
     const clientUserMessageId = message.clientUserMessageId || `client-${this.nextInputId("message")}`;
@@ -119,7 +123,7 @@ export class SessionMessageController {
     if (requiredCapability && session.capabilities[requiredCapability] !== "supported") {
       state.updateSession(sessionId, (current) => ({
         ...current,
-        errorText: session.capabilities[requiredCapability] === "temporarilyUnavailable" ? "该能力当前暂不可用。" : "当前 Provider 不支持该命令。",
+        ...sessionErrorNoticePatch(session.capabilities[requiredCapability] === "temporarilyUnavailable" ? "该能力当前暂不可用。" : "当前 Provider 不支持该命令。", { lifetime: "transient", now: this.now() }),
       }));
       return false;
     }
@@ -133,7 +137,7 @@ export class SessionMessageController {
     const sentAt = this.now();
     state.updateSession(sessionId, (current) => ({
       ...current,
-      errorText: "",
+      ...sessionErrorNoticePatch(""),
       title: nextTitle,
       titleOrigin: shouldSetFallbackTitle ? "fallback" : current.titleOrigin,
       updatedAt: sentAt,
@@ -153,9 +157,9 @@ export class SessionMessageController {
     if (telemetry && startsTurn) telemetry.begin(sessionId, session.provider, requestMethod, { mode: "submit" });
     try {
       if (localCommand === "/model") {
-        if (session.provider === "claude") throw new Error("Claude Code 的模型和思考等级请在外部终端中调整。");
-        if (!commandArgs) throw new Error("请在 /model 后输入模型名称，或直接使用顶部的模型选择框。\n示例：/model claude-opus-4-6[1m]");
-        if (!services.setSessionSetting) throw new Error("当前版本暂不支持通过命令切换模型。");
+        if (session.provider === "claude") throw new TransientInputError("Claude Code 的模型和思考等级请在外部终端中调整。");
+        if (!commandArgs) throw new TransientInputError("请在 /model 后输入模型名称，或直接使用顶部的模型选择框。\n示例：/model claude-opus-4-6[1m]");
+        if (!services.setSessionSetting) throw new TransientInputError("当前版本暂不支持通过命令切换模型。");
         await services.setSessionSetting(sessionId, "model", commandArgs);
         state.updateSession(sessionId, (current) => current.activeTurnId
           ? current
@@ -163,8 +167,8 @@ export class SessionMessageController {
         return true;
       }
       if (localCommand === "/rename") {
-        if (!commandArgs) throw new Error("请在 /rename 后输入新的会话名称。\n示例：/rename 登录问题排查");
-        if (!services.renameSession) throw new Error("当前版本暂不支持通过命令重命名会话。");
+        if (!commandArgs) throw new TransientInputError("请在 /rename 后输入新的会话名称。\n示例：/rename 登录问题排查");
+        if (!services.renameSession) throw new TransientInputError("当前版本暂不支持通过命令重命名会话。");
         await services.renameSession(sessionId, commandArgs);
         state.updateSession(sessionId, (current) => current.activeTurnId
           ? current
@@ -172,7 +176,7 @@ export class SessionMessageController {
         return true;
       }
       if (localCommand === "/plan") {
-        if (!services.setCollaborationMode) throw new Error("当前版本暂不支持计划模式。");
+        if (!services.setCollaborationMode) throw new TransientInputError("当前版本暂不支持计划模式。");
         await services.setCollaborationMode(sessionId, "plan");
         if (!commandArgs) {
           state.updateSession(sessionId, (current) => current.activeTurnId
@@ -221,6 +225,18 @@ export class SessionMessageController {
       this.rememberHistory(session, stringValue(result.reviewThreadId, threadId), nextTitle);
       return true;
     } catch (error) {
+      if (error instanceof TransientInputError) {
+        state.updateSession(sessionId, (current) => ({
+          ...current,
+          status: "idle",
+          statusLabel: "就绪",
+          activeTurnId: null,
+          startedAt: null,
+          ...sessionErrorNoticePatch(error.message, { lifetime: "transient", now: this.now() }),
+          messages: current.messages.filter((entry) => entry.clientId !== clientUserMessageId),
+        }));
+        return false;
+      }
       if (session.provider === "codex" && isCodexActiveWriterConflict(error)) {
         state.updateSession(sessionId, (current) => ({
           ...current,
@@ -229,7 +245,7 @@ export class SessionMessageController {
           statusLabel: "已切换为只读",
           activeTurnId: null,
           startedAt: null,
-          errorText: "该会话正被其他程序使用，当前为只读模式。",
+          ...sessionErrorNoticePatch("该会话正被其他程序使用，当前为只读模式。", { lifetime: "untilResolved", now: this.now() }),
           messages: current.messages.filter((entry) => entry.clientId !== clientUserMessageId),
         }));
         telemetry?.failed(sessionId, "request_failed");
@@ -241,7 +257,7 @@ export class SessionMessageController {
           ...current,
           status: "working",
           statusLabel: "响应超时，后台状态待确认",
-          errorText: "请求超时，任务可能仍在后台执行。",
+          ...sessionErrorNoticePatch("请求超时，任务可能仍在后台执行。", { lifetime: "untilResolved", now: this.now() }),
         }));
         if (threadId) this.rememberHistory(session, threadId, nextTitle);
         return true;
@@ -252,7 +268,7 @@ export class SessionMessageController {
         statusLabel: "提交失败",
         activeTurnId: null,
         startedAt: null,
-        errorText: error instanceof Error ? error.message : "消息发送失败",
+        ...sessionErrorNoticePatch(error instanceof Error ? error.message : "消息发送失败", { now: this.now() }),
         messages: current.messages.filter((entry) => entry.clientId !== clientUserMessageId),
       }));
       telemetry?.failed(sessionId, isCodexRequestTimeout(error) ? "timeout" : "request_failed");
@@ -274,7 +290,7 @@ export class SessionMessageController {
     const current = state.getSession(sessionId);
     if (current?.readOnly) {
       removePending();
-      this.setError(sessionId, new Error("当前会话正被其他程序使用，已切换为只读模式。"), "当前会话已切换为只读模式。");
+      this.setError(sessionId, new Error("当前会话正被其他程序使用，已切换为只读模式。"), "当前会话已切换为只读模式。", { lifetime: "untilResolved" });
       return;
     }
     if (!current?.threadId || current.status !== "working" || !current.activeTurnId) {
@@ -346,7 +362,7 @@ export class SessionMessageController {
     const session = state.getSession(sessionId);
     if (!session) return;
     if (session.readOnly) {
-      this.setError(sessionId, new Error("当前会话正被其他程序使用，已切换为只读模式。"), "当前会话已切换为只读模式。");
+      this.setError(sessionId, new Error("当前会话正被其他程序使用，已切换为只读模式。"), "当前会话已切换为只读模式。", { lifetime: "untilResolved" });
       return;
     }
     const sessionAttachments = state.getAttachments(sessionId);
@@ -379,7 +395,7 @@ export class SessionMessageController {
     };
     if (!commandName) state.replaceAttachments(sessionId, []);
     if (session.status === "working" && commandName !== "status" && commandName !== "mcp" && state.getQueued(sessionId).length + state.getPendingSteers(sessionId).length >= MAX_SESSION_QUEUED_MESSAGES) {
-      this.setError(sessionId, new Error(`排队消息最多保留 ${MAX_SESSION_QUEUED_MESSAGES} 条，请等待前面的任务完成。`), "排队消息过多。");
+      this.setError(sessionId, new Error(`排队消息最多保留 ${MAX_SESSION_QUEUED_MESSAGES} 条，请等待前面的任务完成。`), "排队消息过多。", { lifetime: "transient" });
       services.restoreMessagesToDraft(sessionId, [message]);
       return;
     }

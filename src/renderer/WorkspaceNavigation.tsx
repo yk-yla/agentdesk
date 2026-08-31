@@ -6,6 +6,8 @@ import { basename, sameDirectory } from "./domain";
 import ProviderIcon from "./ProviderIcon";
 import { reorderFavoriteWorkspaceList } from "./sidebarViewModel";
 import { userFacingErrorMessage } from "./errorMessage";
+import { LIGHTWEIGHT_NOTICE_DURATION_MS, SUCCESS_NOTICE_DURATION_MS } from "./sessionErrorNotice";
+import { useAutoDismissNotice } from "./useAutoDismissNotice";
 
 export interface WorkspaceNavigationViewModel {
   currentCwd: string;
@@ -35,6 +37,11 @@ function WorkspaceNavigationBase({ viewModel, actions }: WorkspaceNavigationProp
   const [dragOverWorkspace, setDragOverWorkspace] = useState<string | null>(null);
   const [launchingClaudeDirectories, setLaunchingClaudeDirectories] = useState<string[]>([]);
   const [terminalFeedback, setTerminalFeedback] = useState<{ kind: "working" | "success" | "error"; text: string } | null>(null);
+  const terminalFeedbackAutoDismissProps = useAutoDismissNotice(
+    terminalFeedback && terminalFeedback.kind !== "working" ? `${terminalFeedback.kind}:${terminalFeedback.text}` : null,
+    terminalFeedback?.kind === "success" ? SUCCESS_NOTICE_DURATION_MS : terminalFeedback?.kind === "error" ? LIGHTWEIGHT_NOTICE_DURATION_MS : null,
+    () => setTerminalFeedback(null),
+  );
   const currentWorkspaceFavorite = favoriteWorkspaces.some((directory) => sameDirectory(directory, currentCwd));
 
   const isClaudeLaunching = (directory: string) => launchingClaudeDirectories.some((candidate) => sameDirectory(candidate, directory));
@@ -78,7 +85,7 @@ function WorkspaceNavigationBase({ viewModel, actions }: WorkspaceNavigationProp
         </button>
       </div>
     </div>
-    {terminalFeedback ? <div className={`workspace-terminal-feedback ${terminalFeedback.kind}`} role={terminalFeedback.kind === "error" ? "alert" : "status"}>{terminalFeedback.kind === "working" ? <LoaderCircle className="terminal-launch-spinner" size={13} /> : terminalFeedback.kind === "success" ? <Check size={13} /> : null}<span>{terminalFeedback.text}</span>{terminalFeedback.kind !== "working" ? <button type="button" className="bare-button" onClick={() => setTerminalFeedback(null)} title="关闭" aria-label={terminalFeedback.kind === "error" ? "关闭错误提示" : "关闭提示"}><X size={13} /></button> : null}</div> : null}
+    {terminalFeedback ? <div className={`workspace-terminal-feedback ${terminalFeedback.kind}`} role={terminalFeedback.kind === "error" ? "alert" : "status"} {...terminalFeedbackAutoDismissProps}>{terminalFeedback.kind === "working" ? <LoaderCircle className="terminal-launch-spinner" size={13} /> : terminalFeedback.kind === "success" ? <Check size={13} /> : null}<span>{terminalFeedback.text}</span>{terminalFeedback.kind !== "working" ? <button type="button" className="bare-button" onClick={() => setTerminalFeedback(null)} title="关闭" aria-label={terminalFeedback.kind === "error" ? "关闭错误提示" : "关闭提示"}><X size={13} /></button> : null}</div> : null}
     {favoriteWorkspaces.length ? <div className="favorites-section">
       <div className="workspace-shortcuts">{favoriteWorkspaces.map((directory) => <div className={`shortcut-row ${dragOverWorkspace === directory ? "drag-over" : ""}`} key={directory} onDragOver={(event) => { event.preventDefault(); event.dataTransfer.dropEffect = "move"; setDragOverWorkspace(directory); }} onDrop={(event) => { event.preventDefault(); reorder(directory); clearDrag(); }}>
         <button type="button" className="shortcut-drag-handle" draggable onDragStart={(event: ReactDragEvent<HTMLButtonElement>) => { event.dataTransfer.effectAllowed = "move"; event.dataTransfer.setData("text/plain", directory); setDraggingWorkspace(directory); }} onDragEnd={clearDrag} title="拖动调整固定目录顺序" aria-label={`拖动 ${basename(directory)} 调整固定目录顺序`}><GripVertical size={13} /></button>

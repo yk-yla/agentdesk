@@ -1,4 +1,5 @@
 import path from "node:path";
+import type { AgentProvider } from "../shared/agentProtocol";
 import type { ExternalTerminalSettings } from "../shared/protocol";
 
 export interface ExternalTerminalLaunchPlan {
@@ -15,9 +16,12 @@ function powershellPromptExpression(value: string) {
   return `([Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('${encodedPrompt(value)}')))`;
 }
 
-function commandPromptHandoff(sessionId: string, initialPrompt: string, cliExecutable = "claude", resume = false) {
+function commandPromptHandoff(provider: AgentProvider, sessionId: string, initialPrompt: string, cliExecutable: string | undefined = provider, resume = false) {
   const command = cliExecutable.includes(" ") ? `& '${cliExecutable.replaceAll("'", "''")}'` : `& ${cliExecutable}`;
-  const script = `${command} ${resume ? "--resume" : "--session-id"} '${sessionId}'${initialPrompt ? ` ${powershellPromptExpression(initialPrompt)}` : ""}`;
+  const sessionArgs = provider === "codex"
+    ? (resume ? ` resume '${sessionId}'` : "")
+    : ` ${resume ? "--resume" : "--session-id"} '${sessionId}'`;
+  const script = `${command}${sessionArgs}${initialPrompt ? ` ${powershellPromptExpression(initialPrompt)}` : ""}`;
   const encodedScript = Buffer.from(script, "utf16le").toString("base64");
   return ["/k", `powershell.exe -NoProfile -EncodedCommand ${encodedScript}`];
 }
@@ -25,11 +29,18 @@ function commandPromptHandoff(sessionId: string, initialPrompt: string, cliExecu
 export function expandExternalTerminalArgs(
   settings: ExternalTerminalSettings,
   executable: string,
-  values: { cwd: string; sessionId: string; resume: boolean; initialPrompt: string; cliExecutable?: string },
+  values: { cwd: string; sessionId: string; provider?: AgentProvider; resume: boolean; initialPrompt: string; cliExecutable?: string },
 ) {
+  const provider = values.provider || "claude";
   const commandPrompt = settings.kind === "command-prompt" || path.win32.basename(executable).toLowerCase() === "cmd.exe";
-  if (commandPrompt) return commandPromptHandoff(values.sessionId, values.initialPrompt, values.cliExecutable, values.resume);
+  if (commandPrompt) return commandPromptHandoff(provider, values.sessionId, values.initialPrompt, values.cliExecutable, values.resume);
   let template = settings.argsTemplate;
+  if (provider === "codex") {
+    template = template
+      .replace(/\bclaude(?:\.cmd|\.exe)?\b/giu, "codex")
+      .replaceAll("{claude}", "codex")
+      .replace(/\s+--(?:session-id|resume)\s+\{sessionId\}/giu, values.resume ? " resume {sessionId}" : "");
+  }
   // Older saved preferences predate {prompt}. Inject it next to the session ID
   // so handoff keeps working without requiring the user to re-save settings.
   if (values.initialPrompt && !template.includes("{prompt}")) {
@@ -42,9 +53,10 @@ export function expandExternalTerminalArgs(
   const replaced = template
     .replaceAll("{cwd}", values.cwd.replaceAll("\\", "\\\\").replaceAll('"', '\\"'))
     .replaceAll("{sessionId}", values.sessionId)
-    .replaceAll("{provider}", "claude")
+    .replaceAll("{provider}", provider)
     .replaceAll("{prompt}", values.initialPrompt ? powershellPromptExpression(values.initialPrompt) : "")
-    .replaceAll("{claude}", values.cliExecutable || "claude");
+    .replaceAll("{claude}", provider)
+    .replaceAll("{codex}", provider);
   if (/[{}]/u.test(replaced)) throw new Error("外部终端参数模板包含未识别的变量。");
   const args: string[] = [];
   const pattern = /"((?:\\.|[^"\\])*)"|([^\s]+)/gu;
@@ -53,12 +65,13 @@ export function expandExternalTerminalArgs(
     args.push(value.replaceAll('\\"', '"').replaceAll("\\\\", "\\"));
   }
   const explicitArgs = values.cliExecutable ? args.map((value) => {
-    if (!/^claude(?:\.cmd|\.exe)?(?:\s|$)/i.test(value)) return value;
-    const suffix = value.replace(/^claude(?:\.cmd|\.exe)?/i, "");
+    const cliPattern = provider === "codex" ? /^codex(?:\.cmd|\.exe)?(?:\s|$)/i : /^claude(?:\.cmd|\.exe)?(?:\s|$)/i;
+    if (!cliPattern.test(value)) return value;
+    const suffix = value.replace(provider === "codex" ? /^codex(?:\.cmd|\.exe)?/i : /^claude(?:\.cmd|\.exe)?/i, "");
     const escaped = values.cliExecutable!.replaceAll("'", "''");
     return commandPrompt ? `"${values.cliExecutable}"${suffix}` : `& '${escaped}'${suffix}`;
   }) : args;
-  if (!values.resume) return explicitArgs;
+  if (provider !== "claude" || !values.resume) return explicitArgs;
   return explicitArgs.map((value) => value.includes("--session-id") ? value.replaceAll("--session-id", "--resume") : value);
 }
 
