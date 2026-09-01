@@ -22,6 +22,7 @@ describe("local file links", () => {
 
   it("keeps Windows, file URL and UNC paths local", () => {
     assert.deepEqual(classifyLocalLink("D:\\code\\app.ts", "C:\\work"), { kind: "local", value: "D:\\code\\app.ts" });
+    assert.deepEqual(classifyLocalLink("/E:/whaty/project/notes.md", "C:\\work"), { kind: "local", value: "E:/whaty/project/notes.md" });
     assert.deepEqual(classifyLocalLink("file:///D:/code/My%20File.ts", "C:\\work"), { kind: "local", value: "D:/code/My File.ts" });
     assert.deepEqual(classifyLocalLink("file://server/share/file.txt", "C:\\work"), { kind: "local", value: "\\\\server/share/file.txt" });
   });
