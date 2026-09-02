@@ -80,6 +80,29 @@ function encodeMergedHistoryCursor(value: MergedHistoryCursor) {
   return value.primary || value.legacy ? JSON.stringify(value) : null;
 }
 
+function historyThreadRecord(value: Record<string, unknown>, method: string) {
+  if (method === "thread/search" && value.thread && typeof value.thread === "object" && !Array.isArray(value.thread)) return value.thread as Record<string, unknown>;
+  return value;
+}
+
+function historyRecordId(value: Record<string, unknown>, method: string) {
+  const thread = historyThreadRecord(value, method);
+  return typeof thread.id === "string" ? thread.id : typeof thread.sessionId === "string" ? thread.sessionId : "";
+}
+
+function annotateHistoryRecord(value: Record<string, unknown>, method: string, codexHome: "agentdesk" | "default") {
+  const thread = historyThreadRecord(value, method);
+  const annotatedThread = { ...thread, provider: "codex", codexHome };
+  return method === "thread/search" && thread !== value
+    ? { ...value, codexHome, thread: annotatedThread }
+    : annotatedThread;
+}
+
+function historyRecordUpdatedAt(value: Record<string, unknown>, method: string) {
+  const thread = historyThreadRecord(value, method);
+  return Number(thread.updatedAt || thread.recencyAt || 0);
+}
+
 function forcedExecutionParams(operation: AgentOperation, params: JsonObject): JsonObject {
   if (THREAD_CONFIGURATION_OPERATIONS.has(operation)) {
     return { ...params, approvalPolicy: "never", sandbox: "danger-full-access" };
@@ -291,18 +314,22 @@ export class CodexBackend implements AgentBackend {
       throw failed && failed.status === "rejected" ? failed.reason : new Error("Codex 历史读取失败。");
     }
     const entries = new Map<string, Record<string, unknown>>();
-    for (const value of successful) {
-      const data = value && typeof value === "object" && !Array.isArray(value) && Array.isArray((value as Record<string, unknown>).data)
-        ? (value as Record<string, unknown>).data as unknown[] : [];
+    for (const [runtimeIndex, value] of results.entries()) {
+      if (value.status !== "fulfilled") continue;
+      const codexHome = runtimeIndex === 1 ? "default" : "agentdesk";
+      const payload = value.value;
+      const data = payload && typeof payload === "object" && !Array.isArray(payload) && Array.isArray((payload as Record<string, unknown>).data)
+        ? (payload as Record<string, unknown>).data as unknown[] : [];
       this.historyIndex?.observeThreads({ data });
       for (const item of data) {
         if (!item || typeof item !== "object" || Array.isArray(item)) continue;
         const record = item as Record<string, unknown>;
-        const thread = record.thread && typeof record.thread === "object" && !Array.isArray(record.thread)
-          ? record.thread as Record<string, unknown>
-          : record;
-        const id = typeof thread.id === "string" ? thread.id : typeof thread.sessionId === "string" ? thread.sessionId : "";
-        if (id) entries.set(id, record);
+        const id = historyRecordId(record, method);
+        if (id) {
+          const annotated = annotateHistoryRecord(record, method, codexHome);
+          entries.set(id, annotated);
+          if (codexHome === "default") this.legacyHistorySessionIds.add(id);
+        }
       }
     }
     if (operation === "searchSessions" && typeof params.searchTerm === "string" && params.searchTerm.trim()) {
@@ -317,7 +344,7 @@ export class CodexBackend implements AgentBackend {
     }
     const limit = Math.min(Math.max(Number(params.limit) || 100, 1), 100);
     const data = [...entries.values()]
-      .sort((left, right) => Number(right.updatedAt || right.recencyAt || 0) - Number(left.updatedAt || left.recencyAt || 0))
+      .sort((left, right) => historyRecordUpdatedAt(right, method) - historyRecordUpdatedAt(left, method))
       .slice(0, limit);
     const legacyResult = results[1];
     if (this.legacyHistoryRuntime && legacyResult?.status === "fulfilled" && legacyResult.value && typeof legacyResult.value === "object" && !Array.isArray(legacyResult.value)) {
@@ -325,10 +352,7 @@ export class CodexBackend implements AgentBackend {
       for (const item of legacyData) {
         if (!item || typeof item !== "object" || Array.isArray(item)) continue;
         const record = item as Record<string, unknown>;
-        const thread = record.thread && typeof record.thread === "object" && !Array.isArray(record.thread)
-          ? record.thread as Record<string, unknown>
-          : record;
-        const id = typeof thread.id === "string" ? thread.id : typeof thread.sessionId === "string" ? thread.sessionId : "";
+        const id = historyRecordId(record, method);
         if (id) this.legacyHistorySessionIds.add(id);
       }
     }

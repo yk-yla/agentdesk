@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
-import { ClaudeBackend, paginateClaudeHistoryMessages } from "./ClaudeBackend";
+import { ClaudeBackend, ClaudeHistoryMessageCache, paginateClaudeHistoryMessages } from "./ClaudeBackend";
 
 describe("ClaudeBackend (external-terminal)", () => {
   it("pages the full history from the newest page back to the first", () => {
@@ -17,6 +17,39 @@ describe("ClaudeBackend (external-terminal)", () => {
     assert.equal(first.messages.length, 200);
     assert.equal(first.hasMoreBefore, false);
     assert.equal(first.hasMoreAfter, true);
+  });
+
+  it("deduplicates and bounds cached transcript loads", async () => {
+    let now = 1_000;
+    let loads = 0;
+    const cache = new ClaudeHistoryMessageCache(1, 2, 100, () => now);
+    const loader = async () => { loads += 1; return [{ id: "one" }]; };
+    const first = cache.get("session", loader);
+    const second = cache.get("session", loader);
+    assert.strictEqual(await first, await second);
+    assert.equal(loads, 1);
+    now += 101;
+    await cache.get("session", loader);
+    assert.equal(loads, 2);
+    await cache.get("other", async () => [{ id: "1" }]);
+    await cache.get("session", loader);
+    assert.equal(loads, 3);
+  });
+
+  it("keeps paginated cache entries separate and invalidates the session prefix", async () => {
+    let loads = 0;
+    const cache = new ClaudeHistoryMessageCache(8, 2, 60_000, () => 1_000);
+    const page = (offset: number) => cache.get(`cwd\u0000session\u0000${offset}\u0000200`, async () => {
+      loads += 1;
+      return [{ offset }];
+    });
+
+    assert.equal(((await page(0))[0] as { offset: number }).offset, 0);
+    assert.equal(((await page(200))[0] as { offset: number }).offset, 200);
+    assert.equal(loads, 2);
+    cache.invalidatePrefix("cwd\u0000session");
+    assert.equal(((await page(0))[0] as { offset: number }).offset, 0);
+    assert.equal(loads, 3);
   });
 
   it("returns simplified capabilities without query support", async () => {

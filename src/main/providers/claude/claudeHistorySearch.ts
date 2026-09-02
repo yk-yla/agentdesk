@@ -7,6 +7,8 @@ export interface ClaudeSearchSession {
 
 type MessageLoader = (sessionId: string, options: { dir?: string; limit: number; offset: number }) => Promise<unknown>;
 
+export const DEFAULT_CLAUDE_SEARCH_CONCURRENCY = 4;
+
 export function visibleSessionText(value: unknown, budget = 64 * 1024) {
   const parts: string[] = [];
   let length = 0;
@@ -49,4 +51,39 @@ export async function sessionSearchText(session: ClaudeSearchSession, cwd: strin
     if (!Array.isArray(messages) || messages.length < 200) break;
   }
   return text;
+}
+
+export async function searchClaudeHistorySessions<T extends ClaudeSearchSession>(
+  sessions: T[],
+  cwd: string | undefined,
+  searchTerm: string,
+  limit: number,
+  loadMessages: MessageLoader,
+  concurrency = DEFAULT_CLAUDE_SEARCH_CONCURRENCY,
+) {
+  const needle = searchTerm.toLocaleLowerCase();
+  const matches: Array<{ index: number; session: T; snippet: string }> = [];
+  const workerCount = Math.max(1, Math.min(Math.floor(concurrency) || DEFAULT_CLAUDE_SEARCH_CONCURRENCY, sessions.length || 1));
+  let nextIndex = 0;
+  let matchedCount = 0;
+  const worker = async () => {
+    while (true) {
+      const index = nextIndex++;
+      if (index >= sessions.length || matchedCount >= limit) return;
+      const session = sessions[index];
+      try {
+        const text = await sessionSearchText(session, cwd, loadMessages);
+        if (!text.toLocaleLowerCase().includes(needle)) continue;
+        matchedCount += 1;
+        matches.push({ index, session, snippet: searchSnippet(text, searchTerm) });
+      } catch {
+        // A corrupt transcript should not abort search across other sessions.
+      }
+    }
+  };
+  await Promise.all(Array.from({ length: workerCount }, () => worker()));
+  return matches
+    .sort((left, right) => left.index - right.index)
+    .slice(0, limit)
+    .map(({ session, snippet }) => ({ session, snippet }));
 }

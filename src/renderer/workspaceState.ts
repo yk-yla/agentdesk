@@ -10,6 +10,9 @@ const MAX_PANES = 2;
 const MAX_RESTORED_SESSIONS = 60;
 const MAX_SAVED_TEXT_BYTES = 2_500_000;
 const MAX_SAVED_IMAGES = 256;
+export const MAX_RESTORE_IMAGE_COUNT = 256;
+export const MAX_RESTORE_IMAGE_BYTES = 64 * 1024 * 1024;
+const MAX_RESTORE_IMAGE_CONCURRENCY = 4;
 const MAX_SAVED_QUEUED_MESSAGES = 500;
 const MAX_WORKSPACE_STATE_BYTES = 2_500_000;
 function takeUtf8Prefix(value: string, maxBytes: number) {
@@ -175,6 +178,7 @@ export function createWorkspaceState(input: {
       id: session.id,
       threadId: session.threadId || "",
       provider: session.provider,
+      ...(session.provider === "codex" && session.codexHome ? { codexHome: session.codexHome } : {}),
       cwd: session.cwd.slice(0, 2_000),
       title: session.title.slice(0, 500),
       titleOrigin: session.titleOrigin,
@@ -294,6 +298,7 @@ export function parseWorkspaceState(value: unknown, currentWorkspace: string): R
     if (provider === "claude" && !savedThreadId) continue;
     const session = emptySession(id, cwd, stringValue(saved.model).slice(0, 240), stringValue(saved.effort, "medium").slice(0, 80), provider);
     session.threadId = savedThreadId || null;
+    if (provider === "codex" && (saved.codexHome === "agentdesk" || saved.codexHome === "default")) session.codexHome = saved.codexHome;
     // A workbench session with a native ID needs its history rehydrated after
     // startup. Mark it before the first render so the empty-session welcome
     // view cannot flash while the Provider restore request is in flight.
@@ -364,10 +369,77 @@ export function parseWorkspaceState(value: unknown, currentWorkspace: string): R
   };
 }
 
-export async function loadSavedImages(bridge: AgentBridge, images: SavedImageReference[]): Promise<ImageAttachment[]> {
-  const restored = await Promise.all(images.map(async (image) => {
-    const dataUrl = await bridge.readLocalImage(image.path).catch(() => null);
-    return dataUrl ? { ...image, dataUrl } : null;
-  }));
+export interface ImageRestoreBudget {
+  remainingImages: number;
+  remainingBytes: number;
+}
+
+interface ImageRestoreLimiter {
+  active: number;
+  waiters: Array<() => void>;
+}
+
+const imageRestoreLimiters = new WeakMap<ImageRestoreBudget, ImageRestoreLimiter>();
+
+function imageRestoreLimiterFor(budget: ImageRestoreBudget) {
+  let limiter = imageRestoreLimiters.get(budget);
+  if (!limiter) {
+    limiter = { active: 0, waiters: [] };
+    imageRestoreLimiters.set(budget, limiter);
+  }
+  return limiter;
+}
+
+async function acquireImageRestorePermit(limiter: ImageRestoreLimiter) {
+  if (limiter.active < MAX_RESTORE_IMAGE_CONCURRENCY) {
+    limiter.active += 1;
+    return;
+  }
+  await new Promise<void>((resolve) => limiter.waiters.push(resolve));
+}
+
+function releaseImageRestorePermit(limiter: ImageRestoreLimiter) {
+  const next = limiter.waiters.shift();
+  if (next) next();
+  else limiter.active -= 1;
+}
+
+function dataUrlBytes(value: string) {
+  const comma = value.indexOf(",");
+  const payload = comma >= 0 ? value.slice(comma + 1) : value;
+  return Math.ceil(payload.replace(/\s/g, "").length * 3 / 4);
+}
+
+export async function loadSavedImages(
+  bridge: AgentBridge,
+  images: SavedImageReference[],
+  budget: ImageRestoreBudget = { remainingImages: MAX_RESTORE_IMAGE_COUNT, remainingBytes: MAX_RESTORE_IMAGE_BYTES },
+): Promise<ImageAttachment[]> {
+  const restored: Array<ImageAttachment | null> = Array.from({ length: images.length }, () => null);
+  const limiter = imageRestoreLimiterFor(budget);
+  let nextIndex = 0;
+  const worker = async () => {
+    while (true) {
+      const index = nextIndex++;
+      if (index >= images.length) return;
+      if (budget.remainingImages <= 0 || budget.remainingBytes <= 0) return;
+      const image = images[index];
+      await acquireImageRestorePermit(limiter);
+      try {
+        if (budget.remainingImages <= 0 || budget.remainingBytes <= 0) continue;
+        const dataUrl = await bridge.readLocalImage(image.path).catch(() => null);
+        if (!dataUrl) continue;
+        const bytes = dataUrlBytes(dataUrl);
+        if (bytes > budget.remainingBytes || budget.remainingImages <= 0) continue;
+        budget.remainingImages -= 1;
+        budget.remainingBytes -= bytes;
+        restored[index] = { ...image, dataUrl };
+      } finally {
+        releaseImageRestorePermit(limiter);
+      }
+    }
+  };
+  const concurrency = Math.min(MAX_RESTORE_IMAGE_CONCURRENCY, images.length || 1);
+  await Promise.all(Array.from({ length: concurrency }, () => worker()));
   return restored.filter((image): image is ImageAttachment => Boolean(image));
 }

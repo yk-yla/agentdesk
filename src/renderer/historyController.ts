@@ -46,8 +46,8 @@ export function isFavoriteSession(preferences: DesktopPreferences, provider: Age
   return favorites.includes(`${provider}:${id}`) || favorites.includes(id);
 }
 
-export function favoriteSessionSummary(entry: { provider: AgentProvider; id: string; title: string; cwd: string; updatedAt: number }): FavoriteSessionSummary {
-  return { provider: entry.provider, id: entry.id, title: entry.title || "无标题会话", cwd: entry.cwd, updatedAt: entry.updatedAt };
+export function favoriteSessionSummary(entry: { provider: AgentProvider; id: string; title: string; cwd: string; updatedAt: number; codexHome?: "agentdesk" | "default" }): FavoriteSessionSummary {
+  return { provider: entry.provider, id: entry.id, title: entry.title || "无标题会话", cwd: entry.cwd, updatedAt: entry.updatedAt, ...(entry.provider === "codex" && entry.codexHome ? { codexHome: entry.codexHome } : {}) };
 }
 
 export function favoriteHistoryEntries(history: HistoryThread[], preferences: DesktopPreferences) {

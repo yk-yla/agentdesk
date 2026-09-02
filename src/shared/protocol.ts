@@ -82,6 +82,8 @@ export interface FavoriteSessionSummary {
   title: string;
   cwd: string;
   updatedAt: number;
+  /** Codex 会话所在的可写 Home；Claude 或旧摘要不设置。 */
+  codexHome?: "agentdesk" | "default";
 }
 
 export interface CompactionRecord {
@@ -135,11 +137,13 @@ export interface ExternalTerminalSettings {
 }
 
 export interface ExternalTerminalOpenRequest {
+  provider?: AgentProvider;
   cwd: string;
   sessionId: string;
-  provider?: AgentProvider;
   resume?: boolean;
   initialPrompt?: string;
+  /** 仅 Codex 使用；旧请求默认 AgentDesk Home。 */
+  codexHome?: "agentdesk" | "default";
 }
 
 export interface CodexDefaults {

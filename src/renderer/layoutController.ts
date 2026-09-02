@@ -6,6 +6,7 @@ export interface SessionCreationOptions {
   title?: string;
   provider?: AgentProvider;
   historyLoading?: boolean;
+  codexHome?: "agentdesk" | "default";
 }
 
 export type TabDropPosition = "before" | "after";

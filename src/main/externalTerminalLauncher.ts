@@ -16,12 +16,16 @@ function powershellPromptExpression(value: string) {
   return `([Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('${encodedPrompt(value)}')))`;
 }
 
-function commandPromptHandoff(provider: AgentProvider, sessionId: string, initialPrompt: string, cliExecutable: string | undefined = provider, resume = false) {
+function powershellEnvironmentAssignment(provider: AgentProvider, codexHome?: string) {
+  return provider === "codex" && codexHome ? `$env:CODEX_HOME = '${codexHome.replaceAll("'", "''")}'; ` : "";
+}
+
+function commandPromptHandoff(provider: AgentProvider, sessionId: string, initialPrompt: string, cliExecutable: string | undefined = provider, resume = false, codexHome?: string) {
   const command = cliExecutable.includes(" ") ? `& '${cliExecutable.replaceAll("'", "''")}'` : `& ${cliExecutable}`;
   const sessionArgs = provider === "codex"
     ? (resume ? ` resume '${sessionId}'` : "")
     : ` ${resume ? "--resume" : "--session-id"} '${sessionId}'`;
-  const script = `${command}${sessionArgs}${initialPrompt ? ` ${powershellPromptExpression(initialPrompt)}` : ""}`;
+  const script = `${powershellEnvironmentAssignment(provider, codexHome)}${command}${sessionArgs}${initialPrompt ? ` ${powershellPromptExpression(initialPrompt)}` : ""}`;
   const encodedScript = Buffer.from(script, "utf16le").toString("base64");
   return ["/k", `powershell.exe -NoProfile -EncodedCommand ${encodedScript}`];
 }
@@ -29,11 +33,11 @@ function commandPromptHandoff(provider: AgentProvider, sessionId: string, initia
 export function expandExternalTerminalArgs(
   settings: ExternalTerminalSettings,
   executable: string,
-  values: { cwd: string; sessionId: string; provider?: AgentProvider; resume: boolean; initialPrompt: string; cliExecutable?: string },
+  values: { cwd: string; sessionId: string; resume: boolean; initialPrompt: string; provider?: AgentProvider; cliExecutable?: string; codexHome?: string },
 ) {
   const provider = values.provider || "claude";
   const commandPrompt = settings.kind === "command-prompt" || path.win32.basename(executable).toLowerCase() === "cmd.exe";
-  if (commandPrompt) return commandPromptHandoff(provider, values.sessionId, values.initialPrompt, values.cliExecutable, values.resume);
+  if (commandPrompt) return commandPromptHandoff(provider, values.sessionId, values.initialPrompt, values.cliExecutable, values.resume, values.codexHome);
   let template = settings.argsTemplate;
   if (provider === "codex") {
     template = template
@@ -71,6 +75,10 @@ export function expandExternalTerminalArgs(
     const escaped = values.cliExecutable!.replaceAll("'", "''");
     return commandPrompt ? `"${values.cliExecutable}"${suffix}` : `& '${escaped}'${suffix}`;
   }) : args;
+  if (provider === "codex" && values.codexHome) {
+    const commandIndex = explicitArgs.findIndex((value) => value.toLowerCase() === "-command");
+    if (commandIndex >= 0 && explicitArgs[commandIndex + 1]) explicitArgs[commandIndex + 1] = `${powershellEnvironmentAssignment(provider, values.codexHome)}${explicitArgs[commandIndex + 1]}`;
+  }
   if (provider !== "claude" || !values.resume) return explicitArgs;
   return explicitArgs.map((value) => value.includes("--session-id") ? value.replaceAll("--session-id", "--resume") : value);
 }

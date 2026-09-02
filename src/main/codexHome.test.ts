@@ -30,7 +30,7 @@ describe("Codex home links", () => {
     }
   });
 
-  it("backs up an existing private config before linking the global one", () => {
+  it("backs up an existing private config before linking the global one", (context) => {
     const parent = mkdtempSync(path.join(tmpdir(), "agentdesk-codex-home-existing-"));
     const globalHome = path.join(parent, "global");
     const isolatedHome = path.join(parent, "isolated");
@@ -40,6 +40,10 @@ describe("Codex home links", () => {
       writeFileSync(path.join(globalHome, "config.toml"), "global", { encoding: "utf8", flag: "wx" });
       writeFileSync(path.join(isolatedHome, "config.toml"), "private", { encoding: "utf8", flag: "wx" });
       const config = ensureCodexHomeLinks(globalHome, isolatedHome).find((result) => result.fileName === "config.toml");
+      if (config?.status === "error" && /EPERM|privilege|operation not permitted/i.test(config.error || "")) {
+        context.skip("当前 Windows 环境没有创建文件软链接的权限。");
+        return;
+      }
       assert.equal(config?.status, "created");
       assert.equal(config?.backupPath ? existsSync(config.backupPath) : false, true);
       assert.equal(readFileSync(path.join(isolatedHome, "config.toml"), "utf8"), "global");

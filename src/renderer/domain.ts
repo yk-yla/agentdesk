@@ -189,6 +189,8 @@ export interface SessionState {
   queryGeneration: number;
   capabilities: AgentCapabilities;
   threadId: string | null;
+  /** Codex 会话来源，用于从正确的 Home 启动外部 CLI。 */
+  codexHome?: "agentdesk" | "default";
   cwd: string;
   title: string;
   titleOrigin: "placeholder" | "fallback" | "provider" | "manual";
@@ -236,6 +238,7 @@ export interface HistoryThread {
   parentThreadId?: string;
   agentNickname?: string;
   agentRole?: string;
+  codexHome?: "agentdesk" | "default";
   searchSnippet?: string;
 }
 
@@ -360,7 +363,7 @@ export function sameDirectory(left: string, right: string) {
 }
 
 /** 预算好目录键和小写标题，避免侧栏每次渲染都重跑正则和 toLowerCase。 */
-export function historyThread(input: { id: string; provider?: AgentProvider; title: string; cwd: string; updatedAt: number; source: string; isPinned?: boolean; isFavorite?: boolean; parentThreadId?: string; agentNickname?: string; agentRole?: string }): HistoryThread {
+export function historyThread(input: { id: string; provider?: AgentProvider; title: string; cwd: string; updatedAt: number; source: string; isPinned?: boolean; isFavorite?: boolean; parentThreadId?: string; agentNickname?: string; agentRole?: string; codexHome?: "agentdesk" | "default" }): HistoryThread {
   return { ...input, provider: input.provider || "codex", isPinned: input.isPinned === true, isFavorite: input.isFavorite === true, cwdKey: normalizedDirectory(input.cwd), titleLower: input.title.toLowerCase() };
 }
 
@@ -369,17 +372,19 @@ export function threadFromList(value: unknown): HistoryThread[] {
   const data = Array.isArray(result.data) ? result.data : [];
   return data.map((entry) => {
     const thread = asRecord(entry);
+    const provider = thread.provider === "claude" ? "claude" : "codex";
     return historyThread({
       id: stringValue(thread.id),
       title: stringValue(thread.name, stringValue(thread.preview, "无标题会话")),
       cwd: stringValue(thread.cwd),
       updatedAt: numberValue(thread.updatedAt) * 1000,
       source: stringValue(asRecord(thread.source).kind, stringValue(thread.source, "Codex")),
-      provider: thread.provider === "claude" ? "claude" : "codex",
+      provider,
       isPinned: thread.isPinned === true,
       parentThreadId: stringValue(thread.parentThreadId) || undefined,
       agentNickname: stringValue(thread.agentNickname) || undefined,
       agentRole: stringValue(thread.agentRole) || undefined,
+      codexHome: provider === "codex" && (thread.codexHome === "default" || thread.codexHome === "agentdesk") ? thread.codexHome : undefined,
     });
   }).filter((entry) => entry.id);
 }
@@ -397,7 +402,7 @@ export function threadFromSearch(value: unknown): HistoryThread[] {
 }
 
 /** 发送消息后就地更新历史，替代原来的全量重取。 */
-export function upsertHistoryEntry(history: HistoryThread[], entry: { id: string; provider?: AgentProvider; title: string; cwd: string }): HistoryThread[] {
+export function upsertHistoryEntry(history: HistoryThread[], entry: { id: string; provider?: AgentProvider; title: string; cwd: string; codexHome?: "agentdesk" | "default" }): HistoryThread[] {
   const provider = entry.provider || "codex";
   const existing = history.find((item) => item.provider === provider && item.id === entry.id);
   const next = historyThread({
@@ -409,6 +414,7 @@ export function upsertHistoryEntry(history: HistoryThread[], entry: { id: string
     source: existing?.source || "appServer",
     isPinned: existing?.isPinned || false,
     isFavorite: existing?.isFavorite || false,
+    codexHome: entry.codexHome || existing?.codexHome,
   });
   return [next, ...history.filter((item) => item.provider !== provider || item.id !== entry.id)];
 }

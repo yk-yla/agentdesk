@@ -42,7 +42,7 @@ describe("local path policy", () => {
     assert.equal(isExecutableLocalPath("C:\\work\\notes.md"), false);
   });
 
-  it("resolves explicitly pasted files and rejects links or non-files", () => {
+  it("resolves explicitly pasted files and rejects links or non-files", (context) => {
     const parent = mkdtempSync(path.join(tmpdir(), "agentdesk-pasted-file-"));
     try {
       const document = path.join(parent, "需求说明.docx");
@@ -50,7 +50,15 @@ describe("local path policy", () => {
       const linked = path.join(parent, "linked.docx");
       writeFileSync(document, "fixture");
       mkdirSync(directory);
-      symlinkSync(document, linked, "file");
+      try {
+        symlinkSync(document, linked, "file");
+      } catch (error) {
+        if (process.platform === "win32" && /EPERM|privilege|operation not permitted/i.test(error instanceof Error ? error.message : String(error))) {
+          context.skip("当前 Windows 环境没有创建文件软链接的权限。");
+          return;
+        }
+        throw error;
+      }
 
       assert.equal(resolvePastedFilePath(document), document);
       assert.throws(() => resolvePastedFilePath(directory), /普通文件/);

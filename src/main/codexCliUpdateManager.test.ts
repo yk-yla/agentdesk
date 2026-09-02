@@ -159,6 +159,43 @@ describe("CodexCliUpdateManager", () => {
     }
   });
 
+  it("does not block on pending work inside an AgentDesk app-server", async () => {
+    const directory = mkdtempSync(path.join(tmpdir(), "agentdesk-codex-internal-busy-"));
+    let installed = "1.0.0";
+    let closes = 0;
+    try {
+      const appServer = {
+        isRunning: true,
+        isBusy: true,
+        close: async () => { closes += 1; },
+        ensureStarted: async () => undefined,
+      };
+      const manager = new CodexCliUpdateManager({
+        processSupervisor: new ProcessSupervisor(async () => undefined),
+        appServer,
+        userDataPath: () => directory,
+        isQuitting: () => false,
+        emitStatus: () => undefined,
+        notify: () => undefined,
+        // This callback represents only external/user-owned CLI processes.
+        isCliInUse: async () => false,
+        environment: {},
+        operations: {
+          readInstalledVersion: async () => installed,
+          readLatestVersion: async () => "1.1.0",
+          installVersion: async (version) => { installed = version; },
+        },
+      });
+
+      await manager.check(true);
+      assert.equal((await manager.update()).phase, "upToDate");
+      assert.equal(closes, 1);
+      manager.dispose();
+    } finally {
+      rmSync(directory, { recursive: true, force: true });
+    }
+  });
+
   it("never terminates an external app-server", async () => {
     const directory = mkdtempSync(path.join(tmpdir(), "agentdesk-codex-terminate-failure-"));
     let installCount = 0;

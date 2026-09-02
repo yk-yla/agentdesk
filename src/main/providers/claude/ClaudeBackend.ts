@@ -12,7 +12,7 @@ import type { AgentBackend } from "../../agent/AgentBackend";
 import type { AgentCapabilities, AgentEventEnvelope, AgentOperation, AgentRequestContext, InteractionRef } from "../../../shared/agentProtocol";
 import type { JsonObject } from "../../../shared/protocol";
 import { canonicalWorkspace } from "../../localPathPolicy";
-import { searchSnippet, sessionSearchText } from "./claudeHistorySearch";
+import { searchClaudeHistorySessions } from "./claudeHistorySearch";
 
 const CAPABILITIES: AgentCapabilities = {
   models: "unsupported", effort: "unsupported", images: "unsupported", history: "supported",
@@ -26,6 +26,80 @@ const CAPABILITIES: AgentCapabilities = {
 // page size bounded for responsiveness, but never cap the total history.
 export const DEFAULT_CLAUDE_HISTORY_PAGE_SIZE = 200;
 const MAX_CLAUDE_HISTORY_PAGE_SIZE = 500;
+const MAX_CACHED_HISTORY_MESSAGES = 5_000;
+const MAX_CACHED_HISTORY_SESSIONS = 4;
+const CLAUDE_HISTORY_CACHE_TTL_MS = 60_000;
+const CLAUDE_SEARCH_PAGE_SIZE = 500;
+const MAX_CLAUDE_SEARCH_SESSIONS = 2_000;
+const CLAUDE_SEARCH_CONCURRENCY = 4;
+
+interface ClaudeHistoryCacheEntry {
+  messages: unknown[];
+  expiresAt: number;
+}
+
+export class ClaudeHistoryMessageCache {
+  private readonly entries = new Map<string, ClaudeHistoryCacheEntry>();
+  private readonly loads = new Map<string, Promise<unknown[]>>();
+  private generation = 0;
+
+  constructor(
+    private readonly maxEntries = MAX_CACHED_HISTORY_SESSIONS,
+    private readonly maxMessages = MAX_CACHED_HISTORY_MESSAGES,
+    private readonly ttlMs = CLAUDE_HISTORY_CACHE_TTL_MS,
+    private readonly now: () => number = Date.now,
+  ) {}
+
+  get(key: string, loader: () => Promise<unknown[]>): Promise<unknown[]> {
+    const cached = this.entries.get(key);
+    if (cached && cached.expiresAt > this.now()) {
+      this.entries.delete(key);
+      this.entries.set(key, cached);
+      return Promise.resolve(cached.messages);
+    }
+    if (cached) this.entries.delete(key);
+    const pending = this.loads.get(key);
+    if (pending) return pending;
+    const generation = this.generation;
+    const load = loader().then((messages) => {
+      if (generation === this.generation && messages.length <= this.maxMessages) {
+        this.entries.set(key, { messages, expiresAt: this.now() + this.ttlMs });
+        while (this.entries.size > this.maxEntries) {
+          const oldest = this.entries.keys().next().value as string | undefined;
+          if (oldest === undefined) break;
+          this.entries.delete(oldest);
+        }
+      }
+      return messages;
+    }).finally(() => {
+      if (this.loads.get(key) === load) this.loads.delete(key);
+    });
+    this.loads.set(key, load);
+    return load;
+  }
+
+  invalidate(key: string) {
+    this.generation += 1;
+    this.entries.delete(key);
+    this.loads.delete(key);
+  }
+
+  invalidatePrefix(prefix: string) {
+    this.generation += 1;
+    for (const key of this.entries.keys()) {
+      if (key === prefix || key.startsWith(`${prefix}\u0000`)) this.entries.delete(key);
+    }
+    for (const key of this.loads.keys()) {
+      if (key === prefix || key.startsWith(`${prefix}\u0000`)) this.loads.delete(key);
+    }
+  }
+
+  clear() {
+    this.generation += 1;
+    this.entries.clear();
+    this.loads.clear();
+  }
+}
 
 export interface ClaudeHistoryPage<T> {
   messages: T[];
@@ -89,6 +163,7 @@ export class ClaudeBackend implements AgentBackend {
   private readonly listeners = new Set<(event: AgentEventEnvelope) => void>();
   private readonly sessions = new Map<string, ClaudeSession>();
   private readonly knownNativeSessions = new Set<string>();
+  private readonly historyCache = new ClaudeHistoryMessageCache();
 
   async request(operation: AgentOperation, params: JsonObject, context: AgentRequestContext) {
     if (operation === "getCapabilities") return this.getCapabilities();
@@ -120,15 +195,20 @@ export class ClaudeBackend implements AgentBackend {
 
   async closeSession(context: AgentRequestContext) {
     const session = this.sessionFor(context);
-    if (session) this.sessions.delete(session.clientSessionId);
+    if (session) {
+      this.sessions.delete(session.clientSessionId);
+      this.invalidateHistory(session.cwd, session.nativeSessionId);
+    }
   }
 
   async close() {
     this.sessions.clear();
+    this.historyCache.clear();
   }
 
   async shutdown() {
     this.sessions.clear();
+    this.historyCache.clear();
   }
 
   private startSession(params: JsonObject, context: AgentRequestContext) {
@@ -181,28 +261,25 @@ export class ClaudeBackend implements AgentBackend {
     const limit = Math.min(Math.max(Number(params.limit) || 100, 1), 100);
     const allSessions: SDKSessionInfo[] = [];
     let searchOffset = 0;
-    const PAGE_SIZE = 500;
-    while (true) {
-      const page = await listSessions({ ...(cwd ? { dir: cwd } : {}), limit: PAGE_SIZE, offset: searchOffset, includeWorktrees: false });
+    while (allSessions.length < MAX_CLAUDE_SEARCH_SESSIONS) {
+      const pageLimit = Math.min(CLAUDE_SEARCH_PAGE_SIZE, MAX_CLAUDE_SEARCH_SESSIONS - allSessions.length);
+      const page = await listSessions({ ...(cwd ? { dir: cwd } : {}), limit: pageLimit, offset: searchOffset, includeWorktrees: false });
       const items = Array.isArray(page) ? page : [];
       allSessions.push(...items);
-      if (items.length < PAGE_SIZE) break;
-      searchOffset += PAGE_SIZE;
+      if (items.length < pageLimit) break;
+      searchOffset += pageLimit;
     }
-    const sessions = allSessions;
-    const results: Array<{ session: SDKSessionInfo; snippet: string }> = [];
-    const needle = searchTerm.toLowerCase();
-    for (const session of sessions) {
-      if (results.length >= limit) break;
-      const text = await sessionSearchText(
-        { sessionId: session.sessionId, customTitle: session.customTitle, summary: session.summary, firstPrompt: session.firstPrompt },
-        cwd,
-        (sessionId, options) => getSessionMessages(sessionId, options),
-      );
-      if (text.toLowerCase().includes(needle)) {
-        results.push({ session, snippet: searchSnippet(text, searchTerm) });
-      }
-    }
+    const results = await searchClaudeHistorySessions(
+      allSessions,
+      cwd,
+      searchTerm,
+      limit,
+      (sessionId, options) => this.historyCache.get(this.historyKey(options.dir || "", sessionId, options), async () => {
+        const messages = await getSessionMessages(sessionId, options);
+        return Array.isArray(messages) ? messages : [];
+      }),
+      CLAUDE_SEARCH_CONCURRENCY,
+    );
     const data = results.map((entry) => ({ ...sessionSummary(entry.session), snippet: entry.snippet }));
     this.rememberHistoryEntries(data, cwd || "");
     return { data, nextCursor: null };
@@ -211,8 +288,13 @@ export class ClaudeBackend implements AgentBackend {
   private async readSession(params: JsonObject, context: AgentRequestContext) {
     const { cwd, nativeSessionId } = this.sessionIdentity(params, context);
     await this.assertKnownNativeSession(cwd, nativeSessionId);
-    const info = await getSessionInfo(nativeSessionId, { dir: cwd });
-    const allMessages = await getSessionMessages(nativeSessionId, { dir: cwd });
+    const [info, allMessages] = await Promise.all([
+      getSessionInfo(nativeSessionId, { dir: cwd }),
+      this.historyCache.get(this.historyKey(cwd, nativeSessionId), async () => {
+        const messages = await getSessionMessages(nativeSessionId, { dir: cwd });
+        return Array.isArray(messages) ? messages : [];
+      }),
+    ]);
     const page = paginateClaudeHistoryMessages(
       Array.isArray(allMessages) ? allMessages : [],
       typeof params.messageOffset === "number" ? params.messageOffset : undefined,
@@ -263,6 +345,7 @@ export class ClaudeBackend implements AgentBackend {
     const { cwd, nativeSessionId } = this.sessionIdentity(params, context);
     await this.assertKnownNativeSession(cwd, nativeSessionId);
     await deleteSession(nativeSessionId, { dir: cwd });
+    this.invalidateHistory(cwd, nativeSessionId);
     return { ok: true };
   }
 
@@ -283,6 +366,15 @@ export class ClaudeBackend implements AgentBackend {
 
   private rememberNativeSession(cwd: string, nativeSessionId: string) {
     this.knownNativeSessions.add(`${cwd} ${nativeSessionId}`);
+  }
+
+  private historyKey(cwd: string, nativeSessionId: string, options?: { limit: number; offset: number }) {
+    const base = `${cwd}\u0000${nativeSessionId}`;
+    return options ? `${base}\u0000${options.offset}\u0000${options.limit}` : base;
+  }
+
+  private invalidateHistory(cwd: string, nativeSessionId: string) {
+    this.historyCache.invalidatePrefix(this.historyKey(cwd, nativeSessionId));
   }
 
   private rememberHistoryEntries(data: unknown[], fallbackCwd: string) {

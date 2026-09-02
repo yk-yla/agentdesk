@@ -3,7 +3,7 @@ import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { describe, it } from "node:test";
-import { detectCliRuntime, hasCliProcess } from "./cliRuntime";
+import { belongsToProcessTree, detectCliRuntime, hasCliProcess } from "./cliRuntime";
 
 describe("CLI runtime snapshot", () => {
   it("uses the command selected by PATH and records its install source once", () => {
@@ -27,6 +27,16 @@ describe("CLI runtime snapshot", () => {
     assert.equal(hasCliProcess([{ pid: 1, parentPid: 0, name: "codex.exe", commandLine: '"C:\\Tools\\codex.exe" app-server' }], "codex"), true);
     assert.equal(hasCliProcess([{ pid: 2, parentPid: 0, name: "claude.exe", commandLine: '"C:\\Tools\\claude.exe"' }], "claude"), true);
     assert.equal(hasCliProcess([{ pid: 3, parentPid: 0, name: "node.exe", commandLine: "build-codex-report.js" }], "codex"), false);
+  });
+
+  it("requires an explicit AgentDesk process root for ownership", () => {
+    const entries = [
+      { pid: 10, parentPid: 1, name: "codex.exe", commandLine: "codex app-server" },
+      { pid: 11, parentPid: 10, name: "node.exe", commandLine: "codex app-server child" },
+      { pid: 12, parentPid: 1, name: "codex.exe", commandLine: "codex app-server" },
+    ];
+    assert.equal(belongsToProcessTree(11, entries, new Set([10])), true);
+    assert.equal(belongsToProcessTree(12, entries, new Set([99])), false);
   });
 
   it("classifies npm, winget, and explicit custom paths", () => {

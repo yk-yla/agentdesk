@@ -25,7 +25,7 @@ import PaneView from "./PaneView";
 import { appendRawEvent, clearRawEvents } from "./rawEventStore";
 import Sidebar, { type HistoryAction, type SidebarProps } from "./Sidebar";
 import { handoffMarkdown, sessionMarkdown } from "./sessionTools";
-import { authorizeRestoredSessionWorkspaces, createWorkspaceState, loadSavedImages, parseWorkspaceState, workspaceStateFingerprint } from "./workspaceState";
+import { authorizeRestoredSessionWorkspaces, createWorkspaceState, loadSavedImages, MAX_RESTORE_IMAGE_BYTES, MAX_RESTORE_IMAGE_COUNT, parseWorkspaceState, workspaceStateFingerprint } from "./workspaceState";
 import { SessionSettingsCoordinator, type SessionSettings } from "./sessionSettingsCoordinator";
 import { recoverProviderSessions } from "./providerRecovery";
 import { SessionLifecycleController } from "./sessionLifecycleController";
@@ -473,7 +473,7 @@ export default function App() {
   }, [requestForSession]);
 
   // Claude is displayed read-only in AgentDesk; interaction happens in the configured external terminal.
-  const createSessionState = useCallback((cwd: string, options?: { threadId?: string; title?: string; provider?: AgentProvider; historyLoading?: boolean }) => {
+  const createSessionState = useCallback((cwd: string, options?: { threadId?: string; title?: string; provider?: AgentProvider; historyLoading?: boolean; codexHome?: "agentdesk" | "default" }) => {
     const id = `session-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
     const provider = options?.provider || "codex";
     const defaults = newSessionDefaults(provider, providerModelsRef.current[provider], defaultsRef.current, providerCapabilitiesRef.current[provider], preferencesRef.current.lastReasoningEfforts?.[provider]);
@@ -482,6 +482,7 @@ export default function App() {
     session.historyLoading = options?.historyLoading === true;
     session.tokenUsage.total = cachedModelContextWindow(preferencesRef.current, session.model);
     session.threadId = options?.threadId ?? null;
+    if (provider === "codex" && options?.codexHome) session.codexHome = options.codexHome;
     if (provider === "claude") session.readOnly = true;
     session.title = options?.title || "新会话";
     session.titleOrigin = options?.title ? "provider" : "placeholder";
@@ -1379,9 +1380,15 @@ export default function App() {
   const sessionMessages = sessionMessageRef.current;
   const { runMessage, sendMessage, removeQueuedMessage, interrupt } = sessionMessages;
 
+  const queueDrainKey = useMemo(() => Object.entries(sessions)
+    .filter(([sessionId, session]) => session.status === "idle" && !session.readOnly && Boolean(queuedMessages[sessionId]?.length))
+    .map(([sessionId]) => sessionId)
+    .sort()
+    .join("\n"), [queuedMessages, sessions]);
+
   useEffect(() => {
-    void sessionMessages.drainQueues(Object.keys(queuedMessages));
-  }, [queuedMessages, sessionMessages, sessions]);
+    void sessionMessages.drainQueues(queueDrainKey ? queueDrainKey.split("\n") : []);
+  }, [queueDrainKey, sessionMessages]);
 
   const respondToApproval = useCallback(async (sessionId: string, result: JsonObject) => {
     const approval = sessionsRef.current[sessionId]?.pendingApprovals[0];
@@ -1437,7 +1444,7 @@ export default function App() {
       const goal = goalFromAgentValue(session.provider, response.goal);
       if (!goal) throw new Error("服务端没有返回目标信息");
       updateSession(sessionId, (current) => ({ ...current, goal }));
-      setHistory((current) => upsertHistoryEntry(current, { id: threadId, provider: session.provider, title: session.title, cwd: session.cwd }));
+      setHistory((current) => upsertHistoryEntry(current, { id: threadId, provider: session.provider, title: session.title, cwd: session.cwd, ...(session.provider === "codex" && session.codexHome ? { codexHome: session.codexHome } : {}) }));
     } catch (error) {
       setError(sessionId, error, "开始目标失败");
     }
@@ -1573,7 +1580,7 @@ export default function App() {
       if (!threadId) throw new Error("没有拿到分支会话 ID");
       const title = `${session.title} 分支`;
       const cwd = stringValue(result.cwd, stringValue(thread.cwd, session.cwd));
-      const forkedSessionId = addSession(cwd, { threadId, title, provider: session.provider });
+      const forkedSessionId = addSession(cwd, { threadId, title, provider: session.provider, ...(session.provider === "codex" && session.codexHome ? { codexHome: session.codexHome } : {}) });
       providerEventRef.current?.bindSession(session.provider, threadId, forkedSessionId);
       updateSession(forkedSessionId, (current) => ({
         ...hydrateAgentSession(current, session.provider, { ...thread, name: title }),
@@ -1585,7 +1592,7 @@ export default function App() {
         tokenUsage: tokenUsageForModel(current, stringValue(result.model) || session.model, preferencesRef.current),
       }));
       persistCompactionSnapshot(forkedSessionId);
-      setHistory((current) => upsertHistoryEntry(current, { id: threadId, provider: session.provider, title, cwd }));
+      setHistory((current) => upsertHistoryEntry(current, { id: threadId, provider: session.provider, title, cwd, ...(session.provider === "codex" && session.codexHome ? { codexHome: session.codexHome } : {}) }));
       void requestForSession(forkedSessionId, "renameSession", { threadId, name: title }).catch((error) => setError(forkedSessionId, error, "分支重命名失败"));
     } catch (error) {
       setError(sessionId, error, "创建分支失败");
@@ -1764,7 +1771,7 @@ export default function App() {
       && !(attachmentsRef.current[placeholder.id] || []).length
       && !draftsRef.current.get(placeholder.id),
     );
-    const sessionId = existing?.id ?? (canReusePlaceholder && placeholder ? placeholder.id : addSession(registeredCwd, { threadId: entry.id, title: entry.title, provider: entry.provider, historyLoading: true }));
+    const sessionId = existing?.id ?? (canReusePlaceholder && placeholder ? placeholder.id : addSession(registeredCwd, { threadId: entry.id, title: entry.title, provider: entry.provider, historyLoading: true, ...(entry.provider === "codex" ? { codexHome: entry.codexHome || "agentdesk" } : {}) }));
     if (!existing && canReusePlaceholder) {
       updateSession(sessionId, (current) => {
         const next = retargetEmptySession(
@@ -1777,12 +1784,13 @@ export default function App() {
           defaultsRef.current,
           providerCapabilitiesRef.current[entry.provider],
         );
+        if (entry.provider === "codex") next.codexHome = entry.codexHome || "agentdesk";
         next.historyLoading = true;
         next.tokenUsage.total = cachedModelContextWindow(preferencesRef.current, next.model);
         return withPersistedCompaction(next, preferencesRef.current);
       });
     } else if (existing) {
-      updateSession(sessionId, (current) => ({ ...current, cwd: registeredCwd, errorText: "" }));
+      updateSession(sessionId, (current) => ({ ...current, cwd: registeredCwd, ...(entry.provider === "codex" ? { codexHome: entry.codexHome || "agentdesk" } : {}), errorText: "" }));
     }
     providerEventRef.current?.bindSession(entry.provider, entry.id, sessionId);
 
@@ -1932,7 +1940,7 @@ export default function App() {
     try {
       const hasExistingClaudeHistory = session.messages.length > 0
         || (session.titleOrigin === "provider" && session.title !== "新 Claude 会话");
-      await bridge.openExternalTerminal({ cwd: session.cwd, sessionId: session.threadId, resume: hasExistingClaudeHistory });
+      await bridge.openExternalTerminal({ provider: "claude", cwd: session.cwd, sessionId: session.threadId, resume: hasExistingClaudeHistory });
       updateSession(sessionId, (current) => ({
         ...current,
         statusLabel: "已打开外部终端",
@@ -1970,7 +1978,13 @@ export default function App() {
       const provider: AgentProvider = entry.provider === "claude" ? "claude" : "codex";
       try {
         const cwd = await registerHistoricalWorkspace((directory) => bridge.registerWorkspace(directory), entry.cwd);
-        await bridge.openExternalTerminal({ provider, cwd, sessionId: entry.id, resume: true });
+        await bridge.openExternalTerminal({
+          provider,
+          cwd,
+          sessionId: entry.id,
+          resume: true,
+          ...(provider === "codex" ? { codexHome: entry.codexHome || "agentdesk" } : {}),
+        });
         // Claude is read-only in AgentDesk, so keep the matching history tab
         // visible after launching its terminal. Codex remains owned by the
         // external CLI to avoid competing writers for the same rollout.
@@ -2073,7 +2087,7 @@ export default function App() {
         if (!threadId) throw new Error("没有拿到分支会话 ID");
         const title = `${source.title || entry.title} 分支`;
         const forkCwd = stringValue(result.cwd, stringValue(thread.cwd, cwd));
-        const forkedSessionId = addSession(forkCwd, { threadId, title, provider: entry.provider });
+        const forkedSessionId = addSession(forkCwd, { threadId, title, provider: entry.provider, ...(entry.provider === "codex" ? { codexHome: entry.codexHome || "agentdesk" } : {}) });
         providerEventRef.current?.bindSession(entry.provider, threadId, forkedSessionId);
         updateSession(forkedSessionId, (current) => ({
           ...hydrateAgentSession(current, entry.provider, { ...thread, name: title }),
@@ -2085,7 +2099,7 @@ export default function App() {
           tokenUsage: tokenUsageForModel(current, stringValue(result.model) || source.model, preferencesRef.current),
         }));
         persistCompactionSnapshot(forkedSessionId);
-        setHistory((current) => upsertHistoryEntry(current, { id: threadId, provider: entry.provider, title, cwd: forkCwd }));
+        setHistory((current) => upsertHistoryEntry(current, { id: threadId, provider: entry.provider, title, cwd: forkCwd, ...(entry.provider === "codex" ? { codexHome: entry.codexHome || "agentdesk" } : {}) }));
         void requestForSession(forkedSessionId, "renameSession", { threadId, name: title }).catch((error) => setError(forkedSessionId, error, "分支重命名失败"));
       } else if (action === "delete") {
         const providerTitle = providerDisplayName(entry.provider);
@@ -2374,14 +2388,15 @@ export default function App() {
       if (restored.drafts.size) setDraftRevisions(Object.fromEntries([...restored.drafts.keys()].map((sessionId) => [sessionId, 1])));
       workspaceRestoreInProgressRef.current = true;
       try {
+        const imageBudget = { remainingImages: MAX_RESTORE_IMAGE_COUNT, remainingBytes: MAX_RESTORE_IMAGE_BYTES };
         const nextAttachments: Record<string, ImageAttachment[]> = {};
         for (const [sessionId, images] of Object.entries(restored.attachments)) {
-          const loaded = await loadSavedImages(bridge, images);
+          const loaded = await loadSavedImages(bridge, images, imageBudget);
           if (loaded.length) nextAttachments[sessionId] = loaded;
         }
         const nextQueuedMessages: Record<string, QueuedMessage[]> = {};
         for (const [sessionId, messages] of Object.entries(restored.queuedMessages)) {
-          const loaded = await Promise.all(messages.map(async (message) => ({ ...message, images: await loadSavedImages(bridge, message.images) })));
+          const loaded = await Promise.all(messages.map(async (message) => ({ ...message, images: await loadSavedImages(bridge, message.images, imageBudget) })));
           const valid = loaded.filter((message) => message.text || message.images.length);
           if (valid.length) nextQueuedMessages[sessionId] = valid;
         }

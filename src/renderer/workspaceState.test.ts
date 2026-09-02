@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 import { asRecord, emptySession } from "./domain";
-import { authorizeRestoredSessionWorkspaces, createWorkspaceState, parseWorkspaceState, workspaceStateFingerprint } from "./workspaceState";
+import { authorizeRestoredSessionWorkspaces, createWorkspaceState, loadSavedImages, MAX_RESTORE_IMAGE_BYTES, parseWorkspaceState, workspaceStateFingerprint } from "./workspaceState";
 
 describe("update workspace state budgets", () => {
   it("keeps authorized restored sessions and marks only denied workspaces", async () => {
@@ -27,6 +27,7 @@ describe("update workspace state budgets", () => {
     const codex = emptySession("codex-session", "C:\\work", "gpt", "medium", "codex");
     const claude = emptySession("claude-session", "C:\\work", "sonnet", "high", "claude");
     codex.threadId = "codex-thread";
+    codex.codexHome = "default";
     claude.threadId = "claude-thread";
     const state = createWorkspaceState({
       workspace: "C:\\work",
@@ -41,6 +42,7 @@ describe("update workspace state budgets", () => {
 
     const restored = parseWorkspaceState(state, "C:\\work");
     assert.equal(restored?.sessions[codex.id]?.provider, "codex");
+    assert.equal(restored?.sessions[codex.id]?.codexHome, "default");
     assert.equal(restored?.sessions[claude.id]?.provider, "claude");
     assert.equal(restored?.sessions[codex.id]?.historyLoading, true);
     assert.equal(restored?.sessions[claude.id]?.historyLoading, true);
@@ -348,5 +350,44 @@ describe("update workspace state budgets", () => {
     } finally {
       Date.now = originalNow;
     }
+  });
+
+  it("restores images with bounded concurrency and byte budget", async () => {
+    let active = 0;
+    let peak = 0;
+    const bridge = {
+      readLocalImage: async (filePath: string) => {
+        active += 1;
+        peak = Math.max(peak, active);
+        await new Promise((resolve) => setTimeout(resolve, 1));
+        active -= 1;
+        return `data:image/png;base64,${Buffer.from(filePath).toString("base64")}`;
+      },
+    } as never;
+    const images = Array.from({ length: 12 }, (_, index) => ({ path: `image-${index}`, name: `image-${index}` }));
+    const budget = { remainingImages: 5, remainingBytes: MAX_RESTORE_IMAGE_BYTES };
+    const restored = await loadSavedImages(bridge, images, budget);
+    assert.ok(peak <= 4);
+    assert.equal(restored.length, 5);
+    assert.equal(restored[0].path, "image-0");
+    assert.equal(budget.remainingImages, 0);
+  });
+
+  it("shares the image restore concurrency limit across concurrent collections", async () => {
+    let active = 0;
+    let peak = 0;
+    const bridge = {
+      readLocalImage: async (filePath: string) => {
+        active += 1;
+        peak = Math.max(peak, active);
+        await new Promise((resolve) => setTimeout(resolve, 1));
+        active -= 1;
+        return `data:image/png;base64,${Buffer.from(filePath).toString("base64")}`;
+      },
+    } as never;
+    const images = (prefix: string) => Array.from({ length: 8 }, (_, index) => ({ path: `${prefix}-${index}`, name: `${prefix}-${index}` }));
+    const budget = { remainingImages: 16, remainingBytes: MAX_RESTORE_IMAGE_BYTES };
+    await Promise.all([loadSavedImages(bridge, images("left"), budget), loadSavedImages(bridge, images("right"), budget)]);
+    assert.ok(peak <= 4);
   });
 });

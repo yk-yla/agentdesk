@@ -63,6 +63,20 @@ export interface CliProcessEntry {
   commandLine: string;
 }
 
+/** Returns whether a process is a registered root or a descendant of one. */
+export function belongsToProcessTree(pid: number, entries: CliProcessEntry[], roots: ReadonlySet<number> | readonly number[]) {
+  const rootSet = roots instanceof Set ? roots : new Set(roots);
+  const byPid = new Map(entries.map((entry) => [entry.pid, entry]));
+  const visited = new Set<number>();
+  let current = pid;
+  while (current > 0 && !visited.has(current)) {
+    if (rootSet.has(current)) return true;
+    visited.add(current);
+    current = byPid.get(current)?.parentPid || 0;
+  }
+  return false;
+}
+
 export function isCliProcess(entry: CliProcessEntry, provider: CliProvider) {
   const command = entry.commandLine.toLowerCase();
   const name = entry.name.toLowerCase();

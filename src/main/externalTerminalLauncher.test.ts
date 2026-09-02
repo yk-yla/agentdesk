@@ -76,6 +76,25 @@ describe("external terminal launcher", () => {
     assert.equal(Buffer.from(promptMatch[1], "base64").toString("utf8"), "请继续任务。");
   });
 
+  it("switches Claude presets to Codex resume syntax", () => {
+    const args = expandExternalTerminalArgs({
+      kind: "windows-terminal",
+      executable: "wt.exe",
+      argsTemplate: '-d "{cwd}" powershell.exe -NoExit -Command "claude --session-id {sessionId}"',
+    }, "C:\\Apps\\wt.exe", {
+      cwd: "C:\\work",
+      sessionId: "12345678-1234-4234-8234-123456789abc",
+      provider: "codex",
+      resume: true,
+      initialPrompt: "",
+      cliExecutable: "C:\\Tools\\codex.cmd",
+      codexHome: "C:\\Users\\test\\.codex",
+    });
+
+    assert.deepEqual(args.slice(0, -1), ["-d", "C:\\work", "powershell.exe", "-NoExit", "-Command"]);
+    assert.match(args.at(-1) || "", /^\$env:CODEX_HOME = 'C:\\Users\\test\\.codex'; & 'C:\\Tools\\codex\.cmd' resume 12345678-1234-4234-8234-123456789abc$/);
+  });
+
   it("uses Codex resume syntax in command prompt", () => {
     const args = expandExternalTerminalArgs({
       kind: "command-prompt",
@@ -88,10 +107,12 @@ describe("external terminal launcher", () => {
       resume: true,
       initialPrompt: "",
       cliExecutable: "C:\\Program Files\\OpenAI\\Codex\\codex.exe",
+      codexHome: "C:\\Users\\test\\.codex",
     });
 
     const encodedCommand = args[1].split(" ").at(-1)!;
     const command = Buffer.from(encodedCommand, "base64").toString("utf16le");
+    assert.match(command, /\$env:CODEX_HOME = 'C:\\Users\\test\\\.codex';/);
     assert.match(command, /& 'C:\\Program Files\\OpenAI\\Codex\\codex\.exe' resume '12345678-1234-4234-8234-123456789abc'/);
   });
 

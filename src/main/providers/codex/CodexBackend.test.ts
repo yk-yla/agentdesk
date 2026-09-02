@@ -175,6 +175,28 @@ describe("CodexBackend", () => {
     assert.equal(receivedParams?.cursor, undefined);
   });
 
+  it("marks merged history with the Codex Home that owns each thread", async () => {
+    const primary = runtime({ request: async () => ({ data: [{ id: "primary-thread", cwd: "D:\\work", updatedAt: 1 }] }) });
+    const legacy = runtime({ request: async () => ({ data: [{ id: "legacy-thread", cwd: "D:\\work", updatedAt: 2 }] }) });
+    const backend = new CodexBackend(primary, undefined, legacy);
+
+    const result = await backend.request("listSessions", { allWorkspaces: true, limit: 10 }, {}) as { data: Array<Record<string, unknown>> };
+    const byId = new Map(result.data.map((entry) => [entry.id, entry]));
+    assert.equal(byId.get("primary-thread")?.codexHome, "agentdesk");
+    assert.equal(byId.get("legacy-thread")?.codexHome, "default");
+  });
+
+  it("marks nested search results with the Codex Home that owns each thread", async () => {
+    const primary = runtime({ request: async () => ({ data: [{ thread: { id: "primary-thread", cwd: "D:\\work", updatedAt: 1 }, snippet: "primary" }] }) });
+    const legacy = runtime({ request: async () => ({ data: [{ thread: { id: "legacy-thread", cwd: "D:\\work", updatedAt: 2 }, snippet: "legacy" }] }) });
+    const backend = new CodexBackend(primary, undefined, legacy);
+
+    const result = await backend.request("searchSessions", { allWorkspaces: true, limit: 10, searchTerm: "thread" }, {}) as { data: Array<Record<string, unknown>> };
+    const byId = new Map(result.data.map((entry) => [String((entry.thread as Record<string, unknown>).id), entry]));
+    assert.equal((byId.get("primary-thread")?.thread as Record<string, unknown>).codexHome, "agentdesk");
+    assert.equal((byId.get("legacy-thread")?.thread as Record<string, unknown>).codexHome, "default");
+  });
+
   it("routes legacy history reads to the default Codex home even with a client session context", async () => {
     const calls: string[] = [];
     const primary = runtime({

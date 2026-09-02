@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
-import { searchSnippet, sessionSearchText, visibleSessionText } from "./claudeHistorySearch";
+import { searchClaudeHistorySessions, searchSnippet, sessionSearchText, visibleSessionText } from "./claudeHistorySearch";
 
 describe("Claude history full-text search", () => {
   it("extracts visible user and assistant text without unrelated tool fields", () => {
@@ -41,5 +41,26 @@ describe("Claude history full-text search", () => {
       return [];
     });
     assert.equal(options?.dir, undefined);
+  });
+
+  it("searches sessions with bounded concurrency and preserves source order", async () => {
+    let active = 0;
+    let peak = 0;
+    const result = await searchClaudeHistorySessions(
+      ["one", "two", "three", "four"].map((sessionId) => ({ sessionId, firstPrompt: sessionId === "three" ? "needle" : "other" })),
+      undefined,
+      "needle",
+      10,
+      async (sessionId) => {
+        active += 1;
+        peak = Math.max(peak, active);
+        await new Promise((resolve) => setTimeout(resolve, sessionId === "one" ? 5 : 1));
+        active -= 1;
+        return [];
+      },
+      2,
+    );
+    assert.ok(peak <= 2);
+    assert.deepEqual(result.map((entry) => entry.session.sessionId), ["three"]);
   });
 });

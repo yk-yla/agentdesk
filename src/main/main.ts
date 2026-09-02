@@ -7,6 +7,7 @@ import { homedir } from "node:os";
 import { createServer, type Server } from "node:http";
 import path from "node:path";
 import { parse as parseToml } from "smol-toml";
+import type { AgentProvider } from "../shared/agentProtocol";
 import type { CodexDefaults, DiagnosticExport, ExternalTerminalOpenRequest, ExternalTerminalSettings, HandoffPackage, JsonRpcMessage, SavedImage, SavedTextFile } from "../shared/protocol";
 import { externalTerminalLabel } from "../shared/externalTerminalPresets";
 import { createBackendRegistry } from "./agent/backendRegistry";
@@ -30,7 +31,7 @@ import { ProcessSupervisor } from "./processSupervisor";
 import { DesktopUpdateManager } from "./desktopUpdateManager";
 import { CodexCliUpdateManager } from "./codexCliUpdateManager";
 import { ClaudeUpdateManager } from "./claudeUpdateManager";
-import { cliExecutableExists, detectCliRuntime, hasCliProcess, readWindowsProcesses, type CliRuntimeSnapshot } from "./cliRuntime";
+import { belongsToProcessTree, cliExecutableExists, detectCliRuntime, hasCliProcess, readWindowsProcesses, type CliRuntimeSnapshot } from "./cliRuntime";
 import { isSafeExternalUrl, WindowLifecycle, type DesktopWindow } from "./windowLifecycle";
 import { registerDesktopIpc } from "./ipc/registerDesktopIpc";
 import { FileLogger, logErrorDetails } from "./logger";
@@ -68,25 +69,19 @@ let claudeUpdateManager: ClaudeUpdateManager;
 const nativeSessionOwnership = new NativeSessionOwnershipRegistry();
 
 async function externalCliInUse(provider: "codex" | "claude") {
-  const internal = backendManager.rendererSessions().some(({ provider: current, queryActive }) => current === provider && queryActive);
-  if (internal) return true;
-  if (provider === "codex" && (codexAppServer.isBusy || legacyCodexAppServer.isBusy || codexTitleGenerator.processIds.length > 0)) return true;
+  // AgentDesk-owned app-server instances are deliberately not treated as an
+  // external CLI owner here. The update flow closes those servers before the
+  // installation step, including idle sessions that still have pending RPCs
+  // (history reads, initialization, etc.). Blocking on `isBusy` made merely
+  // opening a session look like an active task and prevented every update.
+  // Title generation is a separate CLI process and must finish before its
+  // executable can be replaced.
+  if (provider === "codex" && codexTitleGenerator.processIds.length > 0) return true;
   if (process.platform !== "win32") return false;
   const entries = await readWindowsProcesses({ track: (child) => processSupervisor.track(child), terminate: (child) => processSupervisor.terminate(child) });
   if (provider === "codex") {
     const owned = new Set([codexAppServer.processId, legacyCodexAppServer.processId, ...codexTitleGenerator.processIds].filter(Boolean));
-    const byPid = new Map(entries.map((entry) => [entry.pid, entry]));
-    const belongsToAgentDesk = (pid: number) => {
-      const visited = new Set<number>();
-      let current = pid;
-      while (current > 0 && !visited.has(current)) {
-        if (owned.has(current)) return true;
-        visited.add(current);
-        current = byPid.get(current)?.parentPid || 0;
-      }
-      return false;
-    };
-    return entries.some((entry) => hasCliProcess([entry], provider) && !belongsToAgentDesk(entry.pid));
+    return entries.some((entry) => hasCliProcess([entry], provider) && !belongsToProcessTree(entry.pid, entries, owned));
   }
   return hasCliProcess(entries, provider);
 }
@@ -264,7 +259,7 @@ function requireAuthorizedWorkspacePath(directory: string) {
   return resolved;
 }
 
-function externalTerminalEnvironment() {
+function externalTerminalEnvironment(provider: AgentProvider, codexHome: "agentdesk" | "default") {
   const env: NodeJS.ProcessEnv = { ...process.env };
   // AgentDesk may itself run with NO_COLOR/TERM=dumb (for example when it is
   // launched by a headless bridge). Do not pass those host settings to an
@@ -276,12 +271,14 @@ function externalTerminalEnvironment() {
   env.CLICOLOR = "1";
   env.CLICOLOR_FORCE = "1";
   env.FORCE_COLOR = "1";
+  if (provider === "codex") env.CODEX_HOME = codexHome === "default" ? globalCodexHome : agentDeskCodexHome;
   return env;
 }
 
-function validateExternalTerminalInput(input: unknown): Required<Pick<ExternalTerminalOpenRequest, "cwd" | "sessionId" | "provider">> & { resume: boolean; initialPrompt: string } {
+function validateExternalTerminalInput(input: unknown): Required<Pick<ExternalTerminalOpenRequest, "cwd" | "sessionId">> & { provider: AgentProvider; resume: boolean; initialPrompt: string; codexHome: "agentdesk" | "default" } {
   if (!input || typeof input !== "object" || Array.isArray(input)) throw new Error("外部终端参数无效。");
   const record = input as Record<string, unknown>;
+  if (record.codexHome !== undefined && record.codexHome !== "agentdesk" && record.codexHome !== "default") throw new Error("Codex Home 无效。");
   const cwd = requireAuthorizedWorkspacePath(typeof record.cwd === "string" ? record.cwd : "");
   const sessionId = typeof record.sessionId === "string" ? record.sessionId : "";
   const providerValue = record.provider ?? "claude";
@@ -294,7 +291,7 @@ function validateExternalTerminalInput(input: unknown): Required<Pick<ExternalTe
   if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(sessionId)) throw new Error(`${provider === "codex" ? "Codex" : "Claude"} 会话 ID 无效。`);
   if (Buffer.byteLength(initialPrompt, "utf8") > 8 * 1024) throw new Error("外部终端初始提示过大。");
   if (resume && initialPrompt) throw new Error("恢复会话时不能同时发送初始提示。");
-  return { cwd, sessionId, provider, resume, initialPrompt };
+  return { cwd, sessionId, provider, resume, initialPrompt, codexHome: record.codexHome === "default" ? "default" : "agentdesk" };
 }
 
 function configuredExternalTerminalExecutable(value: string) {
@@ -365,7 +362,7 @@ async function refreshExternalTerminalExecutableCache(settings = preferencesStor
 }
 
 function openConfiguredExternalTerminal(input: unknown): Promise<{ state: "open"; source: "agentdesk" }> {
-  const { cwd, sessionId, provider, resume, initialPrompt } = validateExternalTerminalInput(input);
+  const { cwd, sessionId, provider, resume, initialPrompt, codexHome } = validateExternalTerminalInput(input);
   const settings = normalizeExternalTerminal(preferencesStore.read().externalTerminal);
   const requestedExecutable = settings.executable.trim();
   const cache = readExternalTerminalExecutableCache();
@@ -376,8 +373,8 @@ function openConfiguredExternalTerminal(input: unknown): Promise<{ state: "open"
   const providerName = provider === "codex" ? "Codex CLI" : "Claude Code";
   if (!runtimeSnapshot.executablePath || !cliExecutableExists(runtimeSnapshot.executablePath)) throw new Error(`启动时记录的 ${providerName} 文件已不存在，请重启 AgentDesk 使安装信息刷新。`);
   if (!settings.argsTemplate.includes("{sessionId}")) throw new Error("外部终端参数模板必须包含 {sessionId}，否则无法绑定到当前会话。");
-  appLogger.log("info", "external_terminal.open_requested", { provider, executable: requestedExecutable, cwd, resume, sessionIdPresent: true, initialPromptPresent: Boolean(initialPrompt) });
-  const args = expandExternalTerminalArgs(settings, executable, { provider, cwd, sessionId, resume: resume === true, initialPrompt, cliExecutable: runtimeSnapshot.executablePath });
+  appLogger.log("info", "external_terminal.open_requested", { executable: requestedExecutable, provider, codexHome: provider === "codex" ? codexHome : undefined, cwd, resume, sessionIdPresent: true, initialPromptPresent: Boolean(initialPrompt) });
+  const args = expandExternalTerminalArgs(settings, executable, { cwd, sessionId, provider, resume: resume === true, initialPrompt, cliExecutable: runtimeSnapshot.executablePath, ...(provider === "codex" ? { codexHome: codexHome === "default" ? globalCodexHome : agentDeskCodexHome } : {}) });
   if (!args.length) throw new Error("外部终端参数模板不能为空。");
   const launchPlan = createExternalTerminalLaunchPlan(settings, executable, args, cwd);
   return new Promise((resolve, reject) => {
@@ -387,7 +384,7 @@ function openConfiguredExternalTerminal(input: unknown): Promise<{ state: "open"
       detached: !visibleConsole,
       stdio: visibleConsole ? ["ignore", "ignore", "pipe"] : "ignore",
       windowsHide: visibleConsole,
-      env: externalTerminalEnvironment(),
+      env: externalTerminalEnvironment(provider, codexHome),
     });
     let settled = false;
     let launcherError = "";
