@@ -1,6 +1,6 @@
 import { ArrowLeftToLine, ArrowRight, ArrowRightToLine, Download, FolderOpen, GitFork, Pencil, Pin, PinOff, Plus, Star, Trash2, X } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState, type CSSProperties, type DragEvent, type MouseEvent, type PointerEvent as ReactPointerEvent } from "react";
-import type { AgentCapabilities, AgentOperation, AgentProvider } from "../shared/agentProtocol";
+import type { AgentCapabilities, AgentOperation, AgentProvider, AgentRequestContext } from "../shared/agentProtocol";
 import { providerDisplayName } from "../shared/providerMetadata";
 import { DEFAULT_BASE_FONT_SIZE, type ClaudeRuntimeStatus, type CodexCliUpdateStatus, type CompactionRecord, type CodexDefaults, type DesktopPreferences, type DesktopUpdateStatus, type JsonObject } from "../shared/protocol";
 import {
@@ -417,25 +417,25 @@ export default function App() {
    * 会话相关请求都走这里：响应和错误直接记入原始事件存储。
    * 这替代了原先主进程额外发一遍 client/routed-response 的做法，审计信息不变，IPC 少一次。
    */
-  const requestForSession = useCallback(async (sessionId: string, operation: AgentOperation, params: JsonObject) => {
+  const requestForSession = useCallback(async (sessionId: string, operation: AgentOperation, params: JsonObject, contextOverride?: AgentRequestContext) => {
     const session = sessionsRef.current[sessionId];
     const provider = session?.provider || "codex";
     if (session?.readOnly && !READ_ONLY_SESSION_OPERATIONS.has(operation)) {
       throw new Error("当前会话正被其他程序使用，已切换为只读模式。");
     }
-    const externalClaudeHistoryRequest = session?.provider === "claude" && session.readOnly === true && Boolean(session.threadId)
+    const externalClaudeHistoryRequest = !contextOverride && session?.provider === "claude" && session.readOnly === true && Boolean(session.threadId)
       && ["readSession", "forkSession", "renameSession", "deleteSession", "updateSessionMetadata"].includes(operation);
     const requestParams = externalClaudeHistoryRequest && session?.threadId
       ? { ...params, cwd: session.cwd, threadId: session.threadId }
       : params;
-    const context = externalClaudeHistoryRequest && session?.threadId
+    const context = contextOverride || (externalClaudeHistoryRequest && session?.threadId
       ? { canonicalCwd: session.cwd, nativeSessionId: session.threadId }
       : {
         sessionId,
         canonicalCwd: session?.cwd,
         nativeSessionId: session?.threadId || undefined,
         queryGeneration: session?.queryGeneration,
-      };
+      });
     try {
       const value = await agentClient.request(provider, operation, requestParams, context);
       appendRawEvent(sessionId, `response ${operation}`, { provider, payload: value });
@@ -1593,7 +1593,7 @@ export default function App() {
       }));
       persistCompactionSnapshot(forkedSessionId);
       setHistory((current) => upsertHistoryEntry(current, { id: threadId, provider: session.provider, title, cwd, ...(session.provider === "codex" && session.codexHome ? { codexHome: session.codexHome } : {}) }));
-      void requestForSession(forkedSessionId, "renameSession", { threadId, name: title }).catch((error) => setError(forkedSessionId, error, "分支重命名失败"));
+      void requestForSession(forkedSessionId, "renameSession", { threadId, name: title }, { canonicalCwd: cwd, nativeSessionId: threadId }).catch((error) => setError(forkedSessionId, error, "分支重命名失败"));
     } catch (error) {
       setError(sessionId, error, "创建分支失败");
     }
@@ -2100,7 +2100,7 @@ export default function App() {
         }));
         persistCompactionSnapshot(forkedSessionId);
         setHistory((current) => upsertHistoryEntry(current, { id: threadId, provider: entry.provider, title, cwd: forkCwd, ...(entry.provider === "codex" ? { codexHome: entry.codexHome || "agentdesk" } : {}) }));
-        void requestForSession(forkedSessionId, "renameSession", { threadId, name: title }).catch((error) => setError(forkedSessionId, error, "分支重命名失败"));
+        void requestForSession(forkedSessionId, "renameSession", { threadId, name: title }, { canonicalCwd: forkCwd, nativeSessionId: threadId }).catch((error) => setError(forkedSessionId, error, "分支重命名失败"));
       } else if (action === "delete") {
         const providerTitle = providerDisplayName(entry.provider);
         if (!window.confirm(`确认永久删除这条会话？\n\n${entry.title}\n\n这会从本机 ${providerTitle} 历史中删除会话内容，不可恢复。`)) return;
