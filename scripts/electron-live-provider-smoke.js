@@ -47,6 +47,23 @@ async page => {
     assert(await page.locator(".tab.active .provider-mark.codex").count() === 1, "Codex 首条消息后活动会话归属异常。" );
     results.push("真实 Codex 新会话可发送首条消息");
 
+    stage = "Codex 主动停止后输入";
+    await activeInput().fill('Use the terminal to run: pwsh -NoProfile -Command "Start-Sleep -Seconds 20".');
+    await activeInput().press("Enter");
+    const codexStopButton = page.locator(".pane-panel .working-strip .stop-button");
+    await codexStopButton.waitFor({ state: "visible", timeout: 15_000 });
+    await page.waitForTimeout(500);
+    await codexStopButton.click();
+    const stopDialog = page.getByRole("dialog", { name: "确认停止任务" });
+    await stopDialog.waitFor({ state: "visible", timeout: 10_000 });
+    await stopDialog.getByRole("button", { name: "停止任务" }).click();
+    await codexStopButton.waitFor({ state: "hidden", timeout: 30_000 });
+    await page.waitForFunction(() => document.activeElement === document.querySelector('.pane-panel textarea[aria-label="消息输入"]'), null, { timeout: 10_000 });
+    await activeInput().fill("停止后仍可立即输入");
+    assert(await activeInput().inputValue() === "停止后仍可立即输入", "主动停止后输入框无法立即聚焦和输入。");
+    await activeInput().fill("");
+    results.push("真实 Codex 主动停止后输入框立即恢复焦点和输入");
+
     stage = "Claude 模型与思考等级";
     await openClaude();
     const model = activeModel();

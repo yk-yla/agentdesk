@@ -223,18 +223,35 @@ function validPersistedEntry(value: unknown): value is PersistedEntry {
 export class CodexHistoryIndex {
   private readonly roots: string[];
   private readonly entries = new Map<string, IndexedEntry>();
+  private readonly pathsById = new Map<string, string>();
   private readonly pendingPaths = new Set<string>();
   private readonly watchers: FSWatcher[] = [];
   private loadPromise: Promise<void> | null = null;
   private persistTimer: NodeJS.Timeout | null = null;
   private refreshTimer: NodeJS.Timeout | null = null;
   private startTimer: NodeJS.Timeout | null = null;
+  private watchTimer: NodeJS.Timeout | null = null;
   private started = false;
   private closed = false;
   private scanning = false;
 
   constructor(private readonly options: CodexHistoryIndexOptions) {
     this.roots = [...new Set(options.roots.map((root) => path.resolve(root)))];
+  }
+
+  private setEntry(entry: IndexedEntry) {
+    const existing = this.entries.get(entry.path);
+    if (existing && existing.id !== entry.id && this.pathsById.get(existing.id) === entry.path) this.pathsById.delete(existing.id);
+    this.entries.set(entry.path, entry);
+    this.pathsById.set(entry.id, entry.path);
+  }
+
+  private deleteEntry(filePath: string) {
+    const existing = this.entries.get(filePath);
+    if (!existing) return false;
+    this.entries.delete(filePath);
+    if (this.pathsById.get(existing.id) === filePath) this.pathsById.delete(existing.id);
+    return true;
   }
 
   start() {
@@ -257,6 +274,7 @@ export class CodexHistoryIndex {
   async close() {
     this.closed = true;
     if (this.startTimer) clearTimeout(this.startTimer);
+    clearTimeout(this.watchTimer ?? undefined);
     this.watchers.splice(0).forEach((watcher) => watcher.close());
     if (this.refreshTimer) clearInterval(this.refreshTimer);
     if (this.persistTimer) clearTimeout(this.persistTimer);
@@ -279,7 +297,8 @@ export class CodexHistoryIndex {
       const candidate = Object.keys(thread).length ? thread : record;
       const id = stringValue(candidate.id) || stringValue(candidate.sessionId);
       if (!id) continue;
-      const entry = [...this.entries.values()].find((current) => current.id === id);
+      const entryPath = this.pathsById.get(id);
+      const entry = entryPath ? this.entries.get(entryPath) : undefined;
       if (!entry) continue;
       const cwd = stringValue(candidate.cwd);
       if (cwd) {
@@ -315,13 +334,24 @@ export class CodexHistoryIndex {
     await this.loadPromise;
     const needle = stringValue(params.searchTerm).trim();
     if (!needle) return { data: [], nextCursor: null };
+    const needleLower = needle.toLocaleLowerCase();
     const allWorkspaces = params.allWorkspaces === true;
     const requestedCwd = !allWorkspaces && stringValue(params.cwd).trim() ? canonicalWorkspace(stringValue(params.cwd)) : "";
+    const requestedCwdLower = requestedCwd.toLocaleLowerCase();
     const limit = Math.min(Math.max(Math.floor(numberValue(params.limit)) || 100, 1), 100);
-    const matches = [...this.entries.values()]
-      .filter((entry) => entry.cwd && (!requestedCwd || entry.cwd.toLowerCase() === requestedCwd.toLowerCase()))
-      .filter((entry) => !this.options.isWorkspaceAuthorized || this.options.isWorkspaceAuthorized(entry.cwd))
-      .filter((entry) => entry.text.toLocaleLowerCase().includes(needle.toLocaleLowerCase()))
+    const authorizationByCwd = new Map<string, boolean>();
+    const candidates: IndexedEntry[] = [];
+    for (const entry of this.entries.values()) {
+      if (!entry.cwd || (requestedCwdLower && entry.cwd.toLocaleLowerCase() !== requestedCwdLower)) continue;
+      let authorized = authorizationByCwd.get(entry.cwd);
+      if (authorized === undefined) {
+        authorized = !this.options.isWorkspaceAuthorized || this.options.isWorkspaceAuthorized(entry.cwd);
+        authorizationByCwd.set(entry.cwd, authorized);
+      }
+      if (!authorized || !entry.text.toLocaleLowerCase().includes(needleLower)) continue;
+      candidates.push(entry);
+    }
+    const matches = candidates
       .sort((left, right) => right.updatedAt - left.updatedAt)
       .slice(0, limit)
       .map((entry) => ({
@@ -342,13 +372,14 @@ export class CodexHistoryIndex {
     return { data: matches, nextCursor: null };
   }
 
+
   private async loadPersisted() {
     try {
       const parsed = JSON.parse(await fsPromises.readFile(this.options.storagePath(), "utf8")) as PersistedIndex;
       if (parsed?.schema !== INDEX_SCHEMA || !Array.isArray(parsed.entries)) return;
       for (const value of parsed.entries) {
         if (!validPersistedEntry(value) || !this.allowedPath(value.path)) continue;
-        this.entries.set(value.path, { ...value });
+        this.setEntry({ ...value });
       }
       this.enforceBounds();
       this.options.logger?.log("info", "codex.history_index.loaded", { entries: this.entries.size });
@@ -379,17 +410,35 @@ export class CodexHistoryIndex {
   private queuePath(filePath: string) {
     if (!this.allowedPath(filePath) || !/\.jsonl$/i.test(filePath)) return;
     this.pendingPaths.add(path.resolve(filePath));
-    const timer = setTimeout(() => { void this.processPendingPaths(); }, WATCH_DEBOUNCE_MS);
-    timer.unref?.();
+    if (this.watchTimer) return;
+    this.watchTimer = setTimeout(() => {
+      this.watchTimer = null;
+      void this.processPendingPaths();
+    }, WATCH_DEBOUNCE_MS);
+    this.watchTimer.unref?.();
   }
 
   private async processPendingPaths() {
     if (this.closed || this.scanning) return;
+    if (this.watchTimer) {
+      clearTimeout(this.watchTimer);
+      this.watchTimer = null;
+    }
     const paths = [...this.pendingPaths];
     this.pendingPaths.clear();
-    for (const filePath of paths) await this.indexPath(filePath);
-    if (paths.length) this.schedulePersist();
+    let changed = 0;
+    for (const filePath of paths) {
+      const didChange = await this.indexPath(filePath);
+      if (!didChange) continue;
+      changed += 1;
+      if (changed % 25 === 0) await new Promise<void>((resolve) => setTimeout(resolve, 0));
+    }
+    if (changed) {
+      this.enforceBounds();
+      this.schedulePersist();
+    }
   }
+
 
   private async refreshRoots() {
     if (this.closed || this.scanning) return;
@@ -407,8 +456,7 @@ export class CodexHistoryIndex {
       let removed = false;
       for (const indexedPath of this.entries.keys()) {
         if (!isWithinDirectory(indexedPath, root) || seen.has(path.resolve(indexedPath))) continue;
-        this.entries.delete(indexedPath);
-        removed = true;
+        if (this.deleteEntry(indexedPath)) removed = true;
       }
       if (removed) this.schedulePersist();
     }
@@ -418,6 +466,7 @@ export class CodexHistoryIndex {
     if (this.closed || this.scanning) return;
     this.scanning = true;
     let processed = 0;
+    let changed = 0;
     try {
       const files = (await Promise.all(this.roots.map((root) => walkSessionFiles(root))))
         .flat()
@@ -425,33 +474,43 @@ export class CodexHistoryIndex {
       this.options.logger?.log("info", "codex.history_index.scan_started", { files: files.length });
       for (const filePath of files) {
         if (this.closed) return;
-        await this.indexPath(filePath);
+        const didChange = await this.indexPath(filePath);
         processed += 1;
-        if (processed % 10 === 0) this.schedulePersist();
+        if (!didChange) continue;
+        changed += 1;
+        if (changed % 10 === 0) this.schedulePersist();
+        if (changed % 100 === 0) this.enforceBounds();
         await new Promise<void>((resolve) => setTimeout(resolve, BACKGROUND_FILE_PAUSE_MS));
       }
-      this.schedulePersist();
-      this.options.logger?.log("info", "codex.history_index.scan_finished", { entries: this.entries.size, processed });
+      if (changed) {
+        this.enforceBounds();
+        this.schedulePersist();
+      }
+      this.options.logger?.log("info", "codex.history_index.scan_finished", { entries: this.entries.size, processed, changed });
     } finally {
       this.scanning = false;
       if (!this.closed && this.pendingPaths.size) void this.processPendingPaths();
     }
   }
 
+
   private async indexPath(filePath: string) {
+    const resolvedPath = path.resolve(filePath);
     let stat;
-    try { stat = await fsPromises.stat(filePath); } catch {
-      this.entries.delete(filePath);
-      return;
+    try {
+      stat = await fsPromises.stat(resolvedPath);
+    } catch {
+      return this.deleteEntry(resolvedPath);
     }
-    if (!stat.isFile() || !sessionIdFromPath(filePath)) return;
-    const existing = this.entries.get(filePath);
-    if (existing && existing.mtimeMs === stat.mtimeMs && existing.size === stat.size) return;
-    const parsed = await parseSessionFile(filePath, { size: stat.size, mtimeMs: stat.mtimeMs }, () => this.closed);
-    if (!parsed) return;
-    this.entries.set(filePath, parsed);
-    this.enforceBounds();
+    if (!stat.isFile() || !sessionIdFromPath(resolvedPath)) return false;
+    const existing = this.entries.get(resolvedPath);
+    if (existing && existing.mtimeMs === stat.mtimeMs && existing.size === stat.size) return false;
+    const parsed = await parseSessionFile(resolvedPath, { size: stat.size, mtimeMs: stat.mtimeMs }, () => this.closed);
+    if (!parsed) return false;
+    this.setEntry(parsed);
+    return true;
   }
+
 
   private enforceBounds() {
     const newestFirst = [...this.entries.values()].sort((left, right) => right.updatedAt - left.updatedAt);
@@ -459,7 +518,7 @@ export class CodexHistoryIndex {
     for (let index = 0; index < newestFirst.length; index += 1) {
       const entry = newestFirst[index];
       if (index >= MAX_INDEXED_SESSIONS || textChars + entry.text.length > MAX_INDEXED_TEXT_TOTAL_CHARS) {
-        this.entries.delete(entry.path);
+        this.deleteEntry(entry.path);
         continue;
       }
       textChars += entry.text.length;

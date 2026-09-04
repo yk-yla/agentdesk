@@ -33,6 +33,8 @@ function searchValue(id: string, provider: AgentProvider, nextCursor: string | n
 
 function createHarness(request: (provider: AgentProvider, operation: AgentOperation, params: JsonObject) => Promise<unknown>) {
   let entries: HistoryThread[] = [];
+  let mergeCalls = 0;
+
   let loading = false;
   let cursor: string | null = null;
   let recentLoading = false;
@@ -41,7 +43,7 @@ function createHarness(request: (provider: AgentProvider, operation: AgentOperat
   let searchLoading = false;
   let searchCursor: string | null = null;
   const controller = new HistoryController({
-    mergeEntries: (incoming) => { entries = mergeHistory(entries, incoming); },
+    mergeEntries: (incoming) => { mergeCalls += 1; entries = mergeHistory(entries, incoming); },
     setLoading: (value) => { loading = value; },
     setCursor: (value) => { cursor = value; },
     setRecentLoading: (value) => { recentLoading = value; },
@@ -56,6 +58,8 @@ function createHarness(request: (provider: AgentProvider, operation: AgentOperat
   });
   return {
     controller,
+    get mergeCalls() { return mergeCalls; },
+
     get entries() { return entries; },
     get loading() { return loading; },
     get cursor() { return cursor; },
@@ -125,6 +129,22 @@ describe("HistoryController", () => {
     assert.deepEqual(harness.entries.map((entry) => entry.id).sort(), ["claude-thread", "codex-thread"]);
     assert.deepEqual(JSON.parse(harness.cursor || "{}"), { codex: "codex-next", claude: "claude-next" });
   });
+  it("publishes all Provider pages in one state update", async () => {
+    const calls = new Map<AgentProvider, number>();
+    const harness = createHarness(async (provider) => {
+      const call = (calls.get(provider) || 0) + 1;
+      calls.set(provider, call);
+      return listValue(`${provider}-${call}`, provider, call === 1 ? `${provider}-next` : null);
+    });
+
+    harness.controller.loadInitial("D:\\work");
+    await waitFor(() => !harness.loading);
+
+    assert.deepEqual([...calls.entries()].sort(), [["claude", 2], ["codex", 2]]);
+    assert.equal(harness.mergeCalls, 1);
+    assert.deepEqual(harness.entries.map((entry) => entry.id).sort(), ["claude-1", "claude-2", "codex-1", "codex-2"]);
+  });
+
 
   it("sorts the global recent view strictly by live recency", () => {
     const entries = [
@@ -180,7 +200,7 @@ describe("HistoryController", () => {
     assert.deepEqual(harness.entries.map((entry) => entry.id).sort(), ["claude-new", "codex-new"]);
   });
 
-  it("loads history again when switching back to a previously visited workspace", async () => {
+  it("reuses recent history when switching back to a visited workspace", async () => {
     const calls: string[] = [];
     const harness = createHarness(async (provider, _operation, params) => {
       const cwd = String(params.cwd);
@@ -195,8 +215,28 @@ describe("HistoryController", () => {
     harness.controller.loadInitial("D:\\one");
     await waitFor(() => !harness.loading);
 
-    assert.equal(calls.filter((call) => call.endsWith("D:\\one")).length, 4);
+    assert.equal(calls.filter((call) => call.endsWith("D:\\one")).length, 2);
     assert.deepEqual(harness.entries.map((entry) => entry.id).sort(), ["claude-one", "claude-two", "codex-one", "codex-two"]);
+  });
+
+  it("reuses an in-flight history load after a rapid workspace round trip", async () => {
+    const one = deferred<unknown>();
+    const calls: string[] = [];
+    const harness = createHarness(async (provider, _operation, params) => {
+      const cwd = String(params.cwd);
+      calls.push(`${provider}:${cwd}`);
+      if (cwd === "D:\\one") return one.promise;
+      return listValue(`${provider}-two`, provider);
+    });
+
+    harness.controller.loadInitial("D:\\one");
+    harness.controller.loadInitial("D:\\two");
+    await waitFor(() => !harness.loading);
+    harness.controller.loadInitial("D:\\one");
+    one.resolve(listValue("one", "codex"));
+    await waitFor(() => !harness.loading);
+
+    assert.equal(calls.filter((call) => call.endsWith("D:\\one")).length, 2);
   });
 
   it("coalesces concurrent history refreshes", async () => {

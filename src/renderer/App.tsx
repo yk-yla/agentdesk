@@ -272,6 +272,7 @@ export default function App() {
   sidebarCollapsedRef.current = sidebarCollapsed;
 
   const draftsRef = useRef(new Map<string, string>());
+  const paneScrollStatesRef = useRef(new Map<string, { top: number; atBottom: boolean }>());
   const skillLoadsRef = useRef(new Map<string, Promise<void>>());
   const skillReloadTimersRef = useRef(new Map<AgentProvider, number>());
   const workspaceRestoreIdsRef = useRef(new Set<string>());
@@ -553,6 +554,7 @@ export default function App() {
     const nextSteers = { ...pendingSteersRef.current }; delete nextSteers[sessionId]; pendingSteersRef.current = nextSteers; setPendingSteers(nextSteers);
     setDraftRevisions((current) => { const next = { ...current }; delete next[sessionId]; return next; });
     draftsRef.current.delete(sessionId);
+    paneScrollStatesRef.current.delete(sessionId);
     sessionMessageRef.current?.release(sessionId);
     sessionTitleRef.current?.release(sessionId);
     providerEventRef.current?.release(sessionId);
@@ -2246,7 +2248,10 @@ export default function App() {
         if (session.provider !== provider || !normalizedDirectory(session.cwd) || requested.has(key) || session.capabilities.skills !== "supported") continue;
         requested.add(key);
         const pending = skillLoadsRef.current.get(key) || Promise.resolve();
-        void pending.finally(() => loadSkills(session.id, session.cwd, true));
+        // The Provider already invalidated its own skill snapshot before emitting
+        // skills/changed. Forcing another reload here can feed the notification
+        // back into itself and create a periodic skills/list request loop.
+        void pending.finally(() => loadSkills(session.id, session.cwd));
       }
     }, 500);
     skillReloadTimersRef.current.set(provider, timer);
@@ -2783,26 +2788,20 @@ export default function App() {
   }), [bridge.exportDiagnostics, checkClaudeCodeUpdates, checkCodexCliUpdates, checkForUpdates, claudeRuntimeStatus, cliUpdateStatus, downloadUpdate, installUpdate, openUpdateRepository, preferences.theme, savePreference, updateClaudeCode, updateCodexCli, updateStatus]);
 
   const renderPane = (pane: PaneState) => {
-    const sessionIds = pane.tabIds;
+    const session = sessions[pane.activeTabId];
     return <div className="pane-tab-stack" key={pane.id}>
-      {!sessionIds.length ? <EmptyPane
+      {!session ? <EmptyPane
         pane={pane}
         cwd={workspace}
         isActivePane={pane.id === layout.activePaneId}
         onFocusPane={focusPane}
         onChooseWorkspace={chooseWorkspace}
         onCreateSession={(provider) => createSessionInPane(pane.id, provider)}
-      /> : null}
-      {sessionIds.map((sessionId) => {
-        const session = sessions[sessionId];
-        if (!session) return null;
-        const isActiveTab = session.id === pane.activeTabId;
-        return <PaneView
-          key={session.id}
-          pane={pane}
-          session={session}
-          isActivePane={pane.id === layout.activePaneId && isActiveTab}
-          isActiveTab={isActiveTab}
+      /> : <PaneView
+        key={session.id}
+        pane={pane}
+        session={session}
+        isActivePane={pane.id === layout.activePaneId}
         models={providerModels[session.provider]}
         skills={skillsByCwd[providerDirectoryKey(session.provider, session.cwd)] ?? NO_SKILLS}
         recentCommandUsage={recentCommandUsage}
@@ -2811,6 +2810,7 @@ export default function App() {
         pendingSteers={pendingSteers[session.id] ?? NO_PENDING_STEERS}
         draftRevision={draftRevisions[session.id] || 0}
         bridge={bridge}
+        scrollStates={paneScrollStatesRef.current}
         onFocusPane={focusPane}
         onMoveTab={moveTab}
         onSetSessionSetting={setSessionSetting}
@@ -2839,10 +2839,10 @@ export default function App() {
         onRemoveImage={removeImage}
         onRemoveQueuedMessage={removeQueuedMessage}
         onChooseDirectory={chooseDirectoryForSession}
-        />;
-      })}
+      />}
     </div>;
   };
+
 
   return <div className="window-shell">
     <WindowTitleBar bridge={bridge} />

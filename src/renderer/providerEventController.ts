@@ -17,6 +17,73 @@ export function nativeSessionKey(provider: AgentProvider, nativeSessionId: strin
 
 const CODEX_FIRST_OUTPUT_ITEM_TYPES = new Set(["agentMessage", "plan", "commandExecution", "fileChange", "mcpToolCall", "reasoning"]);
 const CLAUDE_FIRST_OUTPUT_STREAM_TYPES = new Set(["message_start", "content_block_start", "content_block_delta"]);
+const CODEX_CONCAT_DELTA_METHODS: Record<string, true> = {
+  "item/agentMessage/delta": true,
+  "item/plan/delta": true,
+  "item/commandExecution/outputDelta": true,
+  "item/fileChange/outputDelta": true,
+  "item/reasoning/summaryTextDelta": true,
+};
+
+export interface PendingProviderEvent {
+  sessionId: string;
+  event: RoutedAgentEvent;
+}
+
+export function coalesceBatchedProviderEvents(batch: readonly PendingProviderEvent[]) {
+  const result: PendingProviderEvent[] = [];
+  for (const current of batch) {
+    const previous = result.at(-1);
+    if (!previous || previous.sessionId !== current.sessionId || !previous.event.batched || !current.event.batched
+      || previous.event.provider !== current.event.provider
+      || previous.event.envelope.type !== current.event.envelope.type
+      || previous.event.envelope.queryGeneration !== current.event.envelope.queryGeneration) {
+      result.push(current);
+      continue;
+    }
+
+    const previousPayload = agentEventPayload(previous.event);
+    const currentPayload = agentEventPayload(current.event);
+    let payload: Record<string, unknown> | null = null;
+    if (current.event.provider === "codex" && CODEX_CONCAT_DELTA_METHODS[current.event.envelope.type]) {
+      const previousItemId = stringValue(previousPayload.itemId);
+      const currentItemId = stringValue(currentPayload.itemId);
+      if (previousItemId && previousItemId === currentItemId) {
+        payload = { ...currentPayload, delta: stringValue(previousPayload.delta) + stringValue(currentPayload.delta) };
+      }
+    } else if (current.event.provider === "claude" && current.event.envelope.type === "claude/sdkMessage") {
+      const previousStream = asRecord(previousPayload.event);
+      const currentStream = asRecord(currentPayload.event);
+      const previousDelta = asRecord(previousStream.delta);
+      const currentDelta = asRecord(currentStream.delta);
+      if (previousPayload.type === "stream_event" && currentPayload.type === "stream_event"
+        && previousStream.type === "content_block_delta" && currentStream.type === "content_block_delta"
+        && previousDelta.type === "text_delta" && currentDelta.type === "text_delta"
+        && previousStream.index === currentStream.index) {
+        payload = {
+          ...currentPayload,
+          event: {
+            ...currentStream,
+            delta: { ...currentDelta, text: stringValue(previousDelta.text) + stringValue(currentDelta.text) },
+          },
+        };
+      }
+    }
+    if (!payload) {
+      result.push(current);
+      continue;
+    }
+    result[result.length - 1] = {
+      sessionId: current.sessionId,
+      event: routeAgentEvent({
+        ...current.event.envelope,
+        payload,
+      }),
+    };
+  }
+  return result;
+}
+
 
 export interface ProviderEventVersion {
   event: number;
@@ -82,7 +149,7 @@ export class ProviderEventController {
   private readonly subagentParents = new Map<string, string>();
   private readonly pendingThreadStarts = new Map<string, { event: RoutedAgentEvent; receivedAt: number }>();
   private readonly versions = new Map<string, ProviderEventVersion>();
-  private pendingEvents: Array<{ sessionId: string; event: RoutedAgentEvent }> = [];
+  private pendingEvents: PendingProviderEvent[] = [];
   private flushHandle: number | null = null;
 
   constructor(private readonly options: ProviderEventControllerOptions) {}
@@ -155,7 +222,7 @@ export class ProviderEventController {
       this.options.services.cancelFrame(this.flushHandle);
       this.flushHandle = null;
     }
-    const batch = this.pendingEvents;
+    const batch = coalesceBatchedProviderEvents(this.pendingEvents);
     if (!batch.length) return;
     this.pendingEvents = [];
     this.options.state.updateSessions((current) => {

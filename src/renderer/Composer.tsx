@@ -1,5 +1,5 @@
 import { ChevronDown, Clock3, CornerDownRight, FolderOpen, ImagePlus, X } from "lucide-react";
-import { memo, useState, type DragEvent, type FormEvent, type KeyboardEvent, type ReactNode } from "react";
+import { memo, useState, type DragEvent, type FormEvent, type KeyboardEvent, type ReactNode, type RefObject } from "react";
 import CommandSuggestions from "./CommandSuggestionMenu";
 import { useCommandSuggestions, type CommandSuggestion, type CommandUsage } from "./commandSuggestions";
 import { type ImageAttachment, type PendingSteerMessage, type QueuedMessage, type SkillOption } from "./domain";
@@ -18,6 +18,7 @@ interface Props {
   queuedMessages: QueuedMessage[];
   pendingSteers: PendingSteerMessage[];
   working: boolean;
+  inputRef: RefObject<HTMLTextAreaElement | null>;
   placeholder?: string;
   toolbar: ReactNode;
   copyImage: (dataUrl: string) => Promise<void>;
@@ -36,7 +37,7 @@ interface Props {
  * 打字不再触发顶层 setSessions，因此不会重渲染消息流。
  */
 function ComposerBase({
-  sessionId, provider, cwd, threadId, skills, recentCommandUsage, capabilities, attachments, queuedMessages, pendingSteers, working, placeholder, toolbar,
+  sessionId, provider, cwd, threadId, skills, recentCommandUsage, capabilities, attachments, queuedMessages, pendingSteers, working, inputRef, placeholder, toolbar,
   copyImage, getDraft, onDraftChange, onSend, onCycleEffort, onAddFiles, onRemoveImage,
   onRemoveQueuedMessage, onChooseDirectory,
 }: Props) {
@@ -170,6 +171,7 @@ function ComposerBase({
       <form className="composer" onSubmit={(event: FormEvent) => { event.preventDefault(); submit("submit"); }}>
         <CommandSuggestions suggestions={visibleSuggestions} selectedIndex={selectedIndex} onSelect={acceptSuggestion} />
         <textarea
+          ref={inputRef}
           value={value}
           onChange={(event) => update(event.target.value)}
           onPaste={(event) => {

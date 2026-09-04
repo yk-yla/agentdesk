@@ -1,8 +1,9 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 import type { AgentEventEnvelope, AgentProvider } from "../shared/agentProtocol";
-import { CODEX_CAPABILITIES, emptySession, type SessionState } from "./domain";
-import { ProviderEventController } from "./providerEventController";
+import { asRecord, CODEX_CAPABILITIES, emptySession, stringValue, type SessionState } from "./domain";
+import { routeAgentEvent } from "./agent/AgentEventRouter";
+import { coalesceBatchedProviderEvents, ProviderEventController } from "./providerEventController";
 
 function event(type: string, payload: Record<string, unknown> = {}, overrides: Partial<AgentEventEnvelope> = {}): AgentEventEnvelope {
   return { provider: "codex", type, payload, receivedAt: 1, ...overrides };
@@ -120,6 +121,31 @@ describe("ProviderEventController", () => {
     harness.controller.flush();
     assert.equal(harness.controller.captureVersion("session").event, 2);
   });
+  it("concatenates adjacent Codex and Claude text deltas before applying them", () => {
+    const codex = coalesceBatchedProviderEvents([
+      { sessionId: "session", event: routeAgentEvent(event("item/agentMessage/delta", { threadId: "thread", itemId: "message", delta: "a" })) },
+      { sessionId: "session", event: routeAgentEvent(event("item/agentMessage/delta", { threadId: "thread", itemId: "message", delta: "b" })) },
+    ]);
+    const claudeEnvelope = (text: string): AgentEventEnvelope => event("claude/sdkMessage", {
+      type: "stream_event",
+      nativeSessionId: "thread",
+      event: { type: "content_block_delta", index: 0, delta: { type: "text_delta", text } },
+    }, { provider: "claude" });
+    const claude = coalesceBatchedProviderEvents([
+      { sessionId: "session", event: routeAgentEvent(claudeEnvelope("甲")) },
+      { sessionId: "session", event: routeAgentEvent(claudeEnvelope("乙")) },
+    ]);
+
+    assert.equal(codex.length, 1);
+    const codexPayload = asRecord(codex[0].event.envelope.payload);
+    assert.equal(stringValue(codexPayload.delta), "ab");
+    assert.equal(claude.length, 1);
+    const claudePayload = asRecord(claude[0].event.envelope.payload);
+    const stream = asRecord(claudePayload.event);
+    const delta = asRecord(stream.delta);
+    assert.equal(stringValue(delta.text), "甲乙");
+  });
+
 
   it("persists completed Codex compactions through the event service", () => {
     const harness = createHarness();

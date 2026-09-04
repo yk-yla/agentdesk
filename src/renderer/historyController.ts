@@ -76,6 +76,18 @@ interface HistoryRequestScope {
   cwd?: string;
   allWorkspaces?: true;
 }
+interface HistoryBatch {
+  cursor: string | null;
+  entries: HistoryThread[];
+}
+
+interface CachedHistoryBatch extends HistoryBatch {
+  loadedAt: number;
+}
+
+const INITIAL_HISTORY_CACHE_TTL_MS = 2 * 60_000;
+const MAX_INITIAL_HISTORY_CACHE_ENTRIES = 64;
+
 
 function decodeHistoryCursor(value: string | null): HistoryCursor {
   if (!value) return { codex: null, claude: null };
@@ -126,14 +138,39 @@ export class HistoryController {
   private refreshPromise: Promise<void> | null = null;
   private lastRefreshAt = 0;
   private enabledProviders = new Set<AgentProvider>(["codex", "claude"]);
+  private readonly initialHistoryCache = new Map<string, CachedHistoryBatch>();
+  private readonly initialHistoryLoads = new Map<string, Promise<HistoryBatch>>();
+
 
   constructor(
     private readonly state: HistoryControllerState,
     private readonly services: HistoryControllerServices,
   ) {}
+  private initialHistoryCacheKey(workspace: string, providers: ReadonlySet<AgentProvider> = this.enabledProviders) {
+    return `${workspace.trim().toLocaleLowerCase()}\n${[...providers].sort().join(",")}`;
+  }
+
+  private rememberInitialHistory(key: string, batch: HistoryBatch) {
+    this.initialHistoryCache.delete(key);
+    this.initialHistoryCache.set(key, { ...batch, loadedAt: Date.now() });
+    while (this.initialHistoryCache.size > MAX_INITIAL_HISTORY_CACHE_ENTRIES) {
+      const oldest = this.initialHistoryCache.keys().next().value as string | undefined;
+      if (!oldest) break;
+      this.initialHistoryCache.delete(oldest);
+    }
+  }
+  private mergeInitialHistory(key: string, batch: HistoryBatch, preserveCursor = false) {
+    const existing = this.initialHistoryCache.get(key);
+    this.rememberInitialHistory(key, {
+      cursor: preserveCursor ? existing?.cursor ?? batch.cursor : batch.cursor,
+      entries: mergeHistory(existing?.entries || [], batch.entries),
+    });
+  }
+
+
 
   private publishEntries(entries: HistoryThread[]) {
-    this.state.mergeEntries(applyLocalSessionMetadata(entries, this.services.getPreferences()));
+    if (entries.length) this.state.mergeEntries(applyLocalSessionMetadata(entries, this.services.getPreferences()));
   }
 
   private logProviderFailure(provider: AgentProvider, operation: "listSessions" | "searchSessions", error: unknown) {
@@ -144,33 +181,42 @@ export class HistoryController {
     });
   }
 
-  private async fetchProvider(provider: AgentProvider, cursor: string | null, maxPages: number, limit: number, scope: HistoryRequestScope, onPage: (entries: HistoryThread[]) => void) {
+  private async fetchProvider(provider: AgentProvider, cursor: string | null, maxPages: number, limit: number, scope: HistoryRequestScope) {
     let nextCursor = cursor;
+    const entries: HistoryThread[] = [];
     for (let page = 0; page < maxPages; page += 1) {
       const value = await this.services.request(provider, "listSessions", providerHistoryParams(provider, {
         cursor: nextCursor,
         limit,
         ...scope,
       }));
-      onPage(threadFromList(value));
+      entries.push(...threadFromList(value));
       const next = asRecord(value).nextCursor;
       nextCursor = typeof next === "string" && next ? next : null;
       if (!nextCursor) break;
     }
-    return nextCursor;
+    return { cursor: nextCursor, entries };
   }
 
-  private async fetchMerged(cursor: string | null, maxPages: number, limit: number, scope: HistoryRequestScope, onPage: (entries: HistoryThread[]) => void) {
+  private async fetchMerged(
+    cursor: string | null,
+    maxPages: number,
+    limit: number,
+    scope: HistoryRequestScope,
+    enabledProviders: ReadonlySet<AgentProvider> = this.enabledProviders,
+  ): Promise<HistoryBatch> {
     const decoded = decodeHistoryCursor(cursor);
     const next = { ...decoded };
-    const providers = (["codex", "claude"] as const).filter((provider) => this.enabledProviders.has(provider) && (cursor === null || decoded[provider] !== null));
-    const results = await Promise.allSettled(providers.map((provider) => this.fetchProvider(provider, decoded[provider], maxPages, limit, scope, onPage)));
+    const providers = (["codex", "claude"] as const).filter((provider) => enabledProviders.has(provider) && (cursor === null || decoded[provider] !== null));
+    const results = await Promise.allSettled(providers.map((provider) => this.fetchProvider(provider, decoded[provider], maxPages, limit, scope)));
+    const entries: HistoryThread[] = [];
     let firstError: unknown;
     let successCount = 0;
     for (const [index, result] of results.entries()) {
       const provider = providers[index];
       if (result.status === "fulfilled") {
-        next[provider] = result.value;
+        next[provider] = result.value.cursor;
+        entries.push(...result.value.entries);
         successCount += 1;
       } else {
         firstError ??= result.reason;
@@ -178,11 +224,13 @@ export class HistoryController {
       }
     }
     if (!successCount && firstError !== undefined) throw firstError;
-    return encodeHistoryCursor(next);
+    return { cursor: encodeHistoryCursor(next), entries };
   }
 
+
   loadInitial(workspace: string, providers: AgentProvider[] = ["codex", "claude"]) {
-    this.enabledProviders = new Set(providers);
+    const enabledProviders = new Set(providers);
+    this.enabledProviders = enabledProviders;
     if (!workspace.trim() || workspace === "正在连接工作区" || workspace === "工作区不可用") {
       this.workspace = "";
       this.historyCursor = null;
@@ -191,20 +239,44 @@ export class HistoryController {
       this.state.setLoading(false);
       return () => undefined;
     }
-    this.services.log?.("info", "renderer.history_load.started", { workspace });
     this.workspace = workspace;
-    this.historyCursor = null;
-    this.state.setCursor(null);
+    const cacheKey = this.initialHistoryCacheKey(workspace, enabledProviders);
+    const cached = this.initialHistoryCache.get(cacheKey);
     const generation = ++this.historyGeneration;
+    this.historyCursor = cached?.cursor || null;
+    this.state.setCursor(this.historyCursor);
+    if (cached) this.publishEntries(cached.entries);
+    if (cached && Date.now() - cached.loadedAt <= INITIAL_HISTORY_CACHE_TTL_MS) {
+      this.historyLoading = false;
+      this.state.setLoading(false);
+      this.services.log?.("info", "renderer.history_load.cache_hit", { workspace, entries: cached.entries.length });
+      return () => {
+        if (this.historyGeneration === generation) this.historyGeneration += 1;
+      };
+    }
+
+    this.services.log?.("info", "renderer.history_load.started", { workspace, cached: Boolean(cached) });
     this.historyLoading = true;
     this.state.setLoading(true);
-    void this.fetchMerged(null, 5, 100, { cwd: workspace }, (page) => {
-      if (this.historyGeneration === generation) this.publishEntries(page);
-    }).then((cursor) => {
+    let load = this.initialHistoryLoads.get(cacheKey);
+    if (!load) {
+      load = this.fetchMerged(null, 5, 100, { cwd: workspace }, enabledProviders)
+        .then((batch) => {
+          this.rememberInitialHistory(cacheKey, batch);
+          return batch;
+        })
+        .finally(() => {
+          if (this.initialHistoryLoads.get(cacheKey) === load) this.initialHistoryLoads.delete(cacheKey);
+        });
+      this.initialHistoryLoads.set(cacheKey, load);
+    }
+    void load.then((batch) => {
       if (this.historyGeneration !== generation) return;
-      this.historyCursor = cursor;
-      this.state.setCursor(cursor);
+      this.publishEntries(batch.entries);
+      this.historyCursor = batch.cursor;
+      this.state.setCursor(batch.cursor);
     }).catch((error) => {
+      if (this.historyGeneration !== generation) return;
       this.services.log?.("error", "renderer.history_load.failed", { workspace, error: error instanceof Error ? { name: error.name, message: error.message, stack: error.stack } : { message: String(error) } });
     }).finally(() => {
       if (this.historyGeneration !== generation) return;
@@ -217,24 +289,38 @@ export class HistoryController {
     };
   }
 
+
   readonly refresh = () => {
     if (!this.services.isVisible() || this.refreshPromise || Date.now() - this.lastRefreshAt < 5_000) return this.refreshPromise || Promise.resolve();
     this.lastRefreshAt = Date.now();
     const historyGeneration = this.historyGeneration;
     const recentGeneration = this.recentGeneration;
-    const tasks: Promise<unknown>[] = [];
-    if (this.workspace) tasks.push(this.fetchMerged(null, 1, 100, { cwd: this.workspace }, (page) => {
-      if (this.historyGeneration === historyGeneration) this.publishEntries(page);
-    }));
-    if (this.recentLoaded) tasks.push(this.fetchMerged(null, 1, 50, { allWorkspaces: true }, (page) => {
-      if (this.recentGeneration === recentGeneration) this.publishEntries(page);
-    }));
-    const refresh = Promise.allSettled(tasks).then(() => undefined).finally(() => {
+    const tasks: Array<{ load: Promise<HistoryBatch>; accept: () => boolean; cacheKey?: string }> = [];
+    if (this.workspace) tasks.push({
+      load: this.fetchMerged(null, 1, 100, { cwd: this.workspace }),
+      accept: () => this.historyGeneration === historyGeneration,
+      cacheKey: this.initialHistoryCacheKey(this.workspace),
+    });
+    if (this.recentLoaded) tasks.push({
+      load: this.fetchMerged(null, 1, 50, { allWorkspaces: true }),
+      accept: () => this.recentGeneration === recentGeneration,
+    });
+    const refresh = Promise.allSettled(tasks.map((task) => task.load)).then((results) => {
+      const entries: HistoryThread[] = [];
+      for (const [index, result] of results.entries()) {
+        const task = tasks[index];
+        if (result.status !== "fulfilled" || !task.accept()) continue;
+        entries.push(...result.value.entries);
+        if (task.cacheKey) this.mergeInitialHistory(task.cacheKey, result.value, true);
+      }
+      if (entries.length) this.publishEntries(mergeHistory([], entries));
+    }).finally(() => {
       if (this.refreshPromise === refresh) this.refreshPromise = null;
     });
     this.refreshPromise = refresh;
     return refresh;
   };
+
 
   readonly loadMore = async () => {
     if (!this.historyCursor || this.historyLoading) return;
@@ -242,18 +328,19 @@ export class HistoryController {
     this.historyLoading = true;
     this.state.setLoading(true);
     try {
-      const cursor = await this.fetchMerged(this.historyCursor, 5, 100, { cwd: this.workspace }, (page) => {
-        if (this.historyGeneration === generation) this.publishEntries(page);
-      });
+      const batch = await this.fetchMerged(this.historyCursor, 5, 100, { cwd: this.workspace });
       if (this.historyGeneration !== generation) return;
-      this.historyCursor = cursor;
-      this.state.setCursor(cursor);
+      this.publishEntries(batch.entries);
+      this.historyCursor = batch.cursor;
+      this.state.setCursor(batch.cursor);
+      this.mergeInitialHistory(this.initialHistoryCacheKey(this.workspace), batch);
     } finally {
       if (this.historyGeneration !== generation) return;
       this.historyLoading = false;
       this.state.setLoading(false);
     }
   };
+
 
   readonly loadRecent = async () => {
     if (this.recentLoaded || this.recentLoading) return;
@@ -262,13 +349,13 @@ export class HistoryController {
     this.state.setRecentLoading(true);
     this.state.setRecentCursor(null);
     try {
-      const cursor = await this.fetchMerged(null, 1, 50, { allWorkspaces: true }, (page) => {
-        if (this.recentGeneration === generation) this.publishEntries(page);
-      });
+      const batch = await this.fetchMerged(null, 1, 50, { allWorkspaces: true });
       if (this.recentGeneration !== generation) return;
-      this.recentCursor = cursor;
+      this.publishEntries(batch.entries);
+      this.recentCursor = batch.cursor;
       this.recentLoaded = true;
-      this.state.setRecentCursor(cursor);
+      this.state.setRecentCursor(batch.cursor);
+
     } catch (error) {
       if (this.recentGeneration !== generation) return;
       this.services.log?.("error", "renderer.recent_history_load.failed", { error: error instanceof Error ? { name: error.name, message: error.message, stack: error.stack } : { message: String(error) } });
@@ -285,12 +372,11 @@ export class HistoryController {
     this.recentLoading = true;
     this.state.setRecentLoading(true);
     try {
-      const cursor = await this.fetchMerged(this.recentCursor, 1, 50, { allWorkspaces: true }, (page) => {
-        if (this.recentGeneration === generation) this.publishEntries(page);
-      });
+      const batch = await this.fetchMerged(this.recentCursor, 1, 50, { allWorkspaces: true });
       if (this.recentGeneration !== generation) return;
-      this.recentCursor = cursor;
-      this.state.setRecentCursor(cursor);
+      this.publishEntries(batch.entries);
+      this.recentCursor = batch.cursor;
+      this.state.setRecentCursor(batch.cursor);
     } finally {
       if (this.recentGeneration !== generation) return;
       this.recentLoading = false;

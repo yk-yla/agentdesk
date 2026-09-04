@@ -6,6 +6,7 @@ import { describe, it } from "node:test";
 import { CodexHistoryIndex } from "./codexHistoryIndex";
 
 const SESSION_ID = "01a01d46-57dc-74e1-a579-95d100691add";
+const SECOND_SESSION_ID = "01a01d46-57dc-74e1-a579-95d100691abe";
 
 function sessionLine(type: string, payload: unknown, timestamp: string) {
   return JSON.stringify({ type, payload, timestamp });
@@ -58,6 +59,40 @@ describe("CodexHistoryIndex", () => {
       const index = new CodexHistoryIndex({ roots: [path.join(root, "sessions")], storagePath: () => path.join(root, "index.json"), isWorkspaceAuthorized: () => false });
       await index.refreshNow();
       assert.equal((await index.search({ allWorkspaces: true, searchTerm: "private keyword" })).data.length, 0);
+      await index.close();
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it("checks workspace authorization once per distinct indexed directory", async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), "agentdesk-codex-index-"));
+    const sessions = path.join(root, "sessions");
+    const firstPath = path.join(sessions, `rollout-2026-08-28T11-45-44-${SESSION_ID}.jsonl`);
+    const secondPath = path.join(sessions, `rollout-2026-08-28T11-45-45-${SECOND_SESSION_ID}.jsonl`);
+    let authorizationChecks = 0;
+    try {
+      await mkdir(sessions, { recursive: true });
+      const content = sessionLine("turn_context", { cwd: "E:\\shared" }, "2026-08-28T03:45:44.000Z")
+        + "\n"
+        + sessionLine("response_item", { content: [{ text: "shared keyword" }] }, "2026-08-28T03:45:45.000Z");
+      await Promise.all([
+        writeFile(firstPath, content, "utf8"),
+        writeFile(secondPath, content, "utf8"),
+      ]);
+      const index = new CodexHistoryIndex({
+        roots: [sessions],
+        storagePath: () => path.join(root, "index.json"),
+        isWorkspaceAuthorized: () => {
+          authorizationChecks += 1;
+          return true;
+        },
+      });
+      await index.refreshNow();
+      const result = await index.search({ allWorkspaces: true, searchTerm: "shared keyword" });
+
+      assert.equal(result.data.length, 2);
+      assert.equal(authorizationChecks, 1);
       await index.close();
     } finally {
       await rm(root, { recursive: true, force: true });

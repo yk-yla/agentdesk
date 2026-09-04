@@ -31,7 +31,6 @@ export interface PaneViewProps {
   pane: PaneState;
   session: SessionState;
   isActivePane: boolean;
-  isActiveTab: boolean;
   models: ModelOption[];
   skills: SkillOption[];
   recentCommandUsage: CommandUsage;
@@ -40,6 +39,7 @@ export interface PaneViewProps {
   pendingSteers: PendingSteerMessage[];
   draftRevision: number;
   bridge: AgentBridge;
+  scrollStates: Map<string, { top: number; atBottom: boolean }>;
   onFocusPane: (paneId: string) => void;
   onMoveTab: (sessionId: string, targetPaneId: string, target?: { paneId: string; sessionId: string; position: "before" | "after" }, split?: "horizontal" | "vertical") => void;
   onSetSessionSetting: (sessionId: string, field: "model" | "effort", value: string) => void;
@@ -73,13 +73,13 @@ export interface PaneViewProps {
  * 不再因为输入、计时、侧栏搜索或其他分栏的事件而整体重建。
  */
 function PaneView(props: PaneViewProps) {
-  const { pane, session, models, attachments, bridge } = props;
+  const { pane, session, models, attachments, bridge, scrollStates } = props;
   const conversationRef = useRef<HTMLDivElement>(null);
   const conversationSearchInputRef = useRef<HTMLInputElement>(null);
+  const composerInputRef = useRef<HTMLTextAreaElement>(null);
   const followLatestRef = useRef(true);
   const questionNavigationScrollRef = useRef(false);
   const questionNavigationFrameRef = useRef<number | null>(null);
-  const scrollStatesRef = useRef(new Map<string, { top: number; atBottom: boolean }>());
   const restoringSessionRef = useRef<string | null>(null);
   const model = useMemo(() => findModelOption(models, session.model), [models, session.model]);
   const claudeModel = useMemo(() => models.find((entry) => entry.id === session.model), [models, session.model]);
@@ -122,7 +122,8 @@ function PaneView(props: PaneViewProps) {
   const clearCurrentError = useCallback(() => {
     props.onClearError(session.id, currentErrorNoticeIdentity || undefined);
   }, [currentErrorNoticeIdentity, props.onClearError, session.id]);
-  const errorAutoDismissProps = useAutoDismissNotice(currentErrorNoticeIdentity, props.isActiveTab ? sessionErrorAutoDismissMs(session) : null, clearCurrentError);
+  const errorAutoDismissProps = useAutoDismissNotice(currentErrorNoticeIdentity, sessionErrorAutoDismissMs(session), clearCurrentError);
+  const [interruptConfirmationOpen, setInterruptConfirmationOpen] = useState(false);
   const [conversationSearchOpen, setConversationSearchOpen] = useState(false);
   const [conversationSearchQuery, setConversationSearchQuery] = useState("");
   const [conversationSearchIndex, setConversationSearchIndex] = useState(0);
@@ -137,6 +138,16 @@ function PaneView(props: PaneViewProps) {
       ? Math.min(current, conversationSearchMatches.length - 1)
       : 0);
   }, [conversationSearchMatches.length]);
+  useEffect(() => {
+    if (session.status !== "working") setInterruptConfirmationOpen(false);
+  }, [session.status]);
+
+  const confirmInterrupt = useCallback(() => {
+    setInterruptConfirmationOpen(false);
+    void props.onInterrupt(session.id);
+    window.requestAnimationFrame(() => composerInputRef.current?.focus());
+  }, [props.onInterrupt, session.id]);
+
 
   const openGoalDetails = useCallback(() => {
     if (!session.detailsOpen) props.onToggleDetails(session.id);
@@ -161,7 +172,7 @@ function PaneView(props: PaneViewProps) {
   useLayoutEffect(() => {
     const conversation = conversationRef.current;
     if (!conversation) return undefined;
-    const saved = scrollStatesRef.current.get(session.id);
+    const saved = scrollStates.get(session.id);
     const atBottom = saved?.atBottom ?? true;
     followLatestRef.current = atBottom;
     restoringSessionRef.current = session.id;
@@ -170,22 +181,22 @@ function PaneView(props: PaneViewProps) {
       : conversation.scrollHeight;
     const frame = window.requestAnimationFrame(() => {
       restoringSessionRef.current = null;
-      scrollStatesRef.current.set(session.id, {
+      scrollStates.set(session.id, {
         top: conversation.scrollTop,
         atBottom: conversation.scrollHeight - conversation.scrollTop - conversation.clientHeight < 80,
       });
     });
     return () => window.cancelAnimationFrame(frame);
-  }, [session.id]);
+  }, [scrollStates, session.id]);
 
   useLayoutEffect(() => {
     if (!followLatestRef.current) return undefined;
     const conversation = conversationRef.current;
     if (!conversation) return undefined;
     conversation.scrollTop = conversation.scrollHeight;
-    scrollStatesRef.current.set(session.id, { top: conversation.scrollTop, atBottom: true });
+    scrollStates.set(session.id, { top: conversation.scrollTop, atBottom: true });
     return undefined;
-  }, [session.id, session.messages.length, latestMessageLength, session.activities.length, latestActivityLength]);
+  }, [scrollStates, session.id, session.messages.length, latestMessageLength, session.activities.length, latestActivityLength]);
 
   const jumpToQuestion = useCallback((direction: QuestionNavigationDirection, loadAttempts = 0): boolean => {
     const conversation = conversationRef.current;
@@ -201,7 +212,7 @@ function PaneView(props: PaneViewProps) {
       followLatestRef.current = false;
       questionNavigationScrollRef.current = true;
       conversation.scrollTop = top;
-      scrollStatesRef.current.set(session.id, { top, atBottom: false });
+      scrollStates.set(session.id, { top, atBottom: false });
       questionNavigationFrameRef.current = window.requestAnimationFrame(() => {
         questionNavigationScrollRef.current = false;
         questionNavigationFrameRef.current = null;
@@ -219,7 +230,7 @@ function PaneView(props: PaneViewProps) {
       });
     });
     return true;
-  }, [session.id]);
+  }, [scrollStates, session.id]);
 
   useEffect(() => {
     if (!props.isActivePane) return undefined;
@@ -378,9 +389,8 @@ function PaneView(props: PaneViewProps) {
 
   return (
     <section
-      className={`main-panel pane-panel ${props.isActivePane ? "active-pane" : ""}${emptySession ? " empty-pane" : ""}${props.isActiveTab ? "" : " inactive-tab"}`}
+      className={`main-panel pane-panel ${props.isActivePane ? "active-pane" : ""}${emptySession ? " empty-pane" : ""}`}
       data-pane-session={session.id}
-      aria-hidden={!props.isActiveTab}
       onMouseDown={() => props.onFocusPane(pane.id)}
       onDragOver={(event) => event.preventDefault()}
       onDrop={handleDrop}
@@ -408,12 +418,12 @@ function PaneView(props: PaneViewProps) {
           if (questionNavigationScrollRef.current) {
             questionNavigationScrollRef.current = false;
             followLatestRef.current = false;
-            scrollStatesRef.current.set(session.id, { top: element.scrollTop, atBottom: false });
+            scrollStates.set(session.id, { top: element.scrollTop, atBottom: false });
             return;
           }
           const atBottom = element.scrollHeight - element.scrollTop - element.clientHeight < 80;
           followLatestRef.current = atBottom;
-          scrollStatesRef.current.set(session.id, { top: element.scrollTop, atBottom });
+          scrollStates.set(session.id, { top: element.scrollTop, atBottom });
         }}
       >
         <MessageStack
@@ -455,7 +465,7 @@ function PaneView(props: PaneViewProps) {
             if (goalNotice) dismissNotice(goalNotice);
           }}
         /> : null}
-        {session.status === "working" && !activeGoal ? <div className={`working-strip${session.retryState ? " retrying" : ""}${session.readOnly ? " read-only-working" : ""}`}>{session.retryState && !session.readOnly ? <RefreshCw className="retry-icon spin" size={14} /> : <span className="working-dot" />}<div className="working-copy"><span>{session.readOnly ? "其他程序正在执行此会话" : session.retryState ? `正在重试… 第 ${session.retryState.attempt} 次` : session.statusLabel}{!session.readOnly ? <> (<ElapsedTimer startedAt={session.startedAt} />)</> : null}</span></div>{!session.readOnly ? <button className="stop-button" onClick={() => { if (window.confirm("确认停止当前任务吗？")) props.onInterrupt(session.id); }} title="停止任务"><Square size={13} fill="currentColor" /><span>停止</span></button> : null}{session.retryState && !session.readOnly ? <span className="retry-detail"><CornerDownRight size={12} />{session.retryState.message}{session.retryState.additionalDetails ? `：${session.retryState.additionalDetails}` : ""}</span> : null}</div> : null}
+        {session.status === "working" && !activeGoal ? <div className={`working-strip${session.retryState ? " retrying" : ""}${session.readOnly ? " read-only-working" : ""}`}>{session.retryState && !session.readOnly ? <RefreshCw className="retry-icon spin" size={14} /> : <span className="working-dot" />}<div className="working-copy"><span>{session.readOnly ? "其他程序正在执行此会话" : session.retryState ? `正在重试… 第 ${session.retryState.attempt} 次` : session.statusLabel}{!session.readOnly ? <> (<ElapsedTimer startedAt={session.startedAt} />)</> : null}</span></div>{!session.readOnly ? <button className="stop-button" onClick={() => setInterruptConfirmationOpen(true)} title="停止任务"><Square size={13} fill="currentColor" /><span>停止</span></button> : null}</div> : null}
         {!session.readOnly ? <Composer
           key={`${session.id}-${props.draftRevision}`}
           sessionId={session.id}
@@ -469,6 +479,7 @@ function PaneView(props: PaneViewProps) {
           queuedMessages={props.queuedMessages}
           pendingSteers={props.pendingSteers}
           working={session.status === "working"}
+          inputRef={composerInputRef}
           placeholder={activeGoal ? "可继续补充指令或询问目标进度" : session.collaborationMode === "plan" ? "描述需要规划的任务" : undefined}
           copyImage={bridge.copyImage}
           getDraft={props.getDraft}
@@ -482,6 +493,27 @@ function PaneView(props: PaneViewProps) {
           toolbar={composerToolbar}
         /> : null}
       </div>
+      {interruptConfirmationOpen ? <div className="dialog-backdrop" onMouseDown={() => setInterruptConfirmationOpen(false)}>
+        <section
+          className="confirm-dialog"
+          role="dialog"
+          aria-modal="true"
+          aria-label="确认停止任务"
+          onMouseDown={(event) => event.stopPropagation()}
+          onKeyDown={(event) => {
+            if (event.key !== "Escape") return;
+            event.stopPropagation();
+            setInterruptConfirmationOpen(false);
+          }}
+        >
+          <strong>确认停止当前任务吗？</strong>
+          <span>当前任务会中断，会话和已经生成的内容会保留。</span>
+          <div className="confirm-dialog-actions">
+            <button type="button" autoFocus onClick={() => setInterruptConfirmationOpen(false)}>取消</button>
+            <button type="button" className="danger" onClick={confirmInterrupt}>停止任务</button>
+          </div>
+        </section>
+      </div> : null}
 
       {session.provider !== "claude" && session.detailsOpen ? (
         <Suspense fallback={<aside className="details-panel pane-details lazy-panel-loading" data-details-session={session.id} aria-busy="true">正在打开详情</aside>}>

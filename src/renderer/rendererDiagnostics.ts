@@ -1,8 +1,10 @@
 import type { AgentBridge, ClientLogEntry, JsonObject } from "../shared/protocol";
+import { rawEventStoreStats } from "./rawEventStore";
 
 const UI_EVENT_NAME = "agentdesk:ui-event";
-const EVENT_LOOP_INTERVAL_MS = 5_000;
-const EVENT_LOOP_STALL_MS = 1_000;
+const EVENT_LOOP_INTERVAL_MS = 1_000;
+const EVENT_LOOP_STALL_MS = 200;
+const MEMORY_SNAPSHOT_INTERVAL_MS = 5 * 60_000;
 const rendererInstanceId = globalThis.crypto?.randomUUID?.() || `renderer-${Date.now()}-${Math.random().toString(16).slice(2)}`;
 
 export function trackUiEvent(event: string, details: JsonObject = {}) {
@@ -28,10 +30,56 @@ function interactionState() {
     focused: document.hasFocus(),
     visibility: document.visibilityState,
     activeElement: elementKind(document.activeElement),
-    bodyClasses: [...document.body.classList].filter((name) => name.startsWith("resizing-") || name.startsWith("dragging-")),
+    bodyClasses: Array.from(document.body.classList).filter((name) => name.startsWith("resizing-") || name.startsWith("dragging-")),
     modalCount: document.querySelectorAll('[aria-modal="true"], .dialog-backdrop, .image-lightbox').length,
     openMenuCount: document.querySelectorAll('[role="menu"], details[open], .command-suggestions').length,
   };
+}
+
+function rendererMemorySnapshot() {
+  const rawEvents = rawEventStoreStats();
+  // Chromium exposes performance.memory at runtime, but it is not part of the
+  // cross-browser Performance type used by TypeScript's DOM declarations.
+  const runtimePerformance = performance as Performance & {
+    memory?: { usedJSHeapSize?: number; totalJSHeapSize?: number; jsHeapSizeLimit?: number };
+  };
+  const memory = runtimePerformance.memory;
+  return {
+    rawEventSessions: rawEvents.sessionCount,
+    rawEventCount: rawEvents.eventCount,
+    rawEventEstimatedBytes: rawEvents.estimatedBytes,
+    rawEventCompacted: rawEvents.compactedEvents,
+    rawEventTrimmed: rawEvents.trimmedEvents,
+    ...(memory
+      ? {
+        usedJSHeapBytes: memory.usedJSHeapSize || 0,
+        totalJSHeapBytes: memory.totalJSHeapSize || 0,
+        jsHeapLimitBytes: memory.jsHeapSizeLimit || 0,
+      }
+      : {}),
+  };
+}
+
+export class EventLoopLagTracker {
+  private expectedTick: number;
+
+  constructor(
+    private readonly intervalMs: number,
+    private readonly now: () => number = () => performance.now(),
+  ) {
+    this.expectedTick = this.now() + this.intervalMs;
+  }
+
+  reset() {
+    this.expectedTick = this.now() + this.intervalMs;
+  }
+
+  sample(visible: boolean) {
+    const current = this.now();
+    const lagMs = Math.max(0, Math.round(current - this.expectedTick));
+    this.expectedTick = current + this.intervalMs;
+    return visible ? lagMs : null;
+  }
 }
 
 export function installRendererDiagnostics(bridge: AgentBridge) {
@@ -42,10 +90,20 @@ export function installRendererDiagnostics(bridge: AgentBridge) {
   };
   const onError = (event: ErrorEvent) => emit(bridge, { level: "error", event: "renderer.error", details: { message: event.message, filename: event.filename, line: event.lineno, column: event.colno, error: event.error instanceof Error ? { name: event.error.name, message: event.error.message, stack: event.error.stack } : undefined } });
   const onUnhandledRejection = (event: PromiseRejectionEvent) => emit(bridge, { level: "error", event: "renderer.unhandled_rejection", details: { reason: event.reason instanceof Error ? { name: event.reason.name, message: event.reason.message, stack: event.reason.stack } : { message: String(event.reason) } } });
-  const onFocus = () => emit(bridge, { event: "renderer.window.focus", details: interactionState() });
+  const eventLoopLag = new EventLoopLagTracker(EVENT_LOOP_INTERVAL_MS);
+  const onFocus = () => {
+    eventLoopLag.reset();
+    emit(bridge, { event: "renderer.window.focus", details: interactionState() });
+  };
   const onBlur = () => emit(bridge, { event: "renderer.window.blur", details: interactionState() });
-  const onVisibility = () => emit(bridge, { event: "renderer.visibility.changed", details: interactionState() });
-  const onPageShow = (event: PageTransitionEvent) => emit(bridge, { event: "renderer.page.shown", details: { persisted: event.persisted, ...interactionState() } });
+  const onVisibility = () => {
+    eventLoopLag.reset();
+    emit(bridge, { event: "renderer.visibility.changed", details: interactionState() });
+  };
+  const onPageShow = (event: PageTransitionEvent) => {
+    eventLoopLag.reset();
+    emit(bridge, { event: "renderer.page.shown", details: { persisted: event.persisted, ...interactionState() } });
+  };
   const onPageHide = (event: PageTransitionEvent) => emit(bridge, { event: "renderer.page.hidden", details: { persisted: event.persisted, ...interactionState() } });
   window.addEventListener(UI_EVENT_NAME, onUiEvent);
   window.addEventListener("error", onError);
@@ -55,16 +113,21 @@ export function installRendererDiagnostics(bridge: AgentBridge) {
   window.addEventListener("pageshow", onPageShow);
   window.addEventListener("pagehide", onPageHide);
   document.addEventListener("visibilitychange", onVisibility);
-  let expectedTick = performance.now() + EVENT_LOOP_INTERVAL_MS;
   const stallTimer = window.setInterval(() => {
-    const now = performance.now();
-    const lagMs = Math.max(0, Math.round(now - expectedTick));
-    expectedTick = now + EVENT_LOOP_INTERVAL_MS;
-    if (lagMs >= EVENT_LOOP_STALL_MS) emit(bridge, { level: "warn", event: "renderer.event_loop.stall", details: { lagMs, ...interactionState() } });
+    const lagMs = eventLoopLag.sample(document.visibilityState === "visible");
+    if (lagMs !== null && lagMs >= EVENT_LOOP_STALL_MS) {
+      emit(bridge, { level: "warn", event: "renderer.event_loop.stall", details: { lagMs, ...interactionState() } });
+    }
   }, EVENT_LOOP_INTERVAL_MS);
+  const emitMemorySnapshot = () => {
+    if (document.visibilityState === "visible") emit(bridge, { level: "info", event: "renderer.memory.snapshot", details: rendererMemorySnapshot() });
+  };
+  const memoryTimer = window.setInterval(emitMemorySnapshot, MEMORY_SNAPSHOT_INTERVAL_MS);
+  emitMemorySnapshot();
   emit(bridge, { level: "info", event: "renderer.ready", details: { url: location.pathname, userAgent: navigator.userAgent, width: window.innerWidth, height: window.innerHeight, deviceScaleFactor: window.devicePixelRatio, ...interactionState() } });
   return () => {
     window.clearInterval(stallTimer);
+    window.clearInterval(memoryTimer);
     window.removeEventListener(UI_EVENT_NAME, onUiEvent);
     window.removeEventListener("error", onError);
     window.removeEventListener("unhandledrejection", onUnhandledRejection);
