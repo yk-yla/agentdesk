@@ -85,6 +85,12 @@ export class RpcRequestRegistry<TChild> {
     return { kind: "late", request: timedOut };
   }
 
+  rejectResponse(id: number, child: TChild, reason: Error): TrackedRpcResponse<TChild> | null {
+    const tracked = this.takeResponse(id, child);
+    if (tracked?.kind === "pending") tracked.request.reject(reason);
+    return tracked;
+  }
+
   reject(reason: Error, child?: TChild) {
     for (const [id, waiting] of this.pending) {
       if (child !== undefined && waiting.child !== child) continue;

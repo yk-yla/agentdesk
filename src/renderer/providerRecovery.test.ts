@@ -21,4 +21,17 @@ describe("provider recovery", () => {
     assert.deepEqual(recovered.claude.plan?.steps.map((step) => step.status), ["pending", "pending"]);
     assert.match(recovered.claude.errorText, /Claude Code/);
   });
+
+  it("only settles the Codex page whose isolated service exited", () => {
+    const first = emptySession("first", "C:\\workspace", "", "medium", "codex");
+    const second = emptySession("second", "C:\\workspace", "", "medium", "codex");
+    first.status = "working";
+    second.status = "working";
+
+    const recovered = recoverProviderSessions({ first, second }, "codex", new Set(["first"]));
+
+    assert.equal(recovered.first.status, "error");
+    assert.strictEqual(recovered.second, second);
+    assert.equal(recovered.second.status, "working");
+  });
 });

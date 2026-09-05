@@ -37,13 +37,13 @@ interface ClosedSessionGrant {
 }
 
 const SESSION_OPERATIONS = new Set<AgentOperation>([
-  "listModels", "listSkills", "readSession", "forkSession", "renameSession", "deleteSession",
+  "listModels", "listSkills", "readSession", "readSessionPage", "forkSession", "renameSession", "deleteSession",
   "updateSessionMetadata", "updateSessionSettings", "startTurn", "startReview", "generateSessionTitle", "steerTurn", "interruptTurn",
   "compactSession", "readRateLimits", "listMcpServers", "getGoal", "setGoal", "clearGoal", "closeSession",
 ]);
 const QUERY_OPERATIONS = new Set<AgentOperation>(["steerTurn", "interruptTurn"]);
 const GLOBAL_OPERATIONS = new Set<AgentOperation>(["listModels", "readRateLimits"]);
-const HISTORY_OPERATIONS = new Set<AgentOperation>(["readSession", "forkSession", "renameSession", "deleteSession", "updateSessionMetadata"]);
+const HISTORY_OPERATIONS = new Set<AgentOperation>(["readSession", "readSessionPage", "forkSession", "renameSession", "deleteSession", "updateSessionMetadata"]);
 const DANGEROUS_CODEX_KEYS = new Set([
   "approvalPolicy", "approval_policy", "sandboxPolicy", "sandbox_policy", "sandboxPermissions", "sandbox_permissions",
   "dangerFullAccess", "danger_full_access",
@@ -177,7 +177,7 @@ export class AgentSessionRegistry {
       this.assertWorkspaceAuthorized(canonicalCwd);
       const nativeSessionId = this.requireNativeSessionId(params, context);
       const knownCwd = this.knownNativeSessions.get(this.nativeKey(provider, nativeSessionId));
-      if (!knownCwd && operation === "readSession") return;
+      if (!knownCwd && (operation === "readSession" || operation === "readSessionPage")) return;
       if (!knownCwd || knownCwd !== canonicalCwd) throw new Error("原生会话尚未由当前工作区的 Provider 历史登记。");
       return;
     }
@@ -205,7 +205,7 @@ export class AgentSessionRegistry {
     if (!clientSessionId && HISTORY_OPERATIONS.has(operation)) {
       const canonicalCwd = this.requireWorkspace(params, context);
       const nativeSessionId = this.requireNativeSessionId(params, context);
-      if (operation === "readSession") {
+      if (operation === "readSession" || operation === "readSessionPage") {
         const returnedNativeSessionId = nativeSessionIdFrom(result);
         const returnedCwd = workspaceFrom(result);
         if (returnedNativeSessionId !== nativeSessionId || !returnedCwd || canonicalPath(returnedCwd) !== canonicalCwd) {
@@ -265,8 +265,13 @@ export class AgentSessionRegistry {
   prepareResponse(ref: InteractionRef) {
     if (ref.provider === "claude") return;
     if (ref.requestId === undefined) throw new Error("Codex 交互缺少请求 ID。");
-    const key = this.interactionKey(ref.provider, ref.requestId);
-    const interaction = this.interactions.get(key);
+    const exactKey = this.interactionKey(ref.provider, ref.sessionId, ref.requestId);
+    let key = exactKey;
+    let interaction = this.interactions.get(key);
+    if (!interaction) {
+      const fallback = [...this.interactions.entries()].find(([, candidate]) => candidate.provider === ref.provider && candidate.requestId === ref.requestId);
+      if (fallback) [key, interaction] = fallback;
+    }
     if (!interaction || interaction.expiresAt <= Date.now()) {
       if (interaction) this.finishInteraction(key);
       throw new Error("Codex 交互不存在或已过期。");
@@ -279,7 +284,7 @@ export class AgentSessionRegistry {
 
   completeResponse(ref: InteractionRef, succeeded: boolean) {
     if (ref.provider === "claude" || ref.requestId === undefined) return;
-    const key = this.interactionKey(ref.provider, ref.requestId);
+    const key = this.interactionKey(ref.provider, ref.sessionId, ref.requestId);
     const interaction = this.interactions.get(key);
     if (!interaction) return;
     if (succeeded) this.finishInteraction(key);
@@ -322,9 +327,12 @@ export class AgentSessionRegistry {
         expiresAt: Date.now() + INTERACTION_TIMEOUT_MS,
         status: "pending",
       };
-      this.interactions.set(this.interactionKey("codex", event.requestId), interaction);
+      this.interactions.set(this.interactionKey("codex", session.clientSessionId, event.requestId), interaction);
     }
-    if (event.type === "client/server-exited") this.clearProvider("codex");
+    if (event.type === "client/server-exited") {
+      if (event.sessionId) this.releaseSession(event.sessionId);
+      else this.clearProvider("codex");
+    }
     if (session && (nativeSessionId || event.queryGeneration !== undefined)) {
       return { ...event, queryGeneration: session.queryGeneration };
     }
@@ -476,8 +484,8 @@ export class AgentSessionRegistry {
     return `${provider}\u0000${nativeSessionId}`;
   }
 
-  private interactionKey(provider: AgentProvider, requestId: number | string) {
-    return `${provider}\u0000${String(requestId)}`;
+  private interactionKey(provider: AgentProvider, sessionId: string, requestId: number | string) {
+    return `${provider}\u0000${sessionId}\u0000${String(requestId)}`;
   }
 
   private requireClosedSessionGrant(provider: AgentProvider, params: JsonObject, context: AgentRequestContext) {

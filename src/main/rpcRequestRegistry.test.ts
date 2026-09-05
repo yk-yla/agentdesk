@@ -44,6 +44,23 @@ describe("RPC request registry", () => {
     assert.equal(registry.takeResponse(4, secondChild)?.kind, "pending");
   });
 
+  it("rejects one response without disturbing other requests", () => {
+    const registry = new RpcRequestRegistry<object>(8);
+    const owner = {};
+    let firstError = "";
+    let secondResolved = false;
+    registry.add(7, { child: owner, method: "thread/resume", resolve: () => undefined, reject: (error) => { firstError = error.message; } }, 1_000, () => new Error("timeout"));
+    registry.add(8, { child: owner, method: "model/list", resolve: () => { secondResolved = true; }, reject: () => undefined }, 1_000, () => new Error("timeout"));
+
+    assert.equal(registry.rejectResponse(7, owner, new Error("too large"))?.kind, "pending");
+    const second = registry.takeResponse(8, owner);
+    if (second?.kind === "pending") second.request.resolve({ ok: true });
+
+    assert.equal(firstError, "too large");
+    assert.equal(secondResolved, true);
+    assert.equal(registry.pendingCount, 0);
+  });
+
   it("bounds timed out request metadata", async () => {
     const registry = new RpcRequestRegistry<object>(1);
     const owner = {};

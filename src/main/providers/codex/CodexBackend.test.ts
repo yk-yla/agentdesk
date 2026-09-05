@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
+import type { AgentEventEnvelope } from "../../../shared/agentProtocol";
 import { decodeCodexRpcError, encodeCodexRpcError, type JsonRpcMessage } from "../../../shared/protocol";
 import { CodexBackend, type CodexBackendRuntime } from "./CodexBackend";
 import type { CodexHistoryIndex } from "./codexHistoryIndex";
@@ -67,6 +68,99 @@ describe("CodexBackend", () => {
     const error = await backend.request("startTurn", {}, {}).then(() => null, (value) => value as Error);
     assert.equal(decodeCodexRpcError(error)?.method, "startTurn");
     assert.equal(decodeCodexRpcError(error)?.message, "failed");
+  });
+
+  it("resumes with a bounded recent page and normalizes it chronologically", async () => {
+    let method = "";
+    let providerParams: Record<string, unknown> = {};
+    const backend = new CodexBackend(runtime({
+      request: async (value, params) => {
+        method = value;
+        providerParams = params;
+        return {
+          thread: { id: "thread-1", cwd: "D:\\work", turns: [] },
+          initialTurnsPage: { data: [{ id: "new" }, { id: "old" }], nextCursor: "older" },
+        };
+      },
+    }));
+
+    const result = await backend.request("resumeSession", { threadId: "thread-1", cwd: "D:\\work" }, { sessionId: "ui-1" }) as {
+      thread: { turns: Array<{ id: string }> };
+      nextCursor: string;
+      historyHasMoreBefore: boolean;
+    };
+
+    assert.equal(method, "thread/resume");
+    assert.equal(providerParams.excludeTurns, true);
+    assert.deepEqual(providerParams.initialTurnsPage, { limit: 12, sortDirection: "desc", itemsView: "summary" });
+    assert.deepEqual(result.thread.turns.map((turn) => turn.id), ["old", "new"]);
+    assert.equal(result.nextCursor, "older");
+    assert.equal(result.historyHasMoreBefore, true);
+  });
+
+  it("bounds paginated history and never requests full Codex turns", async () => {
+    const calls: Array<{ method: string; params: Record<string, unknown> }> = [];
+    const backend = new CodexBackend(runtime({
+      request: async (method, params) => {
+        calls.push({ method, params });
+        return method === "thread/turns/list"
+          ? { data: [{ id: "new" }, { id: "old" }], nextCursor: null }
+          : { thread: { id: "thread-1", cwd: "D:\\work" } };
+      },
+    }));
+
+    await backend.request("readSession", { threadId: "thread-1", includeTurns: true }, { sessionId: "ui-1" });
+    const page = await backend.request("readSessionPage", { threadId: "thread-1", limit: 500 }, { sessionId: "ui-1" }) as { thread: { turns: Array<{ id: string }> } };
+
+    assert.deepEqual(calls[0], { method: "thread/read", params: { threadId: "thread-1", includeTurns: false } });
+    assert.deepEqual(calls[1], { method: "thread/turns/list", params: { threadId: "thread-1", limit: 12, sortDirection: "desc", itemsView: "summary" } });
+    assert.deepEqual(page.thread.turns.map((turn) => turn.id), ["old", "new"]);
+  });
+
+  it("keeps resume usable when the installed CLI lacks initial-page support", async () => {
+    const calls: Array<Record<string, unknown>> = [];
+    const backend = new CodexBackend(runtime({
+      request: async (_method, params) => {
+        calls.push(params);
+        if (params.initialTurnsPage) throw new Error(encodeCodexRpcError({ method: "thread/resume", code: -32602, message: "unknown field initialTurnsPage" }));
+        return { thread: { id: "thread-1", cwd: "D:\\work", turns: [] } };
+      },
+    }));
+
+    const result = await backend.request("resumeSession", { threadId: "thread-1", cwd: "D:\\work" }, { sessionId: "ui-1" }) as { thread: { id: string } };
+
+    assert.equal(calls.length, 2);
+    assert.equal(calls[1].excludeTurns, true);
+    assert.equal(calls[1].initialTurnsPage, undefined);
+    assert.equal(result.thread.id, "thread-1");
+  });
+
+  it("isolates each editable session runtime and scopes an exit to its page", async () => {
+    const emitted = new Map<string, (message: JsonRpcMessage) => void>();
+    const calls: string[] = [];
+    const closed: string[] = [];
+    const backend = new CodexBackend(runtime(), undefined, runtime(), undefined, undefined, {
+      create: ({ sessionId }) => runtime({
+        request: async (method) => {
+          calls.push(`${sessionId}:${method}`);
+          return { thread: { id: `thread-${sessionId}`, cwd: "D:\\work" } };
+        },
+        subscribe(listener) { emitted.set(sessionId, listener); return () => emitted.delete(sessionId); },
+        close: async () => { closed.push(sessionId); },
+      }),
+    });
+    const events: AgentEventEnvelope[] = [];
+    backend.subscribeEvents((event) => events.push(event));
+
+    await backend.request("startSession", { cwd: "D:\\work" }, { sessionId: "one", canonicalCwd: "D:\\work" });
+    await backend.request("startSession", { cwd: "D:\\work" }, { sessionId: "two", canonicalCwd: "D:\\work" });
+    emitted.get("one")?.({ method: "client/server-exited", params: { code: 1 } });
+    await new Promise<void>((resolve) => queueMicrotask(resolve));
+    await backend.request("startTurn", { threadId: "thread-two" }, { sessionId: "two", nativeSessionId: "thread-two", canonicalCwd: "D:\\work" });
+
+    assert.deepEqual(calls, ["one:thread/start", "two:thread/start", "two:turn/start"]);
+    assert.equal(events.at(-1)?.sessionId, "one");
+    assert.deepEqual(closed, ["one"]);
   });
 
   it("forwards native collaboration mode settings without rewriting them", async () => {

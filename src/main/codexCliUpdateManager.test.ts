@@ -159,6 +159,44 @@ describe("CodexCliUpdateManager", () => {
     }
   });
 
+  it("discovers and restores session app-servers at update time", async () => {
+    const directory = mkdtempSync(path.join(tmpdir(), "agentdesk-codex-dynamic-servers-"));
+    let installed = "1.0.0";
+    let sessionCloses = 0;
+    let sessionRestarts = 0;
+    const sessionServer = {
+      isRunning: true,
+      close: async () => { sessionCloses += 1; },
+      ensureStarted: async () => { sessionRestarts += 1; },
+    };
+    try {
+      const manager = new CodexCliUpdateManager({
+        processSupervisor: new ProcessSupervisor(async () => undefined),
+        appServer: { isRunning: false, close: async () => undefined, ensureStarted: async () => undefined },
+        additionalAppServers: () => [sessionServer],
+        userDataPath: () => directory,
+        isQuitting: () => false,
+        emitStatus: () => undefined,
+        notify: () => undefined,
+        isCliInUse: async () => false,
+        environment: {},
+        operations: {
+          readInstalledVersion: async () => installed,
+          readLatestVersion: async () => "1.1.0",
+          installVersion: async (version) => { installed = version; },
+        },
+      });
+
+      await manager.check(true);
+      assert.equal((await manager.update()).phase, "upToDate");
+      assert.equal(sessionCloses, 1);
+      assert.equal(sessionRestarts, 1);
+      manager.dispose();
+    } finally {
+      rmSync(directory, { recursive: true, force: true });
+    }
+  });
+
   it("does not block on pending work inside an AgentDesk app-server", async () => {
     const directory = mkdtempSync(path.join(tmpdir(), "agentdesk-codex-internal-busy-"));
     let installed = "1.0.0";

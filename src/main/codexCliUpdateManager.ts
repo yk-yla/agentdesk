@@ -39,7 +39,7 @@ export interface CodexCliUpdateManagerDependencies {
   processSupervisor: ProcessSupervisor;
   appServer: CodexAppServerControl;
   /** Other AgentDesk-owned app-server instances, such as the read-only history runtime. */
-  additionalAppServers?: readonly CodexAppServerControl[];
+  additionalAppServers?: readonly CodexAppServerControl[] | (() => readonly CodexAppServerControl[]);
   userDataPath(): string;
   isQuitting(): boolean;
   emitStatus(status: CodexCliUpdateStatus): void;
@@ -148,16 +148,15 @@ export class CodexCliUpdateManager {
     return this.updateFlight.run(async () => {
       const latestVersion = this.status.latestVersion?.trim() || "";
       let currentVersion = this.status.currentVersion;
-      let shouldRestartLocalAppServer = false;
+      let appServersToRestart: CodexAppServerControl[] = [];
       const restoreLocalAppServer = async () => {
         this.suppressExitNotification = false;
-        if (!shouldRestartLocalAppServer || this.dependencies.isQuitting()) return "";
-        try {
-          await this.dependencies.appServer.ensureStarted({ allowBlocked: true });
-          return "";
-        } catch {
+        if (!appServersToRestart.length || this.dependencies.isQuitting()) return "";
+        const results = await Promise.allSettled(appServersToRestart.map((server) => server.ensureStarted({ allowBlocked: true })));
+        if (results.some((result) => result.status === "rejected")) {
           return "桌面端 Codex 服务恢复失败，请重新发送消息后重试。";
         }
+        return "";
       };
       try {
         if (this.dependencies.isQuitting()) return this.currentStatus();
@@ -172,8 +171,8 @@ export class CodexCliUpdateManager {
         }
         this.dispose();
         if (await this.isCliInUse()) throw new Error("Codex CLI 正在被会话使用，请先关闭相关会话后再更新。");
-        shouldRestartLocalAppServer = this.dependencies.appServer.isRunning;
-        this.suppressExitNotification = shouldRestartLocalAppServer;
+        appServersToRestart = this.ownedAppServers().filter((server) => server.isRunning);
+        this.suppressExitNotification = appServersToRestart.length > 0;
         this.setStatus({ phase: "updating", currentVersion, latestVersion, message: "正在停止所有 Codex app-server。", nextCheckAt: undefined });
         await this.prepareAppServerUpdate();
         if (await this.isCliInUse()) throw new Error("Codex CLI 正在被会话使用，请先关闭相关会话后再更新。");
@@ -417,13 +416,20 @@ export class CodexCliUpdateManager {
   }
 
   async prepareAppServerUpdate() {
-    const ownedAppServers = [this.dependencies.appServer, ...(this.dependencies.additionalAppServers || [])];
+    const ownedAppServers = this.ownedAppServers();
     // Call close on every owned runtime, including one whose child is still
     // being spawned. CodexAppServer.close() waits for that startup race and
     // prevents an update from leaving a late app-server process alive.
     const results = await Promise.allSettled(ownedAppServers.map((server) => server.close()));
     const failure = results.find((result): result is PromiseRejectedResult => result.status === "rejected");
     if (failure) throw failure.reason;
+  }
+
+  private ownedAppServers() {
+    const additional = typeof this.dependencies.additionalAppServers === "function"
+      ? this.dependencies.additionalAppServers()
+      : this.dependencies.additionalAppServers || [];
+    return [this.dependencies.appServer, ...additional];
   }
 
   private errorMessage(error: unknown) {

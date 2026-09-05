@@ -106,6 +106,10 @@ export function createMockBridge(): CodexBridge {
         const thread = threadMap.get(stringValue(params.threadId));
         return Promise.resolve({ thread: thread ?? { id: params.threadId, cwd: stringValue(params.cwd), name: "历史会话", turns: [] }, model: models[0].id, reasoningEffort: "high" });
       }
+      if (method === "thread/turns/list") {
+        const thread = threadMap.get(stringValue(params.threadId));
+        return Promise.resolve({ thread: thread ?? { id: params.threadId, cwd: mockWorkspace, name: "历史会话", turns: [] }, nextCursor: null, historyHasMoreBefore: false });
+      }
       if (method === "turn/start" || method === "review/start") {
         const threadId = stringValue(params.threadId);
         const turnId = `mock-turn-${++turnCounter}`;
@@ -288,7 +292,7 @@ export function createMockBridge(): CodexBridge {
 
 const MOCK_METHODS: Record<Exclude<AgentOperation, "getCapabilities" | "closeSession">, string> = {
   listModels: "model/list", listSkills: "skills/list", listSessions: "thread/list", searchSessions: "thread/search", generateSessionTitle: "session/title/generate",
-  readSession: "thread/read", startSession: "thread/start", resumeSession: "thread/resume", forkSession: "thread/fork",
+  readSession: "thread/read", readSessionPage: "thread/turns/list", startSession: "thread/start", resumeSession: "thread/resume", forkSession: "thread/fork",
   renameSession: "thread/name/set", deleteSession: "thread/delete", updateSessionMetadata: "thread/metadata/update",
   updateSessionSettings: "thread/settings/update", startTurn: "turn/start", startReview: "review/start", steerTurn: "turn/steer",
   interruptTurn: "turn/interrupt", compactSession: "thread/compact/start", readRateLimits: "account/rateLimits/read",

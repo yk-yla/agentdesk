@@ -4,11 +4,13 @@ import { encodeCodexRpcError, type JsonObject, type JsonRpcMessage } from "../..
 import { RpcRequestRegistry } from "../../rpcRequestRegistry";
 import type { CodexBackendRuntime } from "./CodexBackend";
 import type { AppLogger } from "../../logger";
+import { BoundedJsonlDecoder, rpcResponseIdFromPrefix } from "./boundedJsonlDecoder";
 
 const DEFAULT_REQUEST_TIMEOUT_MS = 60_000;
 const APP_SERVER_SHUTDOWN_GRACE_MS = 2_000;
 const MAX_TIMED_OUT_REQUESTS = 2_048;
 const MAX_JSONL_LINE_BYTES = 16 * 1024 * 1024;
+const OVERSIZED_LINE_PREFIX_CHARACTERS = 64 * 1024;
 
 const REQUEST_TIMEOUTS_MS: Record<string, number> = {
   initialize: 30_000,
@@ -28,6 +30,7 @@ const REQUEST_TIMEOUTS_MS: Record<string, number> = {
   "thread/goal/clear": 30_000,
   "thread/read": 120_000,
   "thread/resume": 60_000,
+  "thread/turns/list": 120_000,
   "thread/unsubscribe": 30_000,
   "thread/start": 60_000,
   "thread/settings/update": 30_000,
@@ -261,35 +264,49 @@ export class CodexAppServer implements CodexBackendRuntime {
   }
 
   private attachStreams(child: ChildProcessWithoutNullStreams) {
-    let stdoutBuffer = "";
     let stderrBuffer = "";
-    let protocolFailed = false;
-    const failProtocol = () => {
-      if (protocolFailed) return;
-      protocolFailed = true;
-      this.publish({ method: "client/server-exited", params: { reason: "protocolLimit", message: "Codex app-server 返回了超过 16 MB 的单条消息，连接已重置。" } });
-      void this.stopRunningChild(child);
-    };
+    const decoder = new BoundedJsonlDecoder(MAX_JSONL_LINE_BYTES, OVERSIZED_LINE_PREFIX_CHARACTERS, (line) => {
+      if (!line.trim()) return;
+      try {
+        this.handleMessage(child, JSON.parse(line) as JsonRpcMessage);
+      } catch {
+        this.publish({ method: "client/log", params: { level: "warn", message: line.slice(0, 8 * 1024) } });
+      }
+    }, ({ bytes, prefix }) => {
+      const rpcId = rpcResponseIdFromPrefix(prefix);
+      const error = new Error(encodeCodexRpcError({
+        method: "unknown",
+        message: "Codex 返回内容过大，本次操作已停止；其他会话不受影响。",
+        data: { kind: "responseTooLarge", limitBytes: MAX_JSONL_LINE_BYTES, responseBytes: bytes },
+      }));
+      const tracked = rpcId === null ? null : this.requests.rejectResponse(rpcId, child, error);
+      const request = tracked?.request;
+      this.options.logger?.log("warn", "codex.rpc.response_too_large", {
+        requestId: request?.requestId,
+        rpcId,
+        method: request?.method || "unknown",
+        sessionId: request?.sessionId,
+        responseBytes: bytes,
+        limitBytes: MAX_JSONL_LINE_BYTES,
+        instance: this.options.diagnosticLabel || "default",
+        generation: this.childGenerations.get(child),
+        appServerProcessId: child.pid,
+        matchedRequest: Boolean(tracked),
+      });
+      if (tracked?.kind === "late" && tracked.request.sessionId) {
+        this.publish({
+          method: "client/late-response",
+          params: {
+            sessionId: tracked.request.sessionId,
+            requestMethod: tracked.request.method,
+            response: { error: { message: "Codex 返回内容过大，本次操作已停止；其他会话不受影响。" } },
+          },
+        });
+      }
+    });
     child.stdout.setEncoding("utf8");
     child.stdout.on("data", (chunk: string) => {
-      if (protocolFailed) return;
-      stdoutBuffer += chunk;
-      if (Buffer.byteLength(stdoutBuffer, "utf8") > MAX_JSONL_LINE_BYTES && !stdoutBuffer.includes("\n")) return failProtocol();
-      let newlineIndex = stdoutBuffer.indexOf("\n");
-      while (newlineIndex >= 0) {
-        const line = stdoutBuffer.slice(0, newlineIndex).replace(/\r$/, "");
-        stdoutBuffer = stdoutBuffer.slice(newlineIndex + 1);
-        if (Buffer.byteLength(line, "utf8") > MAX_JSONL_LINE_BYTES) return failProtocol();
-        if (line.trim()) {
-          try {
-            this.handleMessage(child, JSON.parse(line) as JsonRpcMessage);
-          } catch {
-            this.publish({ method: "client/log", params: { level: "warn", message: line.slice(0, 8 * 1024) } });
-          }
-        }
-        newlineIndex = stdoutBuffer.indexOf("\n");
-      }
-      if (Buffer.byteLength(stdoutBuffer, "utf8") > MAX_JSONL_LINE_BYTES) failProtocol();
+      decoder.push(chunk);
     });
     child.stderr.setEncoding("utf8");
     child.stderr.on("data", (chunk: string) => {

@@ -61,12 +61,31 @@ const NO_PENDING_STEERS: PendingSteerMessage[] = [];
 const NO_SKILLS: SkillOption[] = [];
 const NO_DISMISSED_NOTICE_KEYS: string[] = [];
 const READ_ONLY_SESSION_OPERATIONS = new Set<AgentOperation>([
-  "readSession", "resumeSession", "getGoal", "readRateLimits", "listMcpServers", "listSkills", "closeSession",
+  "readSession", "readSessionPage", "resumeSession", "getGoal", "readRateLimits", "listMcpServers", "listSkills", "closeSession",
 ]);
 
 const INITIAL_UPDATE_STATUS: DesktopUpdateStatus = { phase: "idle", currentVersion: "", message: "等待检查更新。", repositoryUrl: "https://github.com/yk-yla/agentdesk" };
 const INITIAL_CLAUDE_RUNTIME_STATUS: ClaudeRuntimeStatus = { phase: "idle", binarySource: "sdk", binaryVersion: "", sdkVersion: "", credentialsAvailable: false, credentialSource: "unavailable", credentialMessage: "正在读取 Claude 配置。", message: "等待检查更新。" };
 const CLAUDE_HISTORY_PAGE_SIZE = 200;
+
+function codexHistoryPageState(value: unknown) {
+  const payload = asRecord(value);
+  const nextCursor = stringValue(payload.nextCursor) || null;
+  return {
+    historyTurnCursor: nextCursor,
+    historyHasMoreBefore: payload.historyHasMoreBefore === true || Boolean(nextCursor),
+  };
+}
+
+function combineCodexMetadataAndPage(metadataValue: unknown, pageValue: unknown) {
+  const metadata = asRecord(metadataValue);
+  const page = asRecord(pageValue);
+  return {
+    ...metadata,
+    ...page,
+    thread: { ...asRecord(metadata.thread), ...asRecord(page.thread) },
+  };
+}
 
 const DEFAULT_SIDEBAR_WIDTH = 250;
 const MIN_SIDEBAR_WIDTH = 184;
@@ -1236,7 +1255,8 @@ export default function App() {
         const value = asRecord(await requestForSession(sessionId, "resumeSession", { threadId: session.threadId, cwd: session.cwd }));
         const queryGeneration = numberValue(value.queryGeneration, -1);
         updateSession(sessionId, (current) => ({
-          ...current,
+          ...hydrateAgentSession(current, "codex", asRecord(value.thread), { preserveRealtime: true, preserveLifecycle: true }),
+          ...codexHistoryPageState(value),
           resumed: true,
           ...(queryGeneration >= 0 ? { queryGeneration } : {}),
         }));
@@ -1785,7 +1805,12 @@ export default function App() {
 
     const readVersion = providerEventRef.current?.captureVersion(sessionId) || { event: 0, lifecycle: 0 };
     let resumed = false;
-    const readHistoricalSession = () => requestForSession(sessionId, "readSession", { threadId: entry.id, includeTurns: true });
+    const readHistoricalSession = async () => {
+      const metadata = await requestForSession(sessionId, "readSession", { threadId: entry.id, includeTurns: entry.provider === "claude" });
+      if (entry.provider === "claude") return metadata;
+      const page = await requestForSession(sessionId, "readSessionPage", { threadId: entry.id });
+      return combineCodexMetadataAndPage(metadata, page);
+    };
     const applyHistoricalRead = (readValue: unknown) => {
       const preserve = providerEventRef.current?.changedSince(sessionId, readVersion) || { preserveRealtime: false, preserveLifecycle: false };
       updateSession(sessionId, (current) => {
@@ -1794,7 +1819,11 @@ export default function App() {
           ...preserve,
           ...(persisted ? { persistedCompactionCount: persisted.count, persistedCompactionEventIds: persisted.eventIds } : {}),
         });
-        return { ...hydrated, historyLoading: false };
+        return {
+          ...hydrated,
+          ...(entry.provider === "codex" ? codexHistoryPageState(readValue) : {}),
+          historyLoading: false,
+        };
       });
       persistCompactionSnapshot(sessionId);
     };
@@ -1813,6 +1842,7 @@ export default function App() {
           resumed = true;
           const resume = asRecord(resumeValue);
           const queryGeneration = numberValue(resume.queryGeneration, -1);
+          applyHistoricalRead(resumeValue);
           updateSession(sessionId, (current) => {
             const model = stringValue(resume.model) || current.model;
             return {
@@ -1825,8 +1855,6 @@ export default function App() {
             };
           });
         },
-        read: readHistoricalSession,
-        applyRead: applyHistoricalRead,
       });
     } catch (error) {
       if (entry.provider === "codex" && !resumed && isCodexActiveWriterConflict(error)) {
@@ -1859,10 +1887,10 @@ export default function App() {
     try {
       const resume = asRecord(await requestForSession(sessionId, "resumeSession", { threadId: session.threadId, cwd: session.cwd }));
       const queryGeneration = numberValue(resume.queryGeneration, -1);
-      if (queryGeneration >= 0) updateSession(sessionId, (current) => ({ ...current, queryGeneration }));
-      const readValue = await requestForSession(sessionId, "readSession", { threadId: session.threadId, includeTurns: true });
       updateSession(sessionId, (current) => ({
-        ...hydrateAgentSession(current, current.provider, asRecord(readValue).thread),
+        ...hydrateAgentSession(current, current.provider, asRecord(resume.thread)),
+        ...codexHistoryPageState(resume),
+        ...(queryGeneration >= 0 ? { queryGeneration } : {}),
         readOnly: false,
         resumed: true,
         errorText: "",
@@ -1889,28 +1917,41 @@ export default function App() {
     }
   }, [requestForSession, setError, updateSession]);
 
-  const loadEarlierClaudeMessages = useCallback(async (sessionId: string) => {
+  const loadEarlierMessages = useCallback(async (sessionId: string) => {
     const session = sessionsRef.current[sessionId];
-    if (!session || session.provider !== "claude" || !session.threadId || session.historyHasMoreBefore !== true || session.historyLoadingEarlier) return;
+    if (!session?.threadId || session.historyHasMoreBefore !== true || session.historyLoadingEarlier) return;
     const currentOffset = session.historyMessageOffset;
-    if (typeof currentOffset !== "number" || currentOffset <= 0) return;
+    if (session.provider === "claude" && (typeof currentOffset !== "number" || currentOffset <= 0)) return;
+    if (session.provider === "codex" && !session.historyTurnCursor) return;
     updateSession(sessionId, (current) => ({ ...current, historyLoadingEarlier: true, errorText: "" }));
     try {
-      const value = await requestForSession(sessionId, "readSession", {
-        threadId: session.threadId,
-        includeTurns: true,
-        messageOffset: Math.max(0, currentOffset - CLAUDE_HISTORY_PAGE_SIZE),
-        messageLimit: CLAUDE_HISTORY_PAGE_SIZE,
-      });
-      updateSession(sessionId, (current) => ({
-        ...hydrateAgentSession(current, "claude", asRecord(value).thread, { historyPage: { prepend: true } }),
-        historyLoadingEarlier: false,
-        readOnly: true,
-        resumed: false,
-      }));
+      if (session.provider === "claude") {
+        const value = await requestForSession(sessionId, "readSession", {
+          threadId: session.threadId,
+          includeTurns: true,
+          messageOffset: Math.max(0, Number(currentOffset) - CLAUDE_HISTORY_PAGE_SIZE),
+          messageLimit: CLAUDE_HISTORY_PAGE_SIZE,
+        });
+        updateSession(sessionId, (current) => ({
+          ...hydrateAgentSession(current, "claude", asRecord(value).thread, { historyPage: { prepend: true } }),
+          historyLoadingEarlier: false,
+          readOnly: true,
+          resumed: false,
+        }));
+      } else {
+        const value = await requestForSession(sessionId, "readSessionPage", {
+          threadId: session.threadId,
+          cursor: session.historyTurnCursor,
+        });
+        updateSession(sessionId, (current) => ({
+          ...hydrateAgentSession(current, "codex", asRecord(value).thread, { historyPage: { prepend: true } }),
+          ...codexHistoryPageState(value),
+          historyLoadingEarlier: false,
+        }));
+      }
     } catch (error) {
       updateSession(sessionId, (current) => ({ ...current, historyLoadingEarlier: false }));
-      setError(sessionId, error, "读取更早的 Claude 会话记录失败");
+      setError(sessionId, error, `读取更早的${session.provider === "claude" ? " Claude" : " Codex"} 会话记录失败`);
     }
   }, [requestForSession, setError, updateSession]);
 
@@ -2030,13 +2071,26 @@ export default function App() {
       const cwd = await registerHistoricalWorkspace((directory) => bridge.registerWorkspace(directory), entry.cwd);
       const params = { cwd, threadId: entry.id };
       const context = { canonicalCwd: cwd, nativeSessionId: entry.id };
-      const readValue = await agentClient.request(entry.provider, "readSession", { ...params, includeTurns: true }, context);
+      const readValue = await agentClient.request(entry.provider, "readSession", { ...params, includeTurns: entry.provider === "claude" }, context);
       const seed = emptySession(`history-action-${Date.now()}`, cwd, "", "", entry.provider);
       seed.threadId = entry.id;
       seed.title = entry.title;
-      const source = hydrateAgentSession(seed, entry.provider, asRecord(readValue).thread);
+      let source = hydrateAgentSession(seed, entry.provider, asRecord(readValue).thread);
       source.threadId = entry.id;
       source.title = entry.title || source.title;
+
+      if (entry.provider === "codex" && ["export", "handoffCodex", "handoffClaude"].includes(action)) {
+        let cursor: string | null = null;
+        const seenCursors = new Set<string>();
+        for (let pageNumber = 0; pageNumber < 500; pageNumber += 1) {
+          const pageValue = await agentClient.request("codex", "readSessionPage", { ...params, cursor }, context);
+          source = hydrateAgentSession(source, "codex", asRecord(pageValue).thread, { historyPage: { prepend: true } });
+          const nextCursor = stringValue(asRecord(pageValue).nextCursor) || null;
+          if (!nextCursor || seenCursors.has(nextCursor)) break;
+          seenCursors.add(nextCursor);
+          cursor = nextCursor;
+        }
+      }
 
       if (action === "rename" && value) {
         const name = value.trim();
@@ -2202,24 +2256,77 @@ export default function App() {
     });
   }, [savePreference]);
 
-  const recoverProvider = useCallback((provider: AgentProvider) => {
-    const providerSessionIds = new Set(Object.values(sessionsRef.current).filter((session) => session.provider === provider).map((session) => session.id));
+  const recoverCodexSession = useCallback(async (sessionId: string) => {
+    const session = sessionsRef.current[sessionId];
+    if (!session || session.provider !== "codex") return;
+    if (!session.threadId) {
+      updateSession(sessionId, (current) => ({
+        ...current,
+        status: "idle",
+        statusLabel: "可以重试",
+        ...sessionErrorNoticePatch("Codex 后台已重新准备；刚才的任务没有重复发送，请重新发送。", { lifetime: "untilResolved" }),
+      }));
+      return;
+    }
+    providerEventRef.current?.bindSession("codex", session.threadId, sessionId);
+    try {
+      const resumeValue = await sessionLifecycleRef.current.resume(sessionId, () => requestForSession(sessionId, "resumeSession", {
+        threadId: session.threadId as string,
+        cwd: session.cwd,
+      }));
+      const resume = asRecord(resumeValue);
+      const queryGeneration = numberValue(resume.queryGeneration, -1);
+      updateSession(sessionId, (current) => {
+        const model = stringValue(resume.model) || current.model;
+        return {
+          ...hydrateAgentSession(current, "codex", asRecord(resume.thread), { preserveRealtime: true, preserveLifecycle: true }),
+          ...codexHistoryPageState(resume),
+          model,
+          effort: stringValue(resume.reasoningEffort) || current.effort,
+          resumed: true,
+          status: "idle",
+          statusLabel: "后台已自动恢复",
+          activeTurnId: null,
+          startedAt: null,
+          pendingApprovals: [],
+          ...(queryGeneration >= 0 ? { queryGeneration } : {}),
+          tokenUsage: tokenUsageForModel(current, model, preferencesRef.current),
+          ...sessionErrorNoticePatch("Codex 后台已自动恢复；刚才的任务没有重复发送，请确认结果后继续。", { lifetime: "untilResolved" }),
+        };
+      });
+    } catch (error) {
+      setError(sessionId, error, "Codex 后台自动恢复失败，请直接重试当前操作");
+      updateSession(sessionId, (current) => ({ ...current, resumed: false, status: "error", statusLabel: "等待重试" }));
+    }
+  }, [requestForSession, setError, updateSession]);
+
+  const recoverProvider = useCallback((provider: AgentProvider, affectedSessionId?: string) => {
+    const providerSessionIds = new Set(Object.values(sessionsRef.current)
+      .filter((session) => session.provider === provider && (!affectedSessionId || session.id === affectedSessionId))
+      .map((session) => session.id));
     if (!providerSessionIds.size) return;
-    providerEventRef.current?.disconnectProvider(provider);
+    if (!affectedSessionId) providerEventRef.current?.disconnectProvider(provider);
     sessionLifecycleRef.current.disconnect(providerSessionIds, new Error(providerDisconnectedMessage(provider)));
     sessionMessages.recoverProvider(providerSessionIds);
     for (const sessionId of providerSessionIds) {
       settingsCoordinatorRef.current.delete(sessionId);
     }
-    const recoveredSessions = recoverProviderSessions(sessionsRef.current, provider);
+    const recoveredSessions = recoverProviderSessions(sessionsRef.current, provider, providerSessionIds);
     sessionsRef.current = recoveredSessions;
     setSessions(recoveredSessions);
-    setProviderStartupStates((current) => {
-      const next = { ...current, [provider]: "error" as const };
-      providerStartupStatesRef.current = next;
-      return next;
-    });
-  }, [sessionMessages]);
+    if (!affectedSessionId) {
+      setProviderStartupStates((current) => {
+        const next = { ...current, [provider]: "error" as const };
+        providerStartupStatesRef.current = next;
+        return next;
+      });
+    }
+    if (provider === "codex") {
+      window.setTimeout(() => {
+        providerSessionIds.forEach((sessionId) => { void recoverCodexSession(sessionId); });
+      }, 350);
+    }
+  }, [recoverCodexSession, sessionMessages]);
 
   const reloadProviderSkills = useCallback((provider: AgentProvider) => {
     const currentTimer = skillReloadTimersRef.current.get(provider);
@@ -2475,22 +2582,9 @@ export default function App() {
           const queryGeneration = numberValue(resume.queryGeneration, -1);
           updateSession(sessionId, (current) => {
             const model = stringValue(resume.model) || current.model;
-            return {
-              ...current,
-              model,
-              effort: stringValue(resume.reasoningEffort) || current.effort,
-              resumed: true,
-              ...(queryGeneration >= 0 ? { queryGeneration } : {}),
-              tokenUsage: tokenUsageForModel(current, model, preferencesRef.current),
-            };
-          });
-        },
-        read: () => requestForSession(sessionId, "readSession", { threadId: session.threadId as string, includeTurns: true }),
-        applyRead: (readValue) => {
-          const preserve = providerEventRef.current?.changedSince(sessionId, readVersion) || { preserveRealtime: false, preserveLifecycle: false };
-          updateSession(sessionId, (current) => {
+            const preserve = providerEventRef.current?.changedSince(sessionId, readVersion) || { preserveRealtime: false, preserveLifecycle: false };
             const persisted = persistedCompaction(preferencesRef.current, current);
-            const hydrated = hydrateAgentSession(current, current.provider, asRecord(readValue).thread, {
+            const hydrated = hydrateAgentSession(current, "codex", asRecord(resume.thread), {
               ...preserve,
               ...(persisted ? { persistedCompactionCount: persisted.count, persistedCompactionEventIds: persisted.eventIds } : {}),
             });
@@ -2502,7 +2596,16 @@ export default function App() {
               startedAt: null,
               errorText: current.errorText || "上次退出软件时正在执行的任务已停止，请重新发送或继续。",
             } : hydrated;
-            return { ...restored, historyLoading: false };
+            return {
+              ...restored,
+              ...codexHistoryPageState(resume),
+              model,
+              effort: stringValue(resume.reasoningEffort) || current.effort,
+              resumed: true,
+              historyLoading: false,
+              ...(queryGeneration >= 0 ? { queryGeneration } : {}),
+              tokenUsage: tokenUsageForModel(current, model, preferencesRef.current),
+            };
           });
           persistCompactionSnapshot(sessionId);
         },
@@ -2797,7 +2900,7 @@ export default function App() {
         onDismissNotice={dismissSessionNotice}
         onRetryReadOnly={retryReadOnlySession}
         onRefresh={refreshClaudeSession}
-        onLoadEarlier={loadEarlierClaudeMessages}
+        onLoadEarlier={loadEarlierMessages}
         onOpenExternalTerminal={openClaudeExternalTerminal}
         onRespondApproval={respondToApproval}
         onInterrupt={interrupt}

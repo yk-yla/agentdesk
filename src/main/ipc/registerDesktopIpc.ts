@@ -8,7 +8,7 @@ import { normalizeBaseFontSize, normalizeClaudeModelCache, normalizeCompactionCo
 
 const AGENT_PROVIDERS = new Set<AgentProvider>(["codex", "claude"]);
 const AGENT_OPERATIONS = new Set<AgentOperation>([
-  "listModels", "listSkills", "listSessions", "searchSessions", "readSession", "startSession", "resumeSession", "forkSession",
+  "listModels", "listSkills", "listSessions", "searchSessions", "readSession", "readSessionPage", "startSession", "resumeSession", "forkSession",
   "renameSession", "deleteSession", "updateSessionMetadata", "updateSessionSettings", "startTurn", "startReview", "steerTurn",
   "generateSessionTitle",
   "interruptTurn", "compactSession", "readRateLimits", "listMcpServers", "getGoal", "setGoal", "clearGoal",

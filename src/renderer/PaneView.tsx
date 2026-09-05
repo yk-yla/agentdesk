@@ -437,9 +437,9 @@ function PaneView(props: PaneViewProps) {
           activeSearchMessageId={conversationSearchOpen ? activeConversationSearchMatch?.messageId || null : null}
           activeSearchOccurrence={conversationSearchOpen ? activeConversationSearchMatch?.occurrence ?? null : null}
           searchTargetMessageIndex={conversationSearchOpen ? activeConversationSearchMatch?.messageIndex ?? null : null}
-          canLoadEarlier={session.provider === "claude" && session.historyHasMoreBefore === true}
+          canLoadEarlier={session.historyHasMoreBefore === true}
           loadingEarlier={session.historyLoadingEarlier === true}
-          onLoadEarlier={session.provider === "claude" ? () => props.onLoadEarlier(session.id) : undefined}
+          onLoadEarlier={() => props.onLoadEarlier(session.id)}
           dismissedNoticeKeys={dismissedNoticeKeys}
           onDismissNotice={dismissNotice}
           onDismissNotices={dismissNotices}

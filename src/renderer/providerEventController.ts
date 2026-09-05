@@ -118,7 +118,7 @@ export interface ProviderEventServices {
   setReady(): void;
   removeHistory(provider: AgentProvider, nativeSessionId: string): void;
   clearSession(sessionId: string): void;
-  recoverProvider(provider: AgentProvider): void;
+  recoverProvider(provider: AgentProvider, sessionId?: string): void;
   closeActiveTab(): void;
   reloadSkills(provider: AgentProvider): void;
   activateSession(sessionId: string): void;
@@ -274,8 +274,13 @@ export class ProviderEventController {
       return;
     }
     if (event.kind === "backendExited") {
-      this.disconnectProvider(event.provider);
-      services.recoverProvider(event.provider);
+      if (event.clientSessionId) {
+        this.release(event.clientSessionId);
+        services.recoverProvider(event.provider, event.clientSessionId);
+      } else {
+        this.disconnectProvider(event.provider);
+        services.recoverProvider(event.provider);
+      }
       return;
     }
     if (event.kind === "closeActiveTab") { services.closeActiveTab(); return; }

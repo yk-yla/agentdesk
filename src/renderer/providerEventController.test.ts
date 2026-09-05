@@ -15,6 +15,7 @@ function createHarness(initialSessions?: Record<string, SessionState>) {
   const completed: Array<{ sessionId: string; status: string }> = [];
   const committed: Array<{ sessionId: string; clientId: string }> = [];
   const recovered: AgentProvider[] = [];
+  const recoveredSessionIds: Array<string | undefined> = [];
   const notifications: string[] = [];
   const providerModels: Array<{ provider: AgentProvider; ids: string[] }> = [];
   const openedWorkspaces: Array<{ workspace: string; provider?: AgentProvider }> = [];
@@ -54,7 +55,7 @@ function createHarness(initialSessions?: Record<string, SessionState>) {
       setReady: () => undefined,
       removeHistory: () => undefined,
       clearSession: () => undefined,
-      recoverProvider: (provider) => { recovered.push(provider); },
+      recoverProvider: (provider, sessionId) => { recovered.push(provider); recoveredSessionIds.push(sessionId); },
       closeActiveTab: () => undefined,
       reloadSkills: (provider) => { skillReloadProviders.push(provider); },
       activateSession: (sessionId) => { activatedSessions.push(sessionId); },
@@ -82,6 +83,7 @@ function createHarness(initialSessions?: Record<string, SessionState>) {
     completed,
     committed,
     recovered,
+    recoveredSessionIds,
     notifications,
     providerModels,
     openedWorkspaces,
@@ -248,6 +250,22 @@ describe("ProviderEventController", () => {
 
     assert.deepEqual(harness.resolvedStarts, ["session"]);
     assert.deepEqual(harness.recovered, ["codex"]);
+    assert.deepEqual(harness.recoveredSessionIds, [undefined]);
+  });
+
+  it("routes an isolated Codex service exit only to its owning page", () => {
+    const first = Object.assign(emptySession("first", "D:\\work"), { threadId: "thread-first", capabilities: { ...CODEX_CAPABILITIES } });
+    const second = Object.assign(emptySession("second", "D:\\work"), { threadId: "thread-second", capabilities: { ...CODEX_CAPABILITIES } });
+    const harness = createHarness({ first, second });
+    harness.controller.bindSession("codex", "thread-first", "first");
+    harness.controller.bindSession("codex", "thread-second", "second");
+
+    harness.controller.handleEnvelope(event("client/server-exited", {}, { sessionId: "first" }));
+
+    assert.deepEqual(harness.recovered, ["codex"]);
+    assert.deepEqual(harness.recoveredSessionIds, ["first"]);
+    assert.equal(harness.controller.sessionFor("codex", "thread-first"), "first");
+    assert.equal(harness.controller.sessionFor("codex", "thread-second"), "second");
   });
 
   it("refreshes a fallback title only after a completed turn event", () => {

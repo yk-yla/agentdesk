@@ -64,6 +64,7 @@ let claudeGatewayFixtureServer: Server | null = null;
 let claudeLifecycleFixture: ClaudeLifecycleFixtureKind | null = null;
 const attachmentCleanupTask = new CoalescingAsyncTask();
 const processSupervisor = new ProcessSupervisor();
+const codexSessionAppServers = new Set<CodexAppServer>();
 let codexCliUpdateManager: CodexCliUpdateManager;
 let claudeUpdateManager: ClaudeUpdateManager;
 const nativeSessionOwnership = new NativeSessionOwnershipRegistry();
@@ -80,7 +81,12 @@ async function externalCliInUse(provider: "codex" | "claude") {
   if (process.platform !== "win32") return false;
   const entries = await readWindowsProcesses({ track: (child) => processSupervisor.track(child), terminate: (child) => processSupervisor.terminate(child) });
   if (provider === "codex") {
-    const owned = new Set([codexAppServer.processId, legacyCodexAppServer.processId, ...codexTitleGenerator.processIds].filter(Boolean));
+    const owned = new Set([
+      codexAppServer.processId,
+      legacyCodexAppServer.processId,
+      ...[...codexSessionAppServers].map((server) => server.processId),
+      ...codexTitleGenerator.processIds,
+    ].filter(Boolean));
     return entries.some((entry) => hasCliProcess([entry], provider) && !belongsToProcessTree(entry.pid, entries, owned));
   }
   return hasCliProcess(entries, provider);
@@ -872,8 +878,44 @@ const legacyCodexAppServer = new CodexAppServer({
   logger: appLogger,
 });
 
+const codexSessionRuntimeFactory = {
+  create(input: { sessionId: string; cwd: string; home: "agentdesk" | "default" }) {
+    const server = new CodexAppServer({
+      diagnosticLabel: `session:${input.sessionId.slice(-8)}`,
+      command: codexCommand,
+      ...(input.home === "agentdesk" ? { prepare: syncCodexSkillLinks } : {}),
+      cwd: () => existingDirectory(input.cwd) || workspacePath,
+      appVersion: () => app.getVersion(),
+      isRequestBlocked: () => codexCliUpdateManager?.active || false,
+      isQuitting: () => windowLifecycle.isQuitting,
+      isExitNotificationSuppressed: () => codexCliUpdateManager?.exitNotificationSuppressed || false,
+      terminateTree: (child) => processSupervisor.terminate(child),
+      ...(input.home === "default" ? { env: { CODEX_HOME: path.join(homedir(), ".codex") } } : {}),
+      inspectMessage(message, requestMethod) {
+        const inspected = codexImagePersistence.transformMessage(message);
+        registerAuthorizedImageReferences(inspected);
+        return inspected;
+      },
+      logger: appLogger,
+    });
+    codexSessionAppServers.add(server);
+    return {
+      request: (method: string, params: Parameters<typeof server.request>[1], context: Parameters<typeof server.request>[2]) => server.request(method, params, context),
+      respond: (id: number | string, result: Parameters<typeof server.respond>[1]) => server.respond(id, result),
+      subscribe: (listener: Parameters<typeof server.subscribe>[0]) => server.subscribe(listener),
+      close: async () => {
+        try {
+          await server.close();
+        } finally {
+          codexSessionAppServers.delete(server);
+        }
+      },
+    };
+  },
+};
+
 let claudeBackend: ClaudeBackend;
-const backendManager = createBackendRegistry([new CodexBackend(codexAppServer, codexTitleGenerator, legacyCodexAppServer, codexHistoryIndex, syncCodexSkillLinks), (claudeBackend = new ClaudeBackend())], appLogger, (cwd) => isAuthorizedWorkspacePath(cwd), nativeSessionOwnership);
+const backendManager = createBackendRegistry([new CodexBackend(codexAppServer, codexTitleGenerator, legacyCodexAppServer, codexHistoryIndex, syncCodexSkillLinks, codexSessionRuntimeFactory), (claudeBackend = new ClaudeBackend())], appLogger, (cwd) => isAuthorizedWorkspacePath(cwd), nativeSessionOwnership);
 claudeUpdateManager = new ClaudeUpdateManager({
   appPath: () => app.getAppPath(),
   userDataPath: () => app.getPath("userData"),
@@ -887,7 +929,7 @@ claudeUpdateManager = new ClaudeUpdateManager({
 codexCliUpdateManager = new CodexCliUpdateManager({
   processSupervisor,
   appServer: codexAppServer,
-  additionalAppServers: [legacyCodexAppServer],
+  additionalAppServers: () => [legacyCodexAppServer, ...codexSessionAppServers],
   userDataPath: () => app.getPath("userData"),
   isQuitting: () => windowLifecycle.isQuitting,
   emitStatus: (status) => windowLifecycle.send("agentdesk:cli-update-status-changed", status),

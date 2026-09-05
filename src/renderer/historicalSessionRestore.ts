@@ -1,8 +1,8 @@
-export interface HistoricalSessionRestoreOptions<TResume, TRead> {
+export interface HistoricalSessionRestoreOptions<TResume, TRead = never> {
   resume(): Promise<TResume>;
   applyResume(value: TResume): void;
-  read(): Promise<TRead>;
-  applyRead(value: TRead): void;
+  read?: () => Promise<TRead>;
+  applyRead?: (value: TRead) => void;
 }
 
 export async function registerHistoricalWorkspace(registerWorkspace: (cwd: string) => Promise<string | null>, cwd: string) {
@@ -14,6 +14,8 @@ export async function registerHistoricalWorkspace(registerWorkspace: (cwd: strin
 export async function restoreHistoricalSession<TResume, TRead>(options: HistoricalSessionRestoreOptions<TResume, TRead>) {
   const resumeValue = await options.resume();
   options.applyResume(resumeValue);
-  const readValue = await options.read();
-  options.applyRead(readValue);
+  if (options.read && options.applyRead) {
+    const readValue = await options.read();
+    options.applyRead(readValue);
+  }
 }

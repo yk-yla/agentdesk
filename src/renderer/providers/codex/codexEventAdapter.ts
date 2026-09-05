@@ -84,6 +84,7 @@ const OPERATION_BY_METHOD: Record<string, AgentOperation> = {
   "thread/list": "listSessions",
   "thread/search": "searchSessions",
   "thread/read": "readSession",
+  "thread/turns/list": "readSessionPage",
   "thread/start": "startSession",
   "thread/resume": "resumeSession",
   "thread/fork": "forkSession",
@@ -156,7 +157,7 @@ export function adaptCodexEvent(envelope: AgentEventEnvelope): RoutedCodexEvent 
     nativeSessionId,
     parentNativeSessionId,
     childNativeSessionId,
-    clientSessionId: stringValue(params.sessionId) || undefined,
+    clientSessionId: stringValue(params.sessionId) || envelope.sessionId || undefined,
     workspace: stringValue(params.workspace) || undefined,
     launchProvider: params.provider === "codex" || params.provider === "claude" ? params.provider : undefined,
     turnStatus: kind === "turnCompleted" ? stringValue(asRecord(params.turn).status, "completed") : undefined,
@@ -561,7 +562,8 @@ export function hydrateSession(session: SessionState, threadValue: unknown, opti
   const lastTurnStatus = stringValue(lastTurn.status);
   const snapshotWorking = lastTurnStatus === "inProgress" || lastTurnStatus === "running";
   const snapshotTurnId = snapshotWorking ? stringValue(lastTurn.id) || null : null;
-  const preserveRealtime = options.preserveRealtime === true;
+  const prependHistory = options.historyPage?.prepend === true;
+  const preserveRealtime = options.preserveRealtime === true || prependHistory;
   // 内容和生命周期可能由不同事件推进。审批、活动或 token 事件不应阻止历史快照恢复 working 状态。
   const preserveLifecycle = options.preserveLifecycle ?? preserveRealtime;
   const mergedMessages = mergeByKey(messages, session.messages, messageKey, preserveRealtime);

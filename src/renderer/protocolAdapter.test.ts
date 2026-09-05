@@ -161,6 +161,22 @@ describe("protocolAdapter hydration", () => {
     }],
   };
 
+  it("prepends an older Codex page without rolling back the current lifecycle", () => {
+    const session = emptySession("session-1", "C:\\work");
+    session.status = "working";
+    session.activeTurnId = "turn-current";
+    session.messages = [{ id: "new-message", role: "assistant", text: "new", images: [] }];
+
+    const hydrated = hydrateSession(session, {
+      id: "thread-1",
+      turns: [{ id: "turn-old", status: "completed", items: [{ id: "old-message", type: "agentMessage", text: "old" }] }],
+    }, { historyPage: { prepend: true } });
+
+    assert.deepEqual(hydrated.messages.map((message) => message.text), ["old", "new"]);
+    assert.equal(hydrated.status, "working");
+    assert.equal(hydrated.activeTurnId, "turn-current");
+  });
+
   it("restores an active historical turn as working", () => {
     const hydrated = hydrateSession(emptySession("session-1", "C:\\work"), activeThread);
     assert.equal(hydrated.status, "working");

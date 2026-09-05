@@ -10,6 +10,7 @@ const METHODS: Record<Exclude<AgentOperation, "getCapabilities" | "closeSession"
   listSessions: "thread/list",
   searchSessions: "thread/search",
   readSession: "thread/read",
+  readSessionPage: "thread/turns/list",
   startSession: "thread/start",
   resumeSession: "thread/resume",
   forkSession: "thread/fork",
@@ -38,13 +39,14 @@ const CAPABILITIES: AgentCapabilities = {
 
 const THREAD_CONFIGURATION_OPERATIONS = new Set<AgentOperation>(["startSession", "resumeSession", "forkSession"]);
 const THREAD_BOUND_OPERATIONS = new Set<AgentOperation>([
-  "readSession", "resumeSession", "forkSession", "renameSession", "deleteSession", "updateSessionMetadata", "updateSessionSettings",
+  "readSession", "readSessionPage", "startSession", "resumeSession", "forkSession", "renameSession", "deleteSession", "updateSessionMetadata", "updateSessionSettings",
   "startTurn", "startReview", "generateSessionTitle", "steerTurn", "interruptTurn", "compactSession", "getGoal", "setGoal", "clearGoal", "closeSession",
 ]);
 // The UI skill listing also reads the default Codex home. User skill folders
 // are projected into the isolated home before requests and app-server starts,
 // so the active session sees the same resources without sharing writable state.
 const DEFAULT_HOME_RESOURCE_OPERATIONS = new Set<AgentOperation>(["listSkills"]);
+const CODEX_HISTORY_PAGE_SIZE = 12;
 
 interface MergedHistoryCursor {
   primary: string | null;
@@ -115,9 +117,52 @@ function forcedExecutionParams(operation: AgentOperation, params: JsonObject): J
 
 function providerRequestParams(operation: AgentOperation, params: JsonObject) {
   const prepared = forcedExecutionParams(operation, params);
+  if (operation === "readSession") return { ...prepared, includeTurns: false };
+  if (operation === "readSessionPage") return {
+    ...prepared,
+    limit: Math.min(Math.max(Number(prepared.limit) || CODEX_HISTORY_PAGE_SIZE, 1), CODEX_HISTORY_PAGE_SIZE),
+    sortDirection: "desc",
+    itemsView: "summary",
+  };
+  if (operation === "resumeSession") return {
+    ...prepared,
+    excludeTurns: true,
+    initialTurnsPage: { limit: CODEX_HISTORY_PAGE_SIZE, sortDirection: "desc", itemsView: "summary" },
+  };
+  if (operation === "forkSession") return { ...prepared, excludeTurns: true };
   if ((operation !== "listSessions" && operation !== "searchSessions") || prepared.allWorkspaces !== true) return prepared;
   const { allWorkspaces: _allWorkspaces, ...providerParams } = prepared;
   return providerParams;
+}
+
+function record(value: unknown): Record<string, unknown> {
+  return value && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : {};
+}
+
+function normalizeHistoryResult(operation: AgentOperation, value: unknown, params: JsonObject) {
+  if (operation !== "resumeSession" && operation !== "readSessionPage") return value;
+  const payload = record(value);
+  const page = operation === "resumeSession" ? record(payload.initialTurnsPage) : payload;
+  const data = Array.isArray(page.data) ? [...page.data].reverse() : [];
+  const thread = operation === "resumeSession" ? record(payload.thread) : {};
+  const nextCursor = typeof page.nextCursor === "string" && page.nextCursor ? page.nextCursor : null;
+  return {
+    ...payload,
+    thread: {
+      ...thread,
+      id: typeof thread.id === "string" ? thread.id : params.threadId,
+      ...(typeof thread.cwd === "string" ? {} : typeof params.cwd === "string" ? { cwd: params.cwd } : {}),
+      turns: data,
+    },
+    nextCursor,
+    historyHasMoreBefore: Boolean(nextCursor),
+  };
+}
+
+function shouldRetryResumeWithoutInitialPage(error: unknown) {
+  const payload = decodeCodexRpcError(error);
+  if (!payload) return false;
+  return payload.code === -32602 || /initialTurnsPage|unknown field|invalid params/i.test(payload.message);
 }
 
 export interface CodexBackendRuntime {
@@ -127,11 +172,25 @@ export interface CodexBackendRuntime {
   close(): Promise<void>;
 }
 
+export type CodexRuntimeHome = "agentdesk" | "default";
+
+export interface CodexSessionRuntimeFactory {
+  create(input: { sessionId: string; cwd: string; home: CodexRuntimeHome }): CodexBackendRuntime;
+}
+
+interface SessionRuntimeEntry {
+  runtime: CodexBackendRuntime;
+  home: CodexRuntimeHome;
+}
+
 export class CodexBackend implements AgentBackend {
   readonly provider = "codex" as const;
   private readonly activeSessions = new Map<string, string>();
   private readonly legacyHistorySessionIds = new Set<string>();
   private readonly legacyClientSessionIds = new Set<string>();
+  private readonly eventListeners = new Set<(event: AgentEventEnvelope) => void>();
+  private readonly runtimeSubscriptions = new Map<CodexBackendRuntime, () => void>();
+  private readonly sessionRuntimes = new Map<string, SessionRuntimeEntry>();
 
   constructor(
     private readonly runtime: CodexBackendRuntime,
@@ -139,7 +198,11 @@ export class CodexBackend implements AgentBackend {
     private readonly legacyHistoryRuntime?: CodexBackendRuntime,
     private readonly historyIndex?: CodexHistoryIndex,
     private readonly prepare?: () => void | Promise<void>,
-  ) {}
+    private readonly sessionRuntimeFactory?: CodexSessionRuntimeFactory,
+  ) {
+    this.subscribeRuntime(this.runtime);
+    if (this.legacyHistoryRuntime) this.subscribeRuntime(this.legacyHistoryRuntime);
+  }
 
   async request(operation: AgentOperation, params: JsonObject, context: AgentRequestContext) {
     await this.prepare?.();
@@ -156,12 +219,19 @@ export class CodexBackend implements AgentBackend {
     try {
       let result: unknown;
       try {
-        result = await selectedRuntime.request(method, providerParams, context, operation);
+        try {
+          result = await selectedRuntime.request(method, providerParams, context, operation);
+        } catch (error) {
+          if (operation !== "resumeSession" || !shouldRetryResumeWithoutInitialPage(error)) throw error;
+          const { initialTurnsPage: _initialTurnsPage, ...metadataOnlyParams } = providerParams;
+          result = await selectedRuntime.request(method, metadataOnlyParams, context, operation);
+        }
       } catch (error) {
         if (!this.shouldRetryResumeOnLegacy(operation, providerParams, context, selectedRuntime, error)) throw error;
-        selectedRuntime = this.legacyHistoryRuntime as CodexBackendRuntime;
+        selectedRuntime = this.legacyResumeRuntime(providerParams, context);
         result = await selectedRuntime.request(method, providerParams, context, operation);
       }
+      result = normalizeHistoryResult(operation, result, providerParams);
       if ((operation === "startSession" || operation === "resumeSession") && context.sessionId) {
         const payload = result && typeof result === "object" && !Array.isArray(result)
           ? result as { thread?: unknown; threadId?: unknown }
@@ -185,24 +255,14 @@ export class CodexBackend implements AgentBackend {
 
   respondToInteraction(ref: InteractionRef, result: JsonObject) {
     if (ref.provider !== this.provider || ref.requestId === undefined) throw new Error("Codex 交互引用无效。");
-    const runtime = this.legacyHistoryRuntime && this.legacyClientSessionIds.has(ref.sessionId) ? this.legacyHistoryRuntime : this.runtime;
+    const runtime = this.sessionRuntimes.get(ref.sessionId)?.runtime
+      || (this.legacyHistoryRuntime && this.legacyClientSessionIds.has(ref.sessionId) ? this.legacyHistoryRuntime : this.runtime);
     return runtime.respond(ref.requestId, result);
   }
 
   subscribeEvents(listener: (event: AgentEventEnvelope) => void) {
-    const publish = (message: JsonRpcMessage) => listener({
-      provider: this.provider,
-      requestId: message.id,
-      receivedAt: Date.now(),
-      type: message.method || "codex/unknown",
-      payload: message.params ?? message.result ?? message.error ?? {},
-    });
-    const unsubscribePrimary = this.runtime.subscribe(publish);
-    const unsubscribeLegacy = this.legacyHistoryRuntime?.subscribe(publish);
-    return () => {
-      unsubscribePrimary();
-      unsubscribeLegacy?.();
-    };
+    this.eventListeners.add(listener);
+    return () => this.eventListeners.delete(listener);
   }
 
   async getCapabilities() {
@@ -211,17 +271,24 @@ export class CodexBackend implements AgentBackend {
 
   async closeSession(context: AgentRequestContext) {
     if (context.sessionId) this.titleGenerator?.cancel(context.sessionId);
-    if (context.nativeSessionId) {
-      await this.runtimeFor("closeSession", {}, context).request("thread/unsubscribe", { threadId: context.nativeSessionId }, context, "closeSession");
-    }
-    if (context.sessionId) {
-      this.activeSessions.delete(context.sessionId);
-      this.legacyClientSessionIds.delete(context.sessionId);
+    try {
+      if (context.nativeSessionId) {
+        await this.runtimeFor("closeSession", {}, context).request("thread/unsubscribe", { threadId: context.nativeSessionId }, context, "closeSession");
+      }
+    } finally {
+      if (context.sessionId) {
+        this.activeSessions.delete(context.sessionId);
+        this.legacyClientSessionIds.delete(context.sessionId);
+        await this.releaseSessionRuntime(context.sessionId);
+      }
     }
   }
 
   async close() {
-    await Promise.all([this.titleGenerator?.close() || Promise.resolve(), this.runtime.close(), this.legacyHistoryRuntime?.close() || Promise.resolve()]);
+    const sessionRuntimes = [...this.sessionRuntimes.keys()].map((sessionId) => this.releaseSessionRuntime(sessionId));
+    await Promise.all([this.titleGenerator?.close() || Promise.resolve(), this.runtime.close(), this.legacyHistoryRuntime?.close() || Promise.resolve(), ...sessionRuntimes]);
+    this.runtimeSubscriptions.forEach((unsubscribe) => unsubscribe());
+    this.runtimeSubscriptions.clear();
     this.activeSessions.clear();
     this.legacyClientSessionIds.clear();
   }
@@ -257,6 +324,12 @@ export class CodexBackend implements AgentBackend {
   }
 
   private runtimeFor(operation: AgentOperation, params: JsonObject, context: AgentRequestContext) {
+    if (this.sessionRuntimeFactory && context.sessionId && THREAD_BOUND_OPERATIONS.has(operation)) {
+      const nativeSessionId = typeof params.threadId === "string" ? params.threadId : context.nativeSessionId;
+      const home: CodexRuntimeHome = this.legacyClientSessionIds.has(context.sessionId) || (nativeSessionId ? this.legacyHistorySessionIds.has(nativeSessionId) : false)
+        ? "default" : "agentdesk";
+      return this.sessionRuntime(context.sessionId, context.canonicalCwd || (typeof params.cwd === "string" ? params.cwd : ""), home);
+    }
     if (this.legacyHistoryRuntime && DEFAULT_HOME_RESOURCE_OPERATIONS.has(operation)) return this.legacyHistoryRuntime;
     if (!this.legacyHistoryRuntime || !THREAD_BOUND_OPERATIONS.has(operation)) return this.runtime;
     if (context.sessionId && this.legacyClientSessionIds.has(context.sessionId)) return this.legacyHistoryRuntime;
@@ -271,9 +344,12 @@ export class CodexBackend implements AgentBackend {
     selectedRuntime: CodexBackendRuntime,
     error: unknown,
   ) {
-    if (operation !== "resumeSession" || !this.legacyHistoryRuntime || selectedRuntime !== this.runtime) return false;
+    if (operation !== "resumeSession" || !this.legacyHistoryRuntime) return false;
     const nativeSessionId = typeof params.threadId === "string" ? params.threadId : context.nativeSessionId;
     if (!nativeSessionId) return false;
+    const selectedSessionRuntime = context.sessionId ? this.sessionRuntimes.get(context.sessionId) : undefined;
+    const selectedPrimary = selectedRuntime === this.runtime || (selectedSessionRuntime?.runtime === selectedRuntime && selectedSessionRuntime.home === "agentdesk");
+    if (!selectedPrimary) return false;
     const payload = decodeCodexRpcError(error);
     return payload?.code === -32600 && /(?:no rollout found|thread not found)/i.test(payload.message);
   }
@@ -287,12 +363,64 @@ export class CodexBackend implements AgentBackend {
       : typeof payload.threadId === "string"
         ? payload.threadId
         : typeof params.threadId === "string" ? params.threadId : context.nativeSessionId;
-    if (runtime === this.legacyHistoryRuntime) {
+    const sessionRuntime = context.sessionId ? this.sessionRuntimes.get(context.sessionId) : undefined;
+    if (runtime === this.legacyHistoryRuntime || (sessionRuntime?.runtime === runtime && sessionRuntime.home === "default")) {
       if (nativeSessionId) this.legacyHistorySessionIds.add(nativeSessionId);
       if (context.sessionId) this.legacyClientSessionIds.add(context.sessionId);
     } else if (context.sessionId) {
       this.legacyClientSessionIds.delete(context.sessionId);
     }
+  }
+
+  private legacyResumeRuntime(params: JsonObject, context: AgentRequestContext) {
+    if (!this.legacyHistoryRuntime) return this.runtime;
+    if (!this.sessionRuntimeFactory || !context.sessionId) return this.legacyHistoryRuntime;
+    void this.releaseSessionRuntime(context.sessionId);
+    return this.sessionRuntime(
+      context.sessionId,
+      context.canonicalCwd || (typeof params.cwd === "string" ? params.cwd : ""),
+      "default",
+    );
+  }
+
+  private sessionRuntime(sessionId: string, cwd: string, home: CodexRuntimeHome) {
+    const existing = this.sessionRuntimes.get(sessionId);
+    if (existing?.home === home) return existing.runtime;
+    if (existing) void this.releaseSessionRuntime(sessionId);
+    const runtime = this.sessionRuntimeFactory?.create({ sessionId, cwd, home });
+    if (!runtime) return home === "default" && this.legacyHistoryRuntime ? this.legacyHistoryRuntime : this.runtime;
+    this.sessionRuntimes.set(sessionId, { runtime, home });
+    this.subscribeRuntime(runtime, sessionId);
+    return runtime;
+  }
+
+  private subscribeRuntime(runtime: CodexBackendRuntime, sessionId?: string) {
+    if (this.runtimeSubscriptions.has(runtime)) return;
+    const unsubscribe = runtime.subscribe((message) => {
+      if (!sessionId && this.sessionRuntimeFactory && message.method === "client/server-exited") return;
+      const event: AgentEventEnvelope = {
+        provider: this.provider,
+        ...(sessionId ? { sessionId } : {}),
+        requestId: message.id,
+        receivedAt: Date.now(),
+        type: message.method || "codex/unknown",
+        payload: message.params ?? message.result ?? message.error ?? {},
+      };
+      this.eventListeners.forEach((listener) => listener(event));
+      if (sessionId && message.method === "client/server-exited" && this.sessionRuntimes.get(sessionId)?.runtime === runtime) {
+        void this.releaseSessionRuntime(sessionId);
+      }
+    });
+    this.runtimeSubscriptions.set(runtime, unsubscribe);
+  }
+
+  private async releaseSessionRuntime(sessionId: string) {
+    const entry = this.sessionRuntimes.get(sessionId);
+    if (!entry) return;
+    this.sessionRuntimes.delete(sessionId);
+    this.runtimeSubscriptions.get(entry.runtime)?.();
+    this.runtimeSubscriptions.delete(entry.runtime);
+    await entry.runtime.close();
   }
 
   private async requestMergedHistory(method: string, params: JsonObject, context: AgentRequestContext, operation: AgentOperation) {

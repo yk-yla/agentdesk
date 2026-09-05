@@ -184,6 +184,8 @@ export interface SessionState {
   historyMessageOffset?: number;
   /** Claude 历史在 Provider 中的完整消息数，不代表当前内存中的数量。 */
   historyMessageTotal?: number;
+  /** Codex 更早历史的分页位置，不包含对话正文。 */
+  historyTurnCursor?: string | null;
   historyHasMoreBefore?: boolean;
   historyHasMoreAfter?: boolean;
   queryGeneration: number;

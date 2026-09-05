@@ -79,6 +79,18 @@ describe("AgentSessionRegistry", () => {
     assert.throws(() => sessions.prepareRequest("codex", "startTurn", { threadId: "thread-1" }, context({ nativeSessionId: "thread-1" })), /会话不存在/);
   });
 
+  it("keeps other Codex registrations when an isolated session service exits", () => {
+    const sessions = registry();
+    startSession(sessions);
+    sessions.prepareRequest("codex", "startSession", { cwd }, context({ sessionId: "client-2" }));
+    sessions.completeRequest("codex", "startSession", { cwd }, context({ sessionId: "client-2" }), { thread: { id: "thread-2", cwd } });
+
+    sessions.observeEvent(event("codex", "client/server-exited", { code: 1 }, { sessionId: "client-1" }));
+
+    assert.throws(() => sessions.prepareRequest("codex", "startTurn", { threadId: "thread-1" }, context({ nativeSessionId: "thread-1" })), /会话不存在/);
+    assert.doesNotThrow(() => sessions.prepareRequest("codex", "startTurn", { threadId: "thread-2" }, context({ sessionId: "client-2", nativeSessionId: "thread-2" })));
+  });
+
   it("rejects Renderer trust and dangerous Codex overrides recursively", () => {
     const sessions = registry();
     assert.throws(() => sessions.prepareRequest("claude", "startSession", { cwd, trustWorkspace: true }, context()), /不能自行授予/);
@@ -113,6 +125,19 @@ describe("AgentSessionRegistry", () => {
     sessions.prepareRequest("codex", "readSession", { cwd, threadId: "history-1" }, { canonicalCwd: cwd });
   });
 
+  it("validates unscoped paginated history ownership", () => {
+    const sessions = registry();
+    sessions.prepareRequest("codex", "readSessionPage", { cwd, threadId: "history-page" }, { canonicalCwd: cwd });
+    assert.throws(() => sessions.completeRequest("codex", "readSessionPage", { cwd, threadId: "history-page" }, { canonicalCwd: cwd }, {
+      thread: { id: "history-page", cwd: otherCwd },
+      nextCursor: null,
+    }), /归属无效/);
+    sessions.completeRequest("codex", "readSessionPage", { cwd, threadId: "history-page" }, { canonicalCwd: cwd }, {
+      thread: { id: "history-page", cwd },
+      nextCursor: null,
+    });
+  });
+
   it("allows only explicit unscoped history requests without granting returned workspaces", () => {
     const sessions = registry();
     assert.throws(() => sessions.prepareRequest("codex", "listSessions", {}, {}), /缺少工作区/);
@@ -137,6 +162,23 @@ describe("AgentSessionRegistry", () => {
     assert.throws(() => sessions.prepareResponse(valid), /不能重复响应/);
     sessions.completeResponse(valid, true);
     assert.throws(() => sessions.prepareResponse(valid), /不存在或已过期/);
+  });
+
+  it("keeps identical interaction ids isolated between Codex pages", () => {
+    const sessions = registry();
+    startSession(sessions);
+    sessions.prepareRequest("codex", "startSession", { cwd }, context({ sessionId: "client-2" }));
+    sessions.completeRequest("codex", "startSession", { cwd }, context({ sessionId: "client-2" }), { thread: { id: "thread-2", cwd } });
+    sessions.observeEvent(event("codex", "turn/started", { threadId: "thread-1", turn: { id: "turn-1" } }));
+    sessions.observeEvent(event("codex", "turn/started", { threadId: "thread-2", turn: { id: "turn-2" } }));
+    sessions.observeEvent(event("codex", "tool/requestUserInput", { threadId: "thread-1" }, { requestId: 7 }));
+    sessions.observeEvent(event("codex", "tool/requestUserInput", { threadId: "thread-2" }, { requestId: 7 }));
+
+    const first: InteractionRef = { provider: "codex", sessionId: "client-1", queryGeneration: 1, interactionId: "7", requestId: 7 };
+    const second: InteractionRef = { provider: "codex", sessionId: "client-2", queryGeneration: 1, interactionId: "7", requestId: 7 };
+    sessions.prepareResponse(first);
+    sessions.completeResponse(first, true);
+    assert.doesNotThrow(() => sessions.prepareResponse(second));
   });
 
   it("expires Codex interactions when the query finishes", () => {

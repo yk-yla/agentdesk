@@ -1,9 +1,9 @@
 import type { AgentProvider } from "../shared/agentProtocol";
 import type { SessionState } from "./domain";
 
-export function recoverProviderSessions(sessions: Record<string, SessionState>, provider: AgentProvider) {
+export function recoverProviderSessions(sessions: Record<string, SessionState>, provider: AgentProvider, affectedSessionIds?: ReadonlySet<string>) {
   const providerName = provider === "claude" ? "Claude Code" : "Codex";
-  return Object.fromEntries(Object.entries(sessions).map(([id, session]) => session.provider === provider ? [id, {
+  return Object.fromEntries(Object.entries(sessions).map(([id, session]) => session.provider === provider && (!affectedSessionIds || affectedSessionIds.has(id)) ? [id, {
     ...session,
     resumed: false,
     status: "error" as const,

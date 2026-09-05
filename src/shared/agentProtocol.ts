@@ -88,6 +88,7 @@ export type AgentOperation =
   | "listSessions"
   | "searchSessions"
   | "readSession"
+  | "readSessionPage"
   | "startSession"
   | "resumeSession"
   | "forkSession"
