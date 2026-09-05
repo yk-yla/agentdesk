@@ -1082,8 +1082,9 @@ if (hasLock) {
         },
       } : {}),
     });
-    void codexCliUpdateManager.initialize();
-    void claudeUpdateManager.initialize();
+    // Provider CLI updates are intentionally managed outside AgentDesk. Keep
+    // the managers available only for backwards-compatible IPC/status types;
+    // do not start their automatic version checks or update timers.
     windowLifecycle.createWindow();
     windowLifecycle.createTray();
     desktopUpdateManager.initialize();

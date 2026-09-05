@@ -20,6 +20,12 @@ describe("renderer provider registry", () => {
     const configurableCodexModel = { ...model, efforts: ["medium", "high", "xhigh"] };
     assert.equal(newSessionDefaults("codex", [configurableCodexModel], { model: "codex-test", effort: "medium" }, capabilities.codex, "xhigh").effort, "xhigh");
     assert.equal(newSessionDefaults("codex", [configurableCodexModel], { model: "codex-test", effort: "medium" }, capabilities.codex, "max").effort, "medium");
+    const alternateCodexModel = { id: "gpt-6-astra", displayName: "GPT-6-Astra", description: "", efforts: ["medium", "high"], defaultEffort: "medium", supportsImage: true };
+    assert.deepEqual(newSessionDefaults("codex", [model, alternateCodexModel], { model: "codex-test", effort: "medium" }, capabilities.codex, "high", "gpt-6-astra"), {
+      model: "gpt-6-astra",
+      effort: "high",
+      capabilities: capabilities.codex,
+    });
     assert.equal(capabilities.claude.images, "supported");
     assert.equal(capabilities.claude.history, "supported");
     assert.equal(capabilities.claude.compact, "temporarilyUnavailable");

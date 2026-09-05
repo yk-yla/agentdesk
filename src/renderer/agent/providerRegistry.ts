@@ -83,11 +83,11 @@ export function initialProviderModels(cache?: ClaudeModelCache, claudeVersion?: 
   return { codex: [], claude: cached.length ? cached : CLAUDE_BOOTSTRAP_MODELS };
 }
 
-export function newSessionDefaults(provider: AgentProvider, models: ModelOption[], defaults: CodexDefaults, capabilities: AgentCapabilities, preferredEffort = "") {
+export function newSessionDefaults(provider: AgentProvider, models: ModelOption[], defaults: CodexDefaults, capabilities: AgentCapabilities, preferredEffort = "", preferredModel = "") {
   const values = definitions[provider].sessionDefaults(models, defaults);
-  const model = findModelOption(models, values.model);
-  const effort = model?.efforts.includes(preferredEffort) ? preferredEffort : values.effort;
-  return { ...values, effort, capabilities: { ...(definitions[provider].affectsStartupState ? capabilities : definitions[provider].initialCapabilities) } };
+  const model = findModelOption(models, preferredModel) || findModelOption(models, values.model);
+  const effort = model?.efforts.includes(preferredEffort) ? preferredEffort : model?.defaultEffort || values.effort;
+  return { ...values, model: model?.id || values.model, effort, capabilities: { ...(definitions[provider].affectsStartupState ? capabilities : definitions[provider].initialCapabilities) } };
 }
 
 export function retargetEmptySession(
@@ -109,8 +109,8 @@ export function retargetEmptySession(
   return next;
 }
 
-export function applyProviderModelDefaults(session: SessionState, models: ModelOption[], defaults: CodexDefaults, preferredEffort = "") {
-  const values = newSessionDefaults(session.provider, models, defaults, session.capabilities, preferredEffort);
+export function applyProviderModelDefaults(session: SessionState, models: ModelOption[], defaults: CodexDefaults, preferredEffort = "", preferredModel = "") {
+  const values = newSessionDefaults(session.provider, models, defaults, session.capabilities, preferredEffort, preferredModel);
   if (!values.model || session.model) return session;
   return { ...session, model: values.model, effort: values.effort };
 }

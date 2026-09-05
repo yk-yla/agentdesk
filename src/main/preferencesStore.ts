@@ -27,6 +27,7 @@ export const DEFAULT_PREFERENCES: DesktopPreferences = {
   favoriteSessions: [],
   favoriteSessionSummaries: {},
   modelContextWindows: {},
+  lastModels: {},
   lastReasoningEfforts: {},
   recentCommandUsage: {},
   compactionCounts: {},
@@ -75,6 +76,15 @@ export function normalizeLastReasoningEfforts(value: unknown): NonNullable<Deskt
   return Object.fromEntries((["codex", "claude"] as const).flatMap((provider) => {
     const effort = typeof record[provider] === "string" ? record[provider].trim() : "";
     return effort && effort.length <= 32 ? [[provider, effort]] : [];
+  }));
+}
+
+export function normalizeLastModels(value: unknown): NonNullable<DesktopPreferences["lastModels"]> {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return {};
+  const record = value as Record<string, unknown>;
+  return Object.fromEntries((["codex", "claude"] as const).flatMap((provider) => {
+    const model = typeof record[provider] === "string" ? record[provider].trim() : "";
+    return model && model.length <= 240 ? [[provider, model]] : [];
   }));
 }
 
@@ -187,6 +197,7 @@ export function normalizePreferences(value: unknown): DesktopPreferences {
     favoriteSessions: Array.isArray(parsed.favoriteSessions) ? parsed.favoriteSessions.filter((item): item is string => typeof item === "string").slice(0, 2_000) : [],
     favoriteSessionSummaries: normalizeFavoriteSessionSummaries(parsed.favoriteSessionSummaries),
     modelContextWindows: normalizeModelContextWindows(parsed.modelContextWindows),
+    lastModels: normalizeLastModels(parsed.lastModels),
     ...(claudeModelCache ? { claudeModelCache } : {}),
     lastReasoningEfforts: normalizeLastReasoningEfforts(parsed.lastReasoningEfforts),
     recentCommandUsage: normalizeRecentCommandUsage(parsed.recentCommandUsage),

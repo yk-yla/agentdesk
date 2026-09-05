@@ -1,6 +1,6 @@
 import { Settings2, X } from "lucide-react";
 import { lazy, Suspense, useEffect, useRef, useState } from "react";
-import { type ClaudeRuntimeStatus, type CodexCliUpdateStatus, type DesktopPreferences, type DesktopUpdateStatus, type ThemeId, type DiagnosticExport } from "../shared/protocol";
+import { type DesktopPreferences, type DesktopUpdateStatus, type ThemeId, type DiagnosticExport } from "../shared/protocol";
 import { DEFAULT_EXTERNAL_TERMINAL_KIND, externalTerminalSettingsForPreset } from "../shared/externalTerminalPresets";
 import { trackUiEvent } from "./rendererDiagnostics";
 
@@ -16,17 +16,11 @@ export interface SettingsPopoverViewModel {
   theme: ThemeId;
   externalTerminal?: DesktopPreferences["externalTerminal"];
   updateStatus: DesktopUpdateStatus;
-  cliUpdateStatus: CodexCliUpdateStatus;
-  claudeStatus: ClaudeRuntimeStatus;
 }
 
 export interface SettingsPopoverActions {
   onSavePreference: (patch: Partial<DesktopPreferences>) => Promise<void>;
   onCheckForUpdates: () => Promise<void>;
-  onCheckCodexCliUpdates: () => Promise<void>;
-  onUpdateCodexCli: () => Promise<void>;
-  onCheckClaude: () => Promise<void>;
-  onUpdateClaude: () => Promise<void>;
   onDownloadUpdate: () => Promise<void>;
   onInstallUpdate: () => Promise<void>;
   onOpenUpdateRepository: () => Promise<void>;
@@ -46,9 +40,7 @@ export default function SettingsPopover({ collapsed, viewModel, actions }: Props
   const [open, setOpen] = useState(false);
   const buttonRef = useRef<HTMLButtonElement>(null);
   const popoverRef = useRef<HTMLDivElement>(null);
-  const updateAvailable = viewModel.updateStatus.phase === "available" || viewModel.updateStatus.phase === "downloaded"
-    || viewModel.cliUpdateStatus.phase === "available"
-    || viewModel.claudeStatus.phase === "available";
+  const updateAvailable = viewModel.updateStatus.phase === "available" || viewModel.updateStatus.phase === "downloaded";
   const settingsLabel = updateAvailable ? "设置，有可用更新" : "设置";
 
   const close = (reason: string) => {
@@ -96,7 +88,7 @@ export default function SettingsPopover({ collapsed, viewModel, actions }: Props
           <label className="settings-inline-field"><span>主题</span><div className="settings-select-control"><span className="theme-swatch" style={{ background: THEME_OPTIONS.find((option) => option.id === viewModel.theme)?.swatch || "#7d8794" }} /><select value={viewModel.theme} onChange={(event) => { const theme = event.target.value as ThemeId; savePreference({ theme }, "settings.theme_changed", { theme }); }}>{THEME_OPTIONS.map((option) => <option value={option.id} key={option.id}>{option.label}</option>)}</select></div></label>
         </section>
         <Suspense fallback={<div className="settings-lazy-loading" aria-busy="true">正在加载高级设置</div>}>
-          <SettingsAdvanced externalTerminal={{ value: viewModel.externalTerminal || externalTerminalSettingsForPreset(DEFAULT_EXTERNAL_TERMINAL_KIND), onSave: actions.onSavePreference }} update={{ status: viewModel.updateStatus, cliStatus: viewModel.cliUpdateStatus, claudeStatus: viewModel.claudeStatus, onCheck: actions.onCheckForUpdates, onCheckCli: actions.onCheckCodexCliUpdates, onUpdateCli: actions.onUpdateCodexCli, onCheckClaude: actions.onCheckClaude, onUpdateClaude: actions.onUpdateClaude, onDownload: actions.onDownloadUpdate, onInstall: actions.onInstallUpdate, onOpenRepository: actions.onOpenUpdateRepository, onExportDiagnostics: actions.onExportDiagnostics }} />
+          <SettingsAdvanced externalTerminal={{ value: viewModel.externalTerminal || externalTerminalSettingsForPreset(DEFAULT_EXTERNAL_TERMINAL_KIND), onSave: actions.onSavePreference }} update={{ status: viewModel.updateStatus, onCheck: actions.onCheckForUpdates, onDownload: actions.onDownloadUpdate, onInstall: actions.onInstallUpdate, onOpenRepository: actions.onOpenUpdateRepository, onExportDiagnostics: actions.onExportDiagnostics }} />
         </Suspense>
       </div>
     </div> : null}

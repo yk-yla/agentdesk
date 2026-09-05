@@ -52,6 +52,8 @@ async page => {
     await settingsButton.click();
     const settingsPopover = sidebar.locator(".settings-popover");
     await settingsPopover.waitFor({ state: "visible", timeout: 10_000 });
+    assert(await settingsPopover.getByText("Codex CLI", { exact: true }).count() === 0, "设置仍显示 Codex CLI 更新入口。");
+    assert(await settingsPopover.getByText("Claude Code", { exact: true }).count() === 0, "设置仍显示 Claude Code 更新入口。");
     const themeSelect = settingsPopover.locator("label", { hasText: "主题" }).locator("select");
     const originalTheme = await page.evaluate(async () => (await window.agentDesk.getPreferences()).theme);
     const themes = [
@@ -116,6 +118,7 @@ async page => {
         const selected = document.querySelector('.pane-panel.active-pane select[aria-label="选择模型"]');
         return selected instanceof HTMLSelectElement && selected.value === expected;
       }, secondCodexModel, { timeout: 10_000 });
+      await page.waitForFunction(async expected => (await window.agentDesk.getPreferences()).lastModels?.codex === expected, secondCodexModel, { timeout: 10_000 });
     }
     const effort = activeEffort();
     const codexEffortOptions = await effort.locator("option").evaluateAll(options => options.map(option => option.value));
@@ -130,6 +133,7 @@ async page => {
       const effort = document.querySelector('.pane-panel.active-pane select[aria-label="选择思考等级"]');
       return model instanceof HTMLSelectElement && !model.disabled && effort instanceof HTMLSelectElement && !effort.disabled;
     }, null, { timeout: 60_000 });
+    if (secondCodexModel) assert(await activeModel().inputValue() === secondCodexModel, "Codex 新会话没有沿用上次模型。");
     assert(await activeEffort().inputValue() === targetCodexEffort, "Codex 新会话没有沿用上次思考等级。");
     const composerPointerStyle = await activeInput().evaluate(element => {
       const style = getComputedStyle(element);

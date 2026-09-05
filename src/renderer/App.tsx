@@ -2,7 +2,7 @@ import { ArrowLeftToLine, ArrowRight, ArrowRightToLine, Download, FolderOpen, Gi
 import { useCallback, useEffect, useMemo, useRef, useState, type CSSProperties, type DragEvent, type MouseEvent, type PointerEvent as ReactPointerEvent } from "react";
 import type { AgentCapabilities, AgentOperation, AgentProvider, AgentRequestContext } from "../shared/agentProtocol";
 import { providerDisplayName } from "../shared/providerMetadata";
-import { DEFAULT_BASE_FONT_SIZE, type ClaudeRuntimeStatus, type CodexCliUpdateStatus, type CompactionRecord, type CodexDefaults, type DesktopPreferences, type DesktopUpdateStatus, type JsonObject } from "../shared/protocol";
+import { DEFAULT_BASE_FONT_SIZE, type ClaudeRuntimeStatus, type CompactionRecord, type CodexDefaults, type DesktopPreferences, type DesktopUpdateStatus, type JsonObject } from "../shared/protocol";
 import {
   asRecord, basename, DEFAULT_THEME, emptySession, findModelOption, historyThread,
   EMPTY_CODEX_DEFAULTS, normalizedDirectory, numberValue, sameDirectory, stringValue, upsertHistoryEntry,
@@ -65,7 +65,6 @@ const READ_ONLY_SESSION_OPERATIONS = new Set<AgentOperation>([
 ]);
 
 const INITIAL_UPDATE_STATUS: DesktopUpdateStatus = { phase: "idle", currentVersion: "", message: "等待检查更新。", repositoryUrl: "https://github.com/yk-yla/agentdesk" };
-const INITIAL_CLI_UPDATE_STATUS: CodexCliUpdateStatus = { phase: "idle", currentVersion: "", message: "正在读取 Codex CLI 版本。" };
 const INITIAL_CLAUDE_RUNTIME_STATUS: ClaudeRuntimeStatus = { phase: "idle", binarySource: "sdk", binaryVersion: "", sdkVersion: "", credentialsAvailable: false, credentialSource: "unavailable", credentialMessage: "正在读取 Claude 配置。", message: "等待检查更新。" };
 const CLAUDE_HISTORY_PAGE_SIZE = 200;
 
@@ -221,7 +220,6 @@ export default function App() {
   const [preferences, setPreferences] = useState<DesktopPreferences>({ lastWorkspace: "", favoriteWorkspaces: [], theme: DEFAULT_THEME });
   const recentCommandUsage = (preferences.recentCommandUsage || {}) as CommandUsage;
   const [updateStatus, setUpdateStatus] = useState<DesktopUpdateStatus>(INITIAL_UPDATE_STATUS);
-  const [cliUpdateStatus, setCliUpdateStatus] = useState<CodexCliUpdateStatus>(INITIAL_CLI_UPDATE_STATUS);
   const [claudeRuntimeStatus, setClaudeRuntimeStatus] = useState<ClaudeRuntimeStatus>(INITIAL_CLAUDE_RUNTIME_STATUS);
   const [attachments, setAttachments] = useState<Record<string, ImageAttachment[]>>({});
   const [queuedMessages, setQueuedMessages] = useState<Record<string, QueuedMessage[]>>({});
@@ -477,7 +475,7 @@ export default function App() {
   const createSessionState = useCallback((cwd: string, options?: { threadId?: string; title?: string; provider?: AgentProvider; historyLoading?: boolean; codexHome?: "agentdesk" | "default" }) => {
     const id = `session-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
     const provider = options?.provider || "codex";
-    const defaults = newSessionDefaults(provider, providerModelsRef.current[provider], defaultsRef.current, providerCapabilitiesRef.current[provider], preferencesRef.current.lastReasoningEfforts?.[provider]);
+    const defaults = newSessionDefaults(provider, providerModelsRef.current[provider], defaultsRef.current, providerCapabilitiesRef.current[provider], preferencesRef.current.lastReasoningEfforts?.[provider], preferencesRef.current.lastModels?.[provider]);
     const session = emptySession(id, cwd, defaults.model, defaults.effort, provider);
     session.capabilities = defaults.capabilities;
     session.historyLoading = options?.historyLoading === true;
@@ -759,6 +757,14 @@ export default function App() {
     void bridge.savePreferences({ lastReasoningEfforts }).catch(() => undefined);
   }, [bridge]);
 
+  const rememberProviderModel = useCallback((provider: AgentProvider, model: string) => {
+    if (!model || preferencesRef.current.lastModels?.[provider] === model) return;
+    const lastModels = { ...preferencesRef.current.lastModels, [provider]: model };
+    preferencesRef.current = { ...preferencesRef.current, lastModels };
+    setPreferences((current) => ({ ...current, lastModels }));
+    void bridge.savePreferences({ lastModels }).catch(() => undefined);
+  }, [bridge]);
+
   const favoriteHistory = useMemo(() => favoriteHistoryEntries(history, preferences), [history, preferences]);
 
   useEffect(() => {
@@ -914,27 +920,6 @@ export default function App() {
     setUpdateStatus(await bridge.checkForUpdates());
   }, [bridge]);
 
-  const checkCodexCliUpdates = useCallback(async () => {
-    setCliUpdateStatus(await bridge.checkCodexCliUpdates());
-  }, [bridge]);
-
-  const updateCodexCli = useCallback(async () => {
-    setCliUpdateStatus(await bridge.updateCodexCli());
-  }, [bridge]);
-  const checkClaudeCodeUpdates = useCallback(async () => {
-    setClaudeRuntimeStatus(await bridge.checkClaudeCodeUpdates());
-  }, [bridge]);
-  const updateClaudeCode = useCallback(async () => {
-    const hasActiveClaudeSession = Object.values(sessionsRef.current).some((session) => session.provider === "claude" && sessionHasActiveWork(session));
-    if (hasActiveClaudeSession && !window.confirm("更新 Claude Code 会停止正在运行的 Claude 会话、Query、Worker 和后代进程，Codex 会话不会停止。确定继续吗？")) return;
-    let status = await bridge.updateClaudeCode(false);
-    if (!status.integrityVerified && status.phase === "available") {
-      const signer = status.integritySigner || "未检测到签名者";
-      if (!window.confirm(`无法验证 Claude 发布方完整性。\n\n签名者：${signer}\n\n只有你确认继续承担风险后才会安装，是否继续？`)) return;
-      status = await bridge.updateClaudeCode(true);
-    }
-    setClaudeRuntimeStatus(status);
-  }, [bridge]);
   const downloadUpdate = useCallback(async () => {
     setUpdateStatus(await bridge.downloadUpdate());
   }, [bridge]);
@@ -1099,7 +1084,8 @@ export default function App() {
     });
     if (!session.threadId) {
       settingsCoordinatorRef.current.setConfirmed(sessionId, requested);
-      if (field === "effort") rememberProviderEffort(session.provider, requested.effort);
+      rememberProviderModel(session.provider, requested.model);
+      rememberProviderEffort(session.provider, requested.effort);
       return;
     }
     const request = settingsCoordinatorRef.current.enqueue(sessionId, requested, async (target) => {
@@ -1116,7 +1102,8 @@ export default function App() {
           tokenUsage: tokenUsageForModel(current, requested.model, preferencesRef.current),
           errorText: "",
         }));
-        if (field === "effort") rememberProviderEffort(session.provider, requested.effort);
+        rememberProviderModel(session.provider, requested.model);
+        rememberProviderEffort(session.provider, requested.effort);
       }
     } catch (error) {
       if (request.isLatest()) {
@@ -1131,7 +1118,7 @@ export default function App() {
         }));
       }
     }
-  }, [rememberProviderEffort, requestForSession, updateSession]);
+  }, [rememberProviderEffort, rememberProviderModel, requestForSession, updateSession]);
 
   const setCollaborationMode = useCallback(async (sessionId: string, mode: CollaborationMode) => {
     const session = sessionsRef.current[sessionId];
@@ -2566,18 +2553,6 @@ export default function App() {
     };
   }, [bridge]);
 
-  useEffect(() => {
-    let active = true;
-    const unsubscribe = bridge.onCodexCliUpdateStatus((status) => { if (active) setCliUpdateStatus(status); });
-    void bridge.getCodexCliUpdateStatus()
-      .then((status) => { if (active) setCliUpdateStatus(status); })
-      .catch(() => { if (active) setCliUpdateStatus((current) => ({ ...current, phase: "error", message: "读取 Codex CLI 更新状态失败。" })); });
-    return () => {
-      active = false;
-      unsubscribe();
-    };
-  }, [bridge]);
-
   const skillSessionKeys = useMemo(() => {
     const keys: string[] = [];
     for (const session of Object.values(sessions)) {
@@ -2608,10 +2583,11 @@ export default function App() {
   }, [agentClient, providerEvents]);
 
   const lastReasoningEfforts = preferences.lastReasoningEfforts;
+  const lastModels = preferences.lastModels;
   const modelContextWindows = preferences.modelContextWindows;
   useEffect(() => {
     setSessions((current) => Object.fromEntries(Object.entries(current).map(([id, session]) => {
-      const withDefaults = applyProviderModelDefaults(session, providerModels[session.provider], codexDefaults, lastReasoningEfforts?.[session.provider]);
+      const withDefaults = applyProviderModelDefaults(session, providerModels[session.provider], codexDefaults, lastReasoningEfforts?.[session.provider], lastModels?.[session.provider]);
       const model = withDefaults.model;
       if (!model) return [id, session];
       const tokenUsage = tokenUsageForModel(session, model, { ...preferences, modelContextWindows });
@@ -2622,7 +2598,7 @@ export default function App() {
         tokenUsage,
       }];
     })));
-  }, [providerModels, codexDefaults, lastReasoningEfforts, modelContextWindows]);
+  }, [providerModels, codexDefaults, lastReasoningEfforts, lastModels, modelContextWindows]);
 
   useEffect(() => {
     return historyController.loadInitial(workspace);
@@ -2770,22 +2746,16 @@ export default function App() {
       theme: preferences.theme,
       externalTerminal: preferences.externalTerminal,
       updateStatus,
-      cliUpdateStatus,
-      claudeStatus: claudeRuntimeStatus,
     },
     actions: {
       onSavePreference: savePreference,
       onCheckForUpdates: checkForUpdates,
-      onCheckCodexCliUpdates: checkCodexCliUpdates,
-      onUpdateCodexCli: updateCodexCli,
-      onCheckClaude: checkClaudeCodeUpdates,
-      onUpdateClaude: updateClaudeCode,
       onDownloadUpdate: downloadUpdate,
       onInstallUpdate: installUpdate,
       onOpenUpdateRepository: openUpdateRepository,
       onExportDiagnostics: bridge.exportDiagnostics,
     },
-  }), [bridge.exportDiagnostics, checkClaudeCodeUpdates, checkCodexCliUpdates, checkForUpdates, claudeRuntimeStatus, cliUpdateStatus, downloadUpdate, installUpdate, openUpdateRepository, preferences.theme, savePreference, updateClaudeCode, updateCodexCli, updateStatus]);
+  }), [bridge.exportDiagnostics, checkForUpdates, downloadUpdate, installUpdate, openUpdateRepository, preferences.externalTerminal, preferences.theme, savePreference, updateStatus]);
 
   const renderPane = (pane: PaneState) => {
     const session = sessions[pane.activeTabId];

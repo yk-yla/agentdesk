@@ -4,7 +4,7 @@ import type { AppLogger } from "../logger";
 import { logErrorDetails } from "../logger";
 import { randomUUID } from "node:crypto";
 import { normalizeFavoriteSessionSummaries } from "../../shared/favoriteSessions";
-import { normalizeBaseFontSize, normalizeClaudeModelCache, normalizeCompactionCounts, normalizeCodexCompactionCounts, normalizeDismissedSessionNotices, normalizeExternalTerminal, normalizeLastReasoningEfforts, normalizeModelContextWindows, normalizeRecentCommandUsage, normalizeSidebarWidth, normalizeTheme } from "../preferencesStore";
+import { normalizeBaseFontSize, normalizeClaudeModelCache, normalizeCompactionCounts, normalizeCodexCompactionCounts, normalizeDismissedSessionNotices, normalizeExternalTerminal, normalizeLastModels, normalizeLastReasoningEfforts, normalizeModelContextWindows, normalizeRecentCommandUsage, normalizeSidebarWidth, normalizeTheme } from "../preferencesStore";
 
 const AGENT_PROVIDERS = new Set<AgentProvider>(["codex", "claude"]);
 const AGENT_OPERATIONS = new Set<AgentOperation>([
@@ -117,6 +117,7 @@ export function sanitizePreferencesPatch(value: unknown): Partial<DesktopPrefere
     ...(Array.isArray(patch.favoriteSessions) ? { favoriteSessions: patch.favoriteSessions.filter((item): item is string => typeof item === "string").slice(0, 2_000) } : {}),
     ...(objectRecord(patch.favoriteSessionSummaries) ? { favoriteSessionSummaries: normalizeFavoriteSessionSummaries(patch.favoriteSessionSummaries) } : {}),
     ...(objectRecord(patch.modelContextWindows) ? { modelContextWindows: normalizeModelContextWindows(patch.modelContextWindows) } : {}),
+    ...(objectRecord(patch.lastModels) ? { lastModels: normalizeLastModels(patch.lastModels) } : {}),
     ...(objectRecord(patch.claudeModelCache) ? (() => {
       const cache = normalizeClaudeModelCache(patch.claudeModelCache);
       return cache ? { claudeModelCache: cache } : {};

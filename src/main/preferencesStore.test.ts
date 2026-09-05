@@ -42,6 +42,7 @@ describe("PreferencesStore", () => {
         invalid: { tokens: -1, updatedAt: 1 },
       },
       lastReasoningEfforts: { codex: " xhigh ", claude: "high", unknown: "medium" },
+      lastModels: { codex: " gpt-6-astra ", claude: "sonnet", unknown: "other" },
       recentCommandUsage: { "command:status": 20, "skill:review": 30, invalid: -1, bad: "later" },
       codexCompactionCounts: {
         "codex:thread-1": { count: 12, eventIds: ["compact-1", "compact-2", "compact-1"], updatedAt: 100 },
@@ -65,6 +66,7 @@ describe("PreferencesStore", () => {
     assert.deepEqual(preferences.sessionAliases, { valid: "Title" });
     assert.deepEqual(preferences.modelContextWindows, { valid: { tokens: 200_000, updatedAt: 2 } });
     assert.deepEqual(preferences.lastReasoningEfforts, { codex: "xhigh", claude: "high" });
+    assert.deepEqual(preferences.lastModels, { codex: "gpt-6-astra", claude: "sonnet" });
     assert.deepEqual(preferences.recentCommandUsage, { "skill:review": 30, "command:status": 20 });
     assert.deepEqual(preferences.codexCompactionCounts, { "codex:thread-1": { count: 12, eventIds: ["compact-1", "compact-2"], updatedAt: 100 } });
     assert.deepEqual(preferences.compactionCounts, {

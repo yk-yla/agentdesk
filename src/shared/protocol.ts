@@ -117,6 +117,8 @@ export interface DesktopPreferences {
   favoriteSessionSummaries?: Record<string, FavoriteSessionSummary>;
   theme: ThemeId;
   modelContextWindows?: Record<string, ModelContextWindowCacheEntry>;
+  /** 最近一次为每个 Provider 选择的模型，用于新建会话默认值。 */
+  lastModels?: Partial<Record<AgentProvider, string>>;
   claudeModelCache?: ClaudeModelCache;
   lastReasoningEfforts?: Partial<Record<AgentProvider, string>>;
   /** 斜杠命令和 Skill 的最近使用时间，键为 command:name 或 skill:name。 */
