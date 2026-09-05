@@ -123,16 +123,17 @@ describe("CodexBackend", () => {
       request: async (_method, params) => {
         calls.push(params);
         if (params.initialTurnsPage) throw new Error(encodeCodexRpcError({ method: "thread/resume", code: -32602, message: "unknown field initialTurnsPage" }));
-        return { thread: { id: "thread-1", cwd: "D:\\work", turns: [] } };
+        return { thread: { id: "thread-1", cwd: "D:\\work", turns: [{ id: "legacy-turn" }] } };
       },
     }));
 
-    const result = await backend.request("resumeSession", { threadId: "thread-1", cwd: "D:\\work" }, { sessionId: "ui-1" }) as { thread: { id: string } };
+    const result = await backend.request("resumeSession", { threadId: "thread-1", cwd: "D:\\work" }, { sessionId: "ui-1" }) as { thread: { id: string; turns: Array<{ id: string }> } };
 
     assert.equal(calls.length, 2);
     assert.equal(calls[1].excludeTurns, true);
     assert.equal(calls[1].initialTurnsPage, undefined);
     assert.equal(result.thread.id, "thread-1");
+    assert.deepEqual(result.thread.turns, [{ id: "legacy-turn" }]);
   });
 
   it("isolates each editable session runtime and scopes an exit to its page", async () => {

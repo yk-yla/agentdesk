@@ -142,9 +142,16 @@ function record(value: unknown): Record<string, unknown> {
 function normalizeHistoryResult(operation: AgentOperation, value: unknown, params: JsonObject) {
   if (operation !== "resumeSession" && operation !== "readSessionPage") return value;
   const payload = record(value);
+  const hasInitialTurnsPage = operation === "resumeSession"
+    && Boolean(payload.initialTurnsPage)
+    && typeof payload.initialTurnsPage === "object"
+    && !Array.isArray(payload.initialTurnsPage);
   const page = operation === "resumeSession" ? record(payload.initialTurnsPage) : payload;
   const data = Array.isArray(page.data) ? [...page.data].reverse() : [];
   const thread = operation === "resumeSession" ? record(payload.thread) : {};
+  const turns = operation === "resumeSession" && !hasInitialTurnsPage && Array.isArray(thread.turns)
+    ? thread.turns
+    : data;
   const nextCursor = typeof page.nextCursor === "string" && page.nextCursor ? page.nextCursor : null;
   return {
     ...payload,
@@ -152,7 +159,7 @@ function normalizeHistoryResult(operation: AgentOperation, value: unknown, param
       ...thread,
       id: typeof thread.id === "string" ? thread.id : params.threadId,
       ...(typeof thread.cwd === "string" ? {} : typeof params.cwd === "string" ? { cwd: params.cwd } : {}),
-      turns: data,
+      turns,
     },
     nextCursor,
     historyHasMoreBefore: Boolean(nextCursor),
